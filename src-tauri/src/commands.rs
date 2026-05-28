@@ -32,8 +32,21 @@ pub fn get_playback_state(state: tauri::State<PlayerState>) -> Result<serde_json
         "is_playing": player.is_playing(),
         "is_paused": player.is_paused(),
         "current_path": player.get_current_path()
-            .and_then(|p| p.to_str().map(|s| s.to_string()))
+            .and_then(|p| p.to_str().map(|s| s.to_string())),
+        "position_seconds": player.position_seconds(),
+        "duration_seconds": player.duration_seconds(),
+        "volume": player.volume(),
     }))
+}
+
+#[tauri::command]
+pub fn seek_track(seconds: f64, state: tauri::State<PlayerState>) -> Result<(), String> {
+    state.0.lock().unwrap().seek(seconds)
+}
+
+#[tauri::command]
+pub fn set_volume(volume: f32, state: tauri::State<PlayerState>) -> Result<(), String> {
+    state.0.lock().unwrap().set_volume(volume)
 }
 
 #[tauri::command]

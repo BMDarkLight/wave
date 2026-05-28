@@ -1,4 +1,7 @@
+use rodio::{Decoder, Source};
 use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -6,18 +9,57 @@ use std::sync::Mutex;
 pub struct Track {
     pub path: String,
     pub name: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub format: String,
+    pub duration_seconds: Option<f64>,
 }
 
 impl Track {
     pub fn from_path(path: String) -> Self {
-        let name = PathBuf::from(&path)
+        let path_buf = PathBuf::from(&path);
+        let file_stem = path_buf
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Unknown");
+        let name = path_buf
             .file_name()
-            .and_then(|n| n.to_str())
+            .and_then(|name| name.to_str())
             .unwrap_or("Unknown")
             .to_string();
-        
-        Self { path, name }
+        let format = path_buf
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("Audio")
+            .to_uppercase();
+        let album = path_buf
+            .parent()
+            .and_then(|parent| parent.file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("Local Files")
+            .to_string();
+        let (artist, title) = file_stem
+            .split_once(" - ")
+            .map(|(artist, title)| (artist.to_string(), title.to_string()))
+            .unwrap_or_else(|| ("Unknown Artist".to_string(), file_stem.to_string()));
+
+        Self {
+            path: path.clone(),
+            name,
+            title,
+            artist,
+            album,
+            format,
+            duration_seconds: read_duration_seconds(&path),
+        }
     }
+}
+
+fn read_duration_seconds(path: &str) -> Option<f64> {
+    let file = File::open(path).ok()?;
+    let source = Decoder::new(BufReader::new(file)).ok()?;
+    source.total_duration().map(|duration| duration.as_secs_f64())
 }
 
 pub struct Playlist {
@@ -59,4 +101,3 @@ impl Playlist {
         self.tracks.lock().unwrap().get(index).cloned()
     }
 }
-

@@ -25,6 +25,8 @@ pub fn run() {
             commands::resume_track,
             commands::stop_track,
             commands::get_playback_state,
+            commands::seek_track,
+            commands::set_volume,
             commands::add_track_to_playlist,
             commands::remove_track_from_playlist,
             commands::get_playlist,
