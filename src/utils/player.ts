@@ -38,13 +38,34 @@ export interface PlaybackState {
 }
 
 export interface Track {
+  id: string;
   path: string;
   name: string;
   title: string;
   artist: string;
   album: string;
+  album_artist: string | null;
+  genre: string | null;
+  year: number | null;
+  track_number: number | null;
+  disc_number: number | null;
   format: string;
   duration_seconds: number | null;
+  sample_rate: number | null;
+  channels: number | null;
+  bit_depth: number | null;
+  file_size: number;
+  modified_at: number;
+  indexed_at: number;
+}
+
+export interface PlaylistInfo {
+  id: string;
+  profile_id: string;
+  name: string;
+  track_count: number;
+  created_at: number;
+  updated_at: number;
 }
 
 export const playTrack = (path: string): Promise<void> => {
@@ -87,7 +108,10 @@ export const selectAudioFile = async (multiple: boolean = false): Promise<string
     filters: [
       {
         name: "Audio",
-        extensions: ["mp3", "wav", "flac", "aac", "ogg", "m4a", "opus", "mka"],
+        extensions: [
+          "aac", "aiff", "alac", "caf", "flac", "m4a", "m4b", "m4p", "mka", "mkv",
+          "mp1", "mp2", "mp3", "mp4", "oga", "ogg", "opus", "wav", "wave", "weba",
+        ],
       },
     ],
     title: multiple ? "Select Audio Files" : "Select Audio File",
@@ -123,4 +147,28 @@ export const clearPlaylist = (): Promise<void> => {
 
 export const playTrackFromPlaylist = (index: number): Promise<void> => {
   return safeInvoke("play_track_from_playlist", { index });
+};
+
+export const indexMusicLibrary = (
+  directory: string,
+  profileId?: string,
+  playlistName?: string
+): Promise<Track[]> => {
+  return safeInvoke<Track[]>("index_music_library", {
+    directory,
+    profileId,
+    playlistName,
+  });
+};
+
+export const listPlaylists = (profileId?: string): Promise<PlaylistInfo[]> => {
+  return safeInvoke<PlaylistInfo[]>("list_playlists", { profileId });
+};
+
+export const getLibraryDatabasePath = (): Promise<string> => {
+  return safeInvoke<string>("get_library_database_path");
+};
+
+export const getSupportedAudioExtensions = (): Promise<string[]> => {
+  return safeInvoke<string[]>("get_supported_audio_extensions");
 };

@@ -1,9 +1,10 @@
 use std::sync::Mutex;
 use crate::audio::player::AudioPlayer;
-use crate::playlist::{Playlist, Track};
+use crate::library::{Library, PlaylistInfo};
+use crate::metadata::{supported_audio_extensions, Track};
 
 pub struct PlayerState(pub Mutex<AudioPlayer>);
-pub struct PlaylistState(pub Mutex<Playlist>);
+pub struct LibraryState(pub Mutex<Library>);
 
 #[tauri::command]
 pub fn play_track(path: String, state: tauri::State<PlayerState>) -> Result<(), String> {
@@ -52,42 +53,72 @@ pub fn set_volume(volume: f32, state: tauri::State<PlayerState>) -> Result<(), S
 #[tauri::command]
 pub fn add_track_to_playlist(
     path: String,
-    playlist: tauri::State<PlaylistState>,
+    library: tauri::State<LibraryState>,
 ) -> Result<Track, String> {
-    Ok(playlist.0.lock().unwrap().add_track(path))
+    library.0.lock().unwrap().add_track_to_default_playlist(path)
 }
 
 #[tauri::command]
 pub fn remove_track_from_playlist(
     index: usize,
-    playlist: tauri::State<PlaylistState>,
+    library: tauri::State<LibraryState>,
 ) -> Result<(), String> {
-    playlist.0.lock().unwrap().remove_track(index)
+    library.0.lock().unwrap().remove_track_from_default_playlist(index)
 }
 
 #[tauri::command]
-pub fn get_playlist(playlist: tauri::State<PlaylistState>) -> Result<Vec<Track>, String> {
-    Ok(playlist.0.lock().unwrap().get_tracks())
+pub fn get_playlist(library: tauri::State<LibraryState>) -> Result<Vec<Track>, String> {
+    library.0.lock().unwrap().get_default_playlist_tracks()
 }
 
 #[tauri::command]
-pub fn clear_playlist(playlist: tauri::State<PlaylistState>) -> Result<(), String> {
-    playlist.0.lock().unwrap().clear();
-    Ok(())
+pub fn clear_playlist(library: tauri::State<LibraryState>) -> Result<(), String> {
+    library.0.lock().unwrap().clear_default_playlist()
 }
 
 #[tauri::command]
 pub fn play_track_from_playlist(
     index: usize,
     player: tauri::State<PlayerState>,
-    playlist: tauri::State<PlaylistState>,
+    library: tauri::State<LibraryState>,
 ) -> Result<(), String> {
-    let track = playlist
+    let track = library
         .0
         .lock()
         .unwrap()
-        .get_track(index)
+        .get_default_playlist_track(index)?
         .ok_or("Track not found")?;
     player.0.lock().unwrap().play(&track.path)
 }
 
+#[tauri::command]
+pub fn index_music_library(
+    directory: String,
+    profile_id: Option<String>,
+    playlist_name: Option<String>,
+    library: tauri::State<LibraryState>,
+) -> Result<Vec<Track>, String> {
+    library
+        .0
+        .lock()
+        .unwrap()
+        .index_directory(profile_id, playlist_name, directory)
+}
+
+#[tauri::command]
+pub fn list_playlists(
+    profile_id: Option<String>,
+    library: tauri::State<LibraryState>,
+) -> Result<Vec<PlaylistInfo>, String> {
+    library.0.lock().unwrap().list_playlists(profile_id)
+}
+
+#[tauri::command]
+pub fn get_library_database_path(library: tauri::State<LibraryState>) -> Result<String, String> {
+    Ok(library.0.lock().unwrap().db_path())
+}
+
+#[tauri::command]
+pub fn get_supported_audio_extensions() -> Result<Vec<String>, String> {
+    Ok(supported_audio_extensions())
+}

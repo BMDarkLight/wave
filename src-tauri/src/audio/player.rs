@@ -64,7 +64,7 @@ impl AudioPlayer {
     ) -> Result<(impl Source<Item = f32> + Send + 'static, Option<Duration>), String> {
         let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
         let source = Decoder::new(BufReader::new(file))
-            .map_err(|e| format!("Failed to decode audio: {}", e))?;
+            .map_err(|e| format!("Failed to decode audio. This format may not be supported by the current audio backend: {}", e))?;
         let duration = source.total_duration();
         Ok((source.convert_samples().skip_duration(offset), duration))
     }
