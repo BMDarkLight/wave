@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "app.bmdarklight.wave",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npx vite",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
