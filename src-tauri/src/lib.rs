@@ -1,17 +1,24 @@
 mod audio;
 mod commands;
+mod error;
 mod library;
 mod metadata;
 
 use commands::{LibraryState, PlayerState};
 use audio::player::AudioPlayer;
 use tauri::Manager;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
     let player = AudioPlayer::new()
         .expect("Failed to initialize audio player");
-    
+
     let player_state = PlayerState(std::sync::Mutex::new(player));
 
     tauri::Builder::default()
@@ -40,6 +47,12 @@ pub fn run() {
             commands::list_playlists,
             commands::get_library_database_path,
             commands::get_supported_audio_extensions,
+            commands::get_queue,
+            commands::play_next,
+            commands::play_previous,
+            commands::set_shuffle,
+            commands::set_repeat,
+            commands::get_playback_mode,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
