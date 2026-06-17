@@ -5,6 +5,7 @@ import {
   getFileName,
   getPlaybackState,
   getPlaylist,
+  listenToMediaControls,
   pauseTrack,
   playTrack,
   playTrackFromPlaylist,
@@ -14,6 +15,7 @@ import {
   selectAudioFile,
   setPlayerVolume,
   stopTrack,
+  updateMediaMetadata,
   type PlaybackState,
   type Track,
 } from "./utils/player";
@@ -89,6 +91,43 @@ function App() {
     const interval = setInterval(() => updatePlaybackState().catch(() => {}), 500);
     return () => clearInterval(interval);
   }, []);
+
+  // Push track metadata to OS media controls (Control Center, SMTC, MPRIS)
+  useEffect(() => {
+    if (currentTrack && playbackState.is_playing) {
+      updateMediaMetadata({
+        title: currentTrack.title,
+        artist: currentTrack.artist,
+        album: currentTrack.album,
+        duration_seconds: currentTrack.duration_seconds,
+        cover_url: null,
+      }).catch(console.error);
+    }
+  }, [currentTrack, playbackState.is_playing]);
+
+  // Listen for OS media control events (play/pause/next/prev/seek from OS)
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    const setup = async () => {
+      unlisten = await listenToMediaControls({
+        onPlay: () => {
+          if (!playbackState.is_playing) resumeTrack().catch(console.error);
+        },
+        onPause: () => {
+          if (playbackState.is_playing) pauseTrack().catch(console.error);
+        },
+        onNext: () => handleNext(),
+        onPrevious: () => handlePrevious(),
+        onSetPosition: (seconds) => {
+          if (playbackState.current_path) seekTrack(seconds).catch(console.error);
+        },
+      });
+    };
+    setup();
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [playbackState.is_playing, playbackState.current_path]);
 
   const handleAddTrack = async (multiple = false) => {
     try {
