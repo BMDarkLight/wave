@@ -265,28 +265,23 @@ impl AudioPlayer {
 
     fn build_source(
         path: &str,
-        offset: Duration,
     ) -> Result<(impl Source<Item = f32> + Send + 'static, Option<Duration>), String> {
-        let file = File::open(path).map_err(|e| format!("Failed to open file: {}", e))?;
-        let source = Decoder::new(BufReader::new(file)).map_err(|e| {
-            format!(
-                "Failed to decode audio. This format may not be supported: {}",
-                e
-            )
-        })?;
+        let file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
+        let source = Decoder::new(BufReader::new(file))
+            .map_err(|e| format!("Failed to decode audio: {e}"))?;
         let duration = source.total_duration();
-        Ok((source.convert_samples().skip_duration(offset), duration))
+        Ok((source.convert_samples(), duration))
     }
 
-    fn play_from(&mut self, path: &str, offset: Duration, should_play: bool) -> Result<(), String> {
+    fn play_from(&mut self, path: &str, should_play: bool) -> Result<(), String> {
         // Stop and drop the previous sink.
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
 
-        let (source, duration) = Self::build_source(path, offset)?;
+        let (source, duration) = Self::build_source(path)?;
         let sink = Sink::try_new(&self.handle)
-            .map_err(|e| format!("Failed to create sink: {}", e))?;
+            .map_err(|e| format!("Failed to create sink: {e}"))?;
         sink.set_volume(self.volume);
         sink.append(source);
 
@@ -300,7 +295,7 @@ impl AudioPlayer {
         self.current_path = Some(PathBuf::from(path));
         self.clock = PlaybackClock {
             started_at: should_play.then(Instant::now),
-            elapsed_before_start: offset,
+            elapsed_before_start: Duration::ZERO,
             duration,
         };
 
@@ -308,7 +303,7 @@ impl AudioPlayer {
     }
 
     pub fn play(&mut self, path: &str) -> Result<(), String> {
-        self.play_from(path, Duration::ZERO, true)
+        self.play_from(path, true)
     }
 
     pub fn pause(&mut self) -> Result<(), String> {
@@ -344,14 +339,23 @@ impl AudioPlayer {
     }
 
     pub fn seek(&mut self, seconds: f64) -> Result<(), String> {
-        let path = self
-            .current_path
-            .as_ref()
-            .and_then(|p| p.to_str().map(str::to_string))
-            .ok_or("No track selected")?;
-        let was_playing = self.is_playing();
         let offset = Duration::from_secs_f64(seconds.max(0.0));
-        self.play_from(&path, offset, was_playing)
+        
+        // Use rodio 0.19's native seek — instant, no re-decoding.
+        match &self.sink {
+            Some(sink) => {
+                sink.try_seek(offset)
+                    .map_err(|e| format!("Seek failed: {e}"))?;
+                
+                // Update our clock to match.
+                let was_playing = self.is_playing();
+                self.clock.elapsed_before_start = offset;
+                self.clock.started_at = was_playing.then(Instant::now);
+                
+                Ok(())
+            }
+            None => Err("No track loaded".to_string()),
+        }
     }
 
     pub fn set_volume(&mut self, volume: f32) -> Result<(), String> {
