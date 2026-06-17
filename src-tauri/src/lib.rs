@@ -2,9 +2,10 @@ mod audio;
 mod commands;
 mod error;
 mod library;
+mod media_controls;
 mod metadata;
 
-use commands::{LibraryState, PlayerState};
+use commands::{LibraryState, MediaBridgeState, PlayerState};
 use audio::player::AudioPlayer;
 use tauri::Manager;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -28,6 +29,16 @@ pub fn run() {
         .setup(|app| {
             let library = library::Library::new(app.handle())?;
             app.manage(LibraryState(std::sync::Mutex::new(library)));
+
+            match media_controls::MediaBridge::new(app.handle()) {
+                Ok(bridge) => {
+                    app.manage(MediaBridgeState(std::sync::Mutex::new(bridge)));
+                }
+                Err(e) => {
+                    tracing::warn!("OS media controls unavailable: {e}");
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -53,6 +64,7 @@ pub fn run() {
             commands::set_shuffle,
             commands::set_repeat,
             commands::get_playback_mode,
+            commands::update_media_metadata,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

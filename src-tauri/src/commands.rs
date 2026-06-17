@@ -1,10 +1,12 @@
 use std::sync::Mutex;
 use crate::audio::player::AudioPlayer;
 use crate::library::{Library, PlaylistInfo};
+use crate::media_controls::{MediaBridge, TrackMetadata};
 use crate::metadata::{supported_audio_extensions, Track};
 
 pub struct PlayerState(pub Mutex<AudioPlayer>);
 pub struct LibraryState(pub Mutex<Library>);
+pub struct MediaBridgeState(pub Mutex<MediaBridge>);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -16,26 +18,64 @@ fn lock_library<'a>(state: &'a tauri::State<'a, LibraryState>) -> Result<std::sy
     state.0.lock().map_err(|_| "Failed to lock library state".to_string())
 }
 
+/// Lock the bridge if it was successfully initialized; silently skip otherwise.
+fn with_bridge<F>(bridge: &tauri::State<'_, MediaBridgeState>, f: F)
+where
+    F: FnOnce(&mut MediaBridge),
+{
+    if let Ok(mut b) = bridge.0.lock() {
+        f(&mut b);
+    }
+}
+
 // ── Playback commands ─────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn play_track(path: String, state: tauri::State<PlayerState>) -> Result<(), String> {
-    lock_player(&state)?.play(&path)
+pub fn play_track(
+    path: String,
+    state: tauri::State<PlayerState>,
+    bridge: tauri::State<MediaBridgeState>,
+) -> Result<(), String> {
+    lock_player(&state)?.play(&path)?;
+    with_bridge(&bridge, |b| b.set_playing(0.0));
+    Ok(())
 }
 
 #[tauri::command]
-pub fn pause_track(state: tauri::State<PlayerState>) -> Result<(), String> {
-    lock_player(&state)?.pause()
+pub fn pause_track(
+    state: tauri::State<PlayerState>,
+    bridge: tauri::State<MediaBridgeState>,
+) -> Result<(), String> {
+    let pos = {
+        let player = lock_player(&state)?;
+        let pos = player.position_seconds();
+        drop(player);
+        pos
+    };
+    lock_player(&state)?.pause()?;
+    with_bridge(&bridge, |b| b.set_paused(pos));
+    Ok(())
 }
 
 #[tauri::command]
-pub fn resume_track(state: tauri::State<PlayerState>) -> Result<(), String> {
-    lock_player(&state)?.resume()
+pub fn resume_track(
+    state: tauri::State<PlayerState>,
+    bridge: tauri::State<MediaBridgeState>,
+) -> Result<(), String> {
+    let pos = lock_player(&state)?.position_seconds();
+    lock_player(&state)?.resume()?;
+    with_bridge(&bridge, |b| b.set_playing(pos));
+    Ok(())
 }
 
 #[tauri::command]
-pub fn stop_track(state: tauri::State<PlayerState>) -> Result<(), String> {
-    lock_player(&state)?.stop()
+pub fn stop_track(
+    state: tauri::State<PlayerState>,
+    bridge: tauri::State<MediaBridgeState>,
+) -> Result<(), String> {
+    lock_player(&state)?.stop()?;
+    with_bridge(&bridge, |b| b.set_stopped());
+    Ok(())
 }
 
 #[tauri::command]
@@ -54,8 +94,15 @@ pub fn get_playback_state(state: tauri::State<PlayerState>) -> Result<serde_json
 }
 
 #[tauri::command]
-pub fn seek_track(seconds: f64, state: tauri::State<PlayerState>) -> Result<(), String> {
-    lock_player(&state)?.seek(seconds)
+pub fn seek_track(
+    seconds: f64,
+    state: tauri::State<PlayerState>,
+    bridge: tauri::State<MediaBridgeState>,
+) -> Result<(), String> {
+    lock_player(&state)?.seek(seconds)?;
+    let playing = lock_player(&state)?.is_playing();
+    with_bridge(&bridge, |b| b.update_position(seconds, playing));
+    Ok(())
 }
 
 #[tauri::command]
@@ -96,11 +143,22 @@ pub fn play_track_from_playlist(
     index: usize,
     player: tauri::State<PlayerState>,
     library: tauri::State<LibraryState>,
+    bridge: tauri::State<MediaBridgeState>,
 ) -> Result<(), String> {
     let track = lock_library(&library)?
         .get_default_playlist_track(index)?
         .ok_or("Track not found at that index")?;
-    lock_player(&player)?.play(&track.path)
+    lock_player(&player)?.play(&track.path)?;
+    with_bridge(&bridge, |b| {
+        b.now_playing(&TrackMetadata {
+            title: Some(track.title.clone()),
+            artist: Some(track.artist.clone()),
+            album: Some(track.album.clone()),
+            duration_seconds: track.duration_seconds,
+            cover_url: None,
+        });
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -145,21 +203,27 @@ pub fn get_queue(state: tauri::State<PlayerState>) -> Result<serde_json::Value, 
 }
 
 #[tauri::command]
-pub fn play_next(state: tauri::State<PlayerState>) -> Result<Option<String>, String> {
-    state
-        .0
-        .lock()
-        .map_err(|_| "Failed to lock player state".to_string())?
-        .play_next()
+pub fn play_next(
+    state: tauri::State<PlayerState>,
+    bridge: tauri::State<MediaBridgeState>,
+) -> Result<Option<String>, String> {
+    let result = lock_player(&state)?.play_next()?;
+    if result.is_some() {
+        with_bridge(&bridge, |b| b.set_playing(0.0));
+    }
+    Ok(result)
 }
 
 #[tauri::command]
-pub fn play_previous(state: tauri::State<PlayerState>) -> Result<Option<String>, String> {
-    state
-        .0
-        .lock()
-        .map_err(|_| "Failed to lock player state".to_string())?
-        .play_previous()
+pub fn play_previous(
+    state: tauri::State<PlayerState>,
+    bridge: tauri::State<MediaBridgeState>,
+) -> Result<Option<String>, String> {
+    let result = lock_player(&state)?.play_previous()?;
+    if result.is_some() {
+        with_bridge(&bridge, |b| b.set_playing(0.0));
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -200,4 +264,18 @@ pub fn get_playback_mode(state: tauri::State<PlayerState>) -> Result<serde_json:
         "repeat": player.repeat,
         "shuffle": player.queue.is_shuffled(),
     }))
+}
+
+// ── OS media controls ─────────────────────────────────────────────────────────
+
+/// Called by the frontend whenever the currently playing track changes.
+/// Pushes rich metadata (title, artist, album, duration, cover art URL) to the
+/// OS media interface so it shows up in the system media overlay / Control Center.
+#[tauri::command]
+pub fn update_media_metadata(
+    metadata: TrackMetadata,
+    bridge: tauri::State<MediaBridgeState>,
+) -> Result<(), String> {
+    with_bridge(&bridge, |b| b.set_metadata(&metadata));
+    Ok(())
 }

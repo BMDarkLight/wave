@@ -172,3 +172,74 @@ export const getLibraryDatabasePath = (): Promise<string> => {
 export const getSupportedAudioExtensions = (): Promise<string[]> => {
   return safeInvoke<string[]>("get_supported_audio_extensions");
 };
+
+// ── OS Media Controls ─────────────────────────────────────────────────────────
+
+export interface MediaMetadata {
+  title?: string | null;
+  artist?: string | null;
+  album?: string | null;
+  duration_seconds?: number | null;
+  cover_url?: string | null;
+}
+
+/**
+ * Push track metadata to the OS media interface (macOS Control Center,
+ * Windows SMTC, Linux MPRIS).  Call this whenever the playing track changes.
+ */
+export const updateMediaMetadata = (metadata: MediaMetadata): Promise<void> => {
+  return safeInvoke("update_media_metadata", { metadata });
+};
+
+/**
+ * Listen for OS media control events (play, pause, next, previous, seek).
+ * Returns an unlisten function — call it when your component unmounts.
+ *
+ * Usage:
+ *   const unlisten = await listenToMediaControls({ onPlay, onPause, onNext, ... });
+ *   // later:
+ *   unlisten();
+ */
+export interface MediaControlHandlers {
+  onPlay?: () => void;
+  onPause?: () => void;
+  onToggle?: () => void;
+  onNext?: () => void;
+  onPrevious?: () => void;
+  onStop?: () => void;
+  onSeekRelative?: (direction: "forward" | "backward") => void;
+  onSeekBy?: (seconds: number) => void;
+  onSetPosition?: (seconds: number) => void;
+}
+
+export const listenToMediaControls = async (
+  handlers: MediaControlHandlers
+): Promise<() => void> => {
+  await tauriInitialized;
+  const { listen } = await import("@tauri-apps/api/event");
+
+  const unlisteners = await Promise.all([
+    handlers.onPlay     && listen("media-control-play",     () => handlers.onPlay!()),
+    handlers.onPause    && listen("media-control-pause",    () => handlers.onPause!()),
+    handlers.onToggle   && listen("media-control-toggle",   () => handlers.onToggle!()),
+    handlers.onNext     && listen("media-control-next",     () => handlers.onNext!()),
+    handlers.onPrevious && listen("media-control-previous", () => handlers.onPrevious!()),
+    handlers.onStop     && listen("media-control-stop",     () => handlers.onStop!()),
+    handlers.onSeekRelative && listen<string>(
+      "media-control-seek-relative",
+      (e) => handlers.onSeekRelative!(e.payload as "forward" | "backward")
+    ),
+    handlers.onSeekBy && listen<number>(
+      "media-control-seek-by",
+      (e) => handlers.onSeekBy!(e.payload)
+    ),
+    handlers.onSetPosition && listen<number>(
+      "media-control-set-position",
+      (e) => handlers.onSetPosition!(e.payload)
+    ),
+  ]);
+
+  return () => {
+    unlisteners.forEach((u) => u && u());
+  };
+};
