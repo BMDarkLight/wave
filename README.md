@@ -1,22 +1,22 @@
-# 🎵 Wave
+# Wave
 
 **Wave** is a lightweight, cross-platform, and portable music player built with modern technologies.  
 It focuses on **performance**, **simplicity**, and **offline-first usage**, while remaining easily extensible for advanced audio features.
 
 ---
 
-## ✨ Features
+## Features
 
-- 📁 Local music library (folder-based)
-- ▶️ High-performance audio playback
-- 🖥️ Cross-platform (Windows, macOS, Linux)
-- 🧳 Portable & lightweight (no heavy runtime)
-- 🎛️ Designed for future EQ & DSP extensions
-- 🔌 Offline-first (no server required)
+- Local music library (folder-based)
+- High-performance audio playback
+- Cross-platform (Windows, macOS, Linux)
+- Portable & lightweight (no heavy runtime)
+- Designed for future EQ & DSP extensions
+- Offline-first (no server required)
 
 ---
 
-## 🧱 Tech Stack
+## Tech Stack
 
 ### Frontend
 - **React**
@@ -37,21 +37,17 @@ It focuses on **performance**, **simplicity**, and **offline-first usage**, whil
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```
 Wave/
-├── src/                    # React frontend
-│   ├── components/
-│   ├── pages/
-│   ├── hooks/
+├── src/              # React frontend
+│   ├── utils/
+│   ├── App.tsx
+│   ├── App.css
 │   └── main.tsx
 │
-├── src-tauri/               # Rust backend
-│   ├── audio/               # Audio engine & DSP
-│   ├── db/                  # SQLite logic
-│   ├── commands.rs          # Tauri commands
-│   └── main.rs              # App entry
+├── src-tauri/        # Rust backend
 │
 ├── README.md
 └── tauri.conf.json
@@ -59,14 +55,14 @@ Wave/
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
 Make sure you have the following installed:
 
 - **Node.js** (LTS)
-- **Rust** (stable)
+- **Rust**
 - **Cargo**
 - **Git**
 
@@ -98,7 +94,7 @@ This will start both the frontend and the native backend.
 
 ---
 
-## 🏗️ Build for Production
+## Build for Production
 
 ```bash
 npm run tauri build
@@ -108,7 +104,7 @@ The final portable binaries will be generated for your platform.
 
 ---
 
-## 🎯 Design Goals
+## Design Goals
 
 - **Fast startup**
 - **Low memory usage**
@@ -118,12 +114,12 @@ The final portable binaries will be generated for your platform.
 
 ---
 
-## 📜 License
+## License
 
 This project is licensed under the **MIT License**.
 
 ---
 
-## 👤 Author
+## Author
 
 Built with ❤️ by **Behdad**
