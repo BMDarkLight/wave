@@ -1,8 +1,8 @@
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
-use std::fs::File;
-use std::io::BufReader;
+use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+
+use super::symphonia_source::SymphoniaSource;
 
 // ── Playback modes ────────────────────────────────────────────────────────────
 
@@ -266,9 +266,7 @@ impl AudioPlayer {
     fn build_source(
         path: &str,
     ) -> Result<(impl Source<Item = f32> + Send + 'static, Option<Duration>), String> {
-        let file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
-        let source = Decoder::new(BufReader::new(file))
-            .map_err(|e| format!("Failed to decode audio: {e}"))?;
+        let source = SymphoniaSource::new(path)?;
         let duration = source.total_duration();
         Ok((source.convert_samples(), duration))
     }
@@ -280,8 +278,8 @@ impl AudioPlayer {
         }
 
         let (source, duration) = Self::build_source(path)?;
-        let sink = Sink::try_new(&self.handle)
-            .map_err(|e| format!("Failed to create sink: {e}"))?;
+        let sink =
+            Sink::try_new(&self.handle).map_err(|e| format!("Failed to create sink: {e}"))?;
         sink.set_volume(self.volume);
         sink.append(source);
 
@@ -340,18 +338,18 @@ impl AudioPlayer {
 
     pub fn seek(&mut self, seconds: f64) -> Result<(), String> {
         let offset = Duration::from_secs_f64(seconds.max(0.0));
-        
+
         // Use rodio 0.19's native seek — instant, no re-decoding.
         match &self.sink {
             Some(sink) => {
                 sink.try_seek(offset)
                     .map_err(|e| format!("Seek failed: {e}"))?;
-                
+
                 // Update our clock to match.
                 let was_playing = self.is_playing();
                 self.clock.elapsed_before_start = offset;
                 self.clock.started_at = was_playing.then(Instant::now);
-                
+
                 Ok(())
             }
             None => Err("No track loaded".to_string()),
@@ -403,10 +401,7 @@ impl AudioPlayer {
         if self.repeat == RepeatMode::One {
             // Replay current track.
             if let Some(path) = self.current_path.clone() {
-                let path_str = path
-                    .to_str()
-                    .ok_or("Invalid path encoding")?
-                    .to_string();
+                let path_str = path.to_str().ok_or("Invalid path encoding")?.to_string();
                 self.play(&path_str)?;
                 return Ok(Some(path_str));
             }
