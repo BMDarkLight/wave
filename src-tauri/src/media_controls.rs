@@ -2,7 +2,7 @@ use souvlaki::{
     MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
 };
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 // ── Public metadata struct (mirrors what the frontend sends) ─────────────────
 
@@ -32,12 +32,16 @@ impl MediaBridge {
     pub fn new(app: &AppHandle) -> Result<Self, String> {
         #[cfg(target_os = "windows")]
         let hwnd = {
-            use raw_window_handle::HasRawWindowHandle;
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
             let window = app
                 .get_webview_window("main")
                 .ok_or("Main window not found")?;
-            match window.raw_window_handle() {
-                raw_window_handle::RawWindowHandle::Win32(h) => Some(h.hwnd),
+            match window
+                .window_handle()
+                .map_err(|e| format!("Failed to get window handle: {e}"))?
+                .as_raw()
+            {
+                RawWindowHandle::Win32(h) => Some(h.hwnd.get() as *mut std::ffi::c_void),
                 _ => None,
             }
         };

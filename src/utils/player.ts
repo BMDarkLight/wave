@@ -4,6 +4,11 @@ let openFn: typeof import("@tauri-apps/plugin-dialog").open;
 
 const initTauri = async () => {
   try {
+    if (!("__TAURI_INTERNALS__" in window)) {
+      console.warn("Tauri APIs are only available inside the Tauri desktop window.");
+      return false;
+    }
+
     const core = await import("@tauri-apps/api/core");
     const dialog = await import("@tauri-apps/plugin-dialog");
     invokeFn = core.invoke;
@@ -22,7 +27,7 @@ const safeInvoke = async <T = any>(cmd: string, args?: Record<string, unknown>):
   await tauriInitialized;
 
   if (!invokeFn) {
-    throw new Error("Tauri API is not available. Make sure you're running 'npm run tauri dev' (not just 'npm run dev')");
+    throw new Error("Tauri API is not available. Use the Tauri desktop window launched by 'npm run dev' or 'npm run tauri dev', not the browser Vite URL.");
   }
 
   return await invokeFn<T>(cmd, args);
@@ -100,7 +105,7 @@ export const selectAudioFile = async (multiple: boolean = false): Promise<string
   await tauriInitialized;
 
   if (!openFn) {
-    throw new Error("Tauri API is not available. Make sure you're running 'npm run tauri dev' (not just 'npm run dev')");
+    throw new Error("Tauri API is not available. Use the Tauri desktop window launched by 'npm run dev' or 'npm run tauri dev', not the browser Vite URL.");
   }
 
   const selected = await openFn({
