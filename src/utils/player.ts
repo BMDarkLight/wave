@@ -72,6 +72,17 @@ export interface Track {
   indexed_at: number;
 }
 
+export interface QueueState {
+  tracks: string[];
+  current_index: number | null;
+  is_shuffled: boolean;
+}
+
+export interface PlaybackMode {
+  repeat: "off" | "one" | "all";
+  shuffle: boolean;
+}
+
 export interface PlaylistInfo {
   id: string;
   profile_id: string;
@@ -184,6 +195,32 @@ export const getLibraryDatabasePath = (): Promise<string> => {
 
 export const getSupportedAudioExtensions = (): Promise<string[]> => {
   return safeInvoke<string[]>("get_supported_audio_extensions");
+}
+
+// ── Queue / Playback Mode commands ────────────────────────────────────────────
+
+export const getQueue = (): Promise<QueueState> => {
+  return safeInvoke<QueueState>("get_queue");
+};
+
+export const playNext = (): Promise<string | null> => {
+  return safeInvoke<string | null>("play_next");
+};
+
+export const playPrevious = (): Promise<string | null> => {
+  return safeInvoke<string | null>("play_previous");
+};
+
+export const setShuffle = (enabled: boolean): Promise<void> => {
+  return safeInvoke("set_shuffle", { enabled });
+};
+
+export const setRepeat = (mode: "off" | "one" | "all"): Promise<void> => {
+  return safeInvoke("set_repeat", { mode });
+};
+
+export const getPlaybackMode = (): Promise<PlaybackMode> => {
+  return safeInvoke<PlaybackMode>("get_playback_mode");
 };
 
 // ── OS Media Controls ─────────────────────────────────────────────────────────

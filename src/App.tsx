@@ -1,12 +1,18 @@
+// The Code for Frontend of Wave is currently completely AI Generated and may contain bugs or rough edges. Please report any issues you encounter at
+
 import { useEffect, useMemo, useState } from "react";
 import {
   addTrackToPlaylist,
   clearPlaylist,
   getFileName,
   getPlaybackState,
+  getPlaybackMode,
   getPlaylist,
+  getQueue,
   listenToMediaControls,
   pauseTrack,
+  playNext,
+  playPrevious,
   playTrack,
   playTrackFromPlaylist,
   removeTrackFromPlaylist,
@@ -14,9 +20,13 @@ import {
   seekTrack,
   selectAudioFile,
   setPlayerVolume,
+  setRepeat,
+  setShuffle,
   stopTrack,
   updateMediaMetadata,
+  type PlaybackMode,
   type PlaybackState,
+  type QueueState,
   type Track,
 } from "./utils/player";
 import "./App.css";
