@@ -122,10 +122,10 @@ pub fn add_track_to_playlist(
 
 #[tauri::command]
 pub fn remove_track_from_playlist(
-    index: usize,
+    path: String,
     library: tauri::State<LibraryState>,
 ) -> Result<(), String> {
-    lock_library(&library)?.remove_track_from_default_playlist(index)
+    lock_library(&library)?.remove_track_from_default_playlist(path)
 }
 
 #[tauri::command]

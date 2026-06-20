@@ -157,8 +157,8 @@ export const addTrackToPlaylist = (path: string): Promise<Track> => {
   return safeInvoke<Track>("add_track_to_playlist", { path });
 };
 
-export const removeTrackFromPlaylist = (index: number): Promise<void> => {
-  return safeInvoke("remove_track_from_playlist", { index });
+export const removeTrackFromPlaylist = (path: string): Promise<void> => {
+  return safeInvoke("remove_track_from_playlist", { path });
 };
 
 export const getPlaylist = (): Promise<Track[]> => {

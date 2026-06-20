@@ -31,6 +31,12 @@ import {
 } from "./utils/player";
 import "./App.css";
 
+function formatInvokeError(err: unknown, fallback: string): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string" && err.trim()) return err;
+  return fallback;
+}
+
 const emptyPlaybackState: PlaybackState = {
   is_playing: false,
   is_paused: false,
@@ -99,7 +105,6 @@ function App() {
     if (!document.body.classList.contains("is-seeking")) {
       setSeekValue(state.position_seconds ?? 0);
     }
-    setError(null);
   };
 
   const loadPlaylist = async () => {
@@ -172,27 +177,28 @@ function App() {
         for (const path of paths) {
           try {
             await addTrackToPlaylist(path);
-          } catch {
+          } catch (err) {
             failCount++;
+            console.error("Failed to add track:", path, err);
           }
         }
         if (failCount > 0) setError(`Failed to add ${failCount} track(s).`);
         await loadPlaylist();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to add track");
+      setError(formatInvokeError(err, "Failed to add track"));
     } finally {
       setIsLoading(false);
     }
   };
 
-  const handleRemoveTrack = async (index: number) => {
+  const handleRemoveTrack = async (path: string) => {
     try {
       setError(null);
-      await removeTrackFromPlaylist(index);
+      await removeTrackFromPlaylist(path);
       await loadPlaylist();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to remove track");
+      setError(formatInvokeError(err, "Failed to remove track"));
     }
   };
 
@@ -346,7 +352,7 @@ function App() {
                 <div>#</div><div>Title</div><div>Album</div><div>Format</div><div>Duration</div><div></div>
               </div>
               {playlist.map((track, index) => (
-                <div key={`${track.path}-${index}`} className={`track-item ${isCurrentTrack(track) ? "active" : ""}`} onClick={() => handlePlayTrack(index)}>
+                <div key={track.id} className={`track-item ${isCurrentTrack(track) ? "active" : ""}`} onClick={() => handlePlayTrack(index)}>
                   <div className="track-col-index">{isCurrentTrack(track) && playbackState.is_playing ? <span className="mini-bars"><i /><i /><i /></span> : index + 1}</div>
                   <div className="track-title-cell">
                     <Artwork track={track} fallback={getTrackTitle(track).slice(0, 1).toUpperCase()} className="track-thumb" />
@@ -362,7 +368,7 @@ function App() {
                   <div className="track-album">{track.album}</div>
                   <div className="track-format">{track.format}</div>
                   <div className="track-duration">{formatTime(track.duration_seconds)}</div>
-                  <button className="track-action-btn" onClick={(event) => { event.stopPropagation(); handleRemoveTrack(index); }} title="Remove" type="button">x</button>
+                  <button className="track-action-btn" onClick={(event) => { event.stopPropagation(); handleRemoveTrack(track.path); }} title="Remove" type="button">x</button>
                 </div>
               ))}
             </div>

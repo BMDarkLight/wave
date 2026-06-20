@@ -150,7 +150,11 @@ impl Library {
         *self
             .default_playlist_id_cache
             .lock()
-            .map_err(|_| "Lock error".to_string())? = Some(playlist_id);
+            .map_err(|_| "Lock error".to_string())? = Some(playlist_id.clone());
+
+        if let Err(error) = repair_all_playlist_positions(&connection) {
+            tracing::warn!("Failed to repair playlist positions on startup: {error}");
+        }
 
         Ok(())
     }
@@ -184,21 +188,35 @@ impl Library {
     }
 
     pub fn add_track_to_playlist(&self, playlist_id: &str, path: String) -> Result<Track, String> {
-        let track = extract_track(&path)?;
+        let mut track = extract_track(&path)?;
         let now = now_timestamp();
         let mut connection = self.lock_connection()?;
-        // Wrap both inserts in a single transaction so we never leave orphaned rows.
         let tx = connection
             .transaction()
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
-        upsert_track(&tx, &track)?;
+        let track_id = upsert_track(&tx, &track)?;
+        track.id = track_id.clone();
+
+        let already_in_playlist = tx
+            .query_row(
+                "SELECT 1 FROM playlist_tracks
+                 WHERE playlist_id = ?1 AND track_id = ?2",
+                params![playlist_id, track_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| format!("Failed to check playlist membership: {error}"))?
+            .is_some();
+        if already_in_playlist {
+            return Err("Track is already in the playlist".to_string());
+        }
 
         let position = next_playlist_position(&tx, playlist_id)?;
         tx.execute(
-            "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at)
+            "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at)
              VALUES (?1, ?2, ?3, ?4)",
-            params![playlist_id, track.id, position, now],
+            params![playlist_id, track_id, position, now],
         )
         .map_err(|error| format!("Failed to add track to playlist: {error}"))?;
 
@@ -208,41 +226,32 @@ impl Library {
         Ok(track)
     }
 
-    pub fn remove_track_from_default_playlist(&self, index: usize) -> Result<(), String> {
+    pub fn remove_track_from_default_playlist(&self, path: String) -> Result<(), String> {
         let playlist_id = self.default_playlist_id()?;
-        self.remove_track_from_playlist(&playlist_id, index)
+        self.remove_track_from_playlist_by_path(&playlist_id, &path)
     }
 
-    pub fn remove_track_from_playlist(
+    pub fn remove_track_from_playlist_by_path(
         &self,
         playlist_id: &str,
-        index: usize,
+        path: &str,
     ) -> Result<(), String> {
         let mut connection = self.lock_connection()?;
         let tx = connection
             .transaction()
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
-        let track_id: String = tx
-            .query_row(
-                "SELECT track_id FROM playlist_tracks
+        let deleted = tx
+            .execute(
+                "DELETE FROM playlist_tracks
                  WHERE playlist_id = ?1
-                 ORDER BY position
-                 LIMIT 1 OFFSET ?2",
-                params![playlist_id, index as i64],
-                |row| row.get(0),
+                   AND track_id = (SELECT id FROM tracks WHERE path = ?2)",
+                params![playlist_id, path],
             )
-            .optional()
-            .map_err(|error| format!("Failed to read playlist track: {error}"))?
-            .ok_or("Index out of bounds")?;
-
-        tx.execute(
-            "DELETE FROM playlist_tracks WHERE playlist_id = ?1 AND track_id = ?2",
-            params![playlist_id, track_id],
-        )
-        .map_err(|error| format!("Failed to remove playlist track: {error}"))?;
-
-        compact_playlist_positions(&tx, playlist_id)?;
+            .map_err(|error| format!("Failed to remove playlist track: {error}"))?;
+        if deleted == 0 {
+            return Err("Track is not in the playlist".to_string());
+        }
 
         tx.commit()
             .map_err(|e| format!("Failed to commit transaction: {e}"))?;
@@ -361,11 +370,15 @@ impl Library {
         let now = now_timestamp();
         for path in &audio_paths {
             match extract_track(path) {
-                Ok(track) => {
-                    if let Err(e) = upsert_track(&tx, &track) {
-                        failed.push(format!("{path}: {e}"));
-                        continue;
-                    }
+                Ok(mut track) => {
+                    let track_id = match upsert_track(&tx, &track) {
+                        Ok(id) => id,
+                        Err(e) => {
+                            failed.push(format!("{path}: {e}"));
+                            continue;
+                        }
+                    };
+                    track.id = track_id.clone();
                     let position = match next_playlist_position(&tx, &playlist_id) {
                         Ok(p) => p,
                         Err(e) => {
@@ -373,13 +386,16 @@ impl Library {
                             continue;
                         }
                     };
-                    let _ = tx.execute(
+                    match tx.execute(
                         "INSERT OR IGNORE INTO playlist_tracks
                          (playlist_id, track_id, position, added_at)
                          VALUES (?1, ?2, ?3, ?4)",
-                        params![playlist_id, track.id, position, now],
-                    );
-                    tracks.push(track);
+                        params![playlist_id, track_id, position, now],
+                    ) {
+                        Ok(0) => {}
+                        Ok(_) => tracks.push(track),
+                        Err(e) => failed.push(format!("{path}: {e}")),
+                    }
                 }
                 Err(e) => {
                     failed.push(format!("{path}: {e}"));
@@ -568,7 +584,17 @@ fn ensure_playlist_with_connection(
     Ok(id)
 }
 
-fn upsert_track(conn: &impl Queryable, track: &Track) -> Result<(), String> {
+fn lookup_track_id(conn: &impl Queryable, path: &str) -> Result<String, String> {
+    conn.query_opt(
+        "SELECT id FROM tracks WHERE path = ?1",
+        params![path],
+        |row| row.get(0),
+    )
+    .map_err(|error| format!("Failed to look up track id: {error}"))?
+    .ok_or_else(|| format!("Track not found in library: {path}"))
+}
+
+fn upsert_track(conn: &impl Queryable, track: &Track) -> Result<String, String> {
     conn.exec(
         "INSERT INTO tracks (
             id, path, name, title, artist, album, album_artist, genre, year, track_number,
@@ -638,7 +664,7 @@ fn upsert_track(conn: &impl Queryable, track: &Track) -> Result<(), String> {
         ],
     )
     .map_err(|error| format!("Failed to upsert track: {error}"))?;
-    Ok(())
+    lookup_track_id(conn, &track.path)
 }
 
 fn ensure_track_column(
@@ -679,24 +705,67 @@ fn next_playlist_position(conn: &impl Queryable, playlist_id: &str) -> Result<i6
 }
 
 /// Re-numbers all positions in a playlist so they are contiguous starting at 0.
-/// Executed inside a transaction for atomicity and performance.
+/// Uses a two-phase update so UNIQUE(playlist_id, position) is never violated mid-flight.
+fn repair_all_playlist_positions(connection: &Connection) -> Result<(), String> {
+    let mut statement = connection
+        .prepare("SELECT id FROM playlists")
+        .map_err(|error| format!("Failed to prepare playlist repair query: {error}"))?;
+    let playlist_ids = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("Failed to query playlists for repair: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Failed to read playlist ids for repair: {error}"))?;
+
+    for playlist_id in playlist_ids {
+        let tx = connection
+            .unchecked_transaction()
+            .map_err(|error| format!("Failed to begin playlist repair transaction: {error}"))?;
+        compact_playlist_positions(&tx, &playlist_id)?;
+        tx.commit()
+            .map_err(|error| format!("Failed to commit playlist repair transaction: {error}"))?;
+    }
+
+    Ok(())
+}
+
 fn compact_playlist_positions(
     tx: &Transaction<'_>,
     playlist_id: &str,
 ) -> Result<(), String> {
-    // A single UPDATE with a window function (ROW_NUMBER) avoids N individual statements.
-    tx.execute(
-        "UPDATE playlist_tracks
-         SET position = (
-             SELECT ROW_NUMBER() OVER (ORDER BY position) - 1
-             FROM playlist_tracks AS sub
-             WHERE sub.playlist_id = playlist_tracks.playlist_id
-               AND sub.track_id  = playlist_tracks.track_id
-         )
-         WHERE playlist_id = ?1",
-        params![playlist_id],
-    )
-    .map_err(|error| format!("Failed to compact playlist positions: {error}"))?;
+    let mut statement = tx
+        .prepare(
+            "SELECT track_id FROM playlist_tracks
+             WHERE playlist_id = ?1
+             ORDER BY position, added_at",
+        )
+        .map_err(|error| format!("Failed to prepare playlist compaction query: {error}"))?;
+
+    let track_ids = statement
+        .query_map(params![playlist_id], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("Failed to read playlist tracks for compaction: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Failed to read playlist track ids: {error}"))?;
+
+    for (index, track_id) in track_ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE playlist_tracks
+             SET position = ?1
+             WHERE playlist_id = ?2 AND track_id = ?3",
+            params![-(index as i64 + 1), playlist_id, track_id],
+        )
+        .map_err(|error| format!("Failed to stage playlist positions: {error}"))?;
+    }
+
+    for (index, track_id) in track_ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE playlist_tracks
+             SET position = ?1
+             WHERE playlist_id = ?2 AND track_id = ?3",
+            params![index as i64, playlist_id, track_id],
+        )
+        .map_err(|error| format!("Failed to compact playlist positions: {error}"))?;
+    }
+
     Ok(())
 }
 
@@ -705,4 +774,198 @@ fn now_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    fn open_test_library() -> Result<Library, String> {
+        let connection = Connection::open_in_memory()
+            .map_err(|error| format!("Failed to open in-memory database: {error}"))?;
+        let library = Library {
+            db_path: PathBuf::from(":memory:"),
+            connection: Mutex::new(connection),
+            default_playlist_id_cache: Mutex::new(None),
+        };
+        library.initialize()?;
+        Ok(library)
+    }
+
+    fn sample_track(id: &str, path: &str) -> Track {
+        Track {
+            id: id.to_string(),
+            path: path.to_string(),
+            name: "song.mp3".to_string(),
+            title: "Song".to_string(),
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            album_artist: None,
+            genre: None,
+            year: None,
+            track_number: None,
+            disc_number: None,
+            format: "MP3".to_string(),
+            duration_seconds: Some(180.0),
+            sample_rate: Some(44_100),
+            channels: Some(2),
+            bit_depth: None,
+            lyrics: None,
+            lyrics_source: None,
+            cover_art_data_url: None,
+            cover_art_mime: None,
+            cover_art_source: None,
+            fingerprint_sha256: None,
+            acoustid_fingerprint: None,
+            musicbrainz_recording_id: None,
+            file_size: 1,
+            modified_at: 1,
+            indexed_at: 1,
+        }
+    }
+
+    fn insert_playlist_track_with_connection(
+        connection: &Connection,
+        playlist_id: &str,
+        track_id: &str,
+        position: i64,
+    ) -> Result<(), String> {
+        connection
+            .execute(
+                "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![playlist_id, track_id, position, now_timestamp()],
+            )
+            .map_err(|error| format!("Failed to insert playlist track: {error}"))?;
+        Ok(())
+    }
+
+    #[test]
+    fn upsert_track_preserves_existing_id_for_same_path() {
+        let library = open_test_library().expect("library");
+        let connection = library.lock_connection().expect("connection");
+        let first = sample_track("stable-id", "/music/song.mp3");
+        let first_id = upsert_track(&*connection, &first).expect("first upsert");
+        assert_eq!(first_id, "stable-id");
+
+        let second = sample_track("new-random-id", "/music/song.mp3");
+        let second_id = upsert_track(&*connection, &second).expect("second upsert");
+        assert_eq!(second_id, "stable-id");
+    }
+
+    #[test]
+    fn playlist_track_can_be_removed_and_readded_by_path() {
+        let library = open_test_library().expect("library");
+        let playlist_id = library.default_playlist_id().expect("playlist");
+        let track_path = "/music/replay.mp3";
+
+        let track = sample_track("track-a", track_path);
+        {
+            let connection = library.lock_connection().expect("connection");
+            let track_id = upsert_track(&*connection, &track).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &playlist_id, &track_id, 0)
+                .expect("insert");
+        }
+
+        library
+            .remove_track_from_playlist_by_path(&playlist_id, track_path)
+            .expect("remove");
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let refreshed = sample_track("track-b", track_path);
+            let canonical_id = upsert_track(&*connection, &refreshed).expect("re-upsert");
+            insert_playlist_track_with_connection(&connection, &playlist_id, &canonical_id, 0)
+                .expect("reinsert");
+        }
+
+        let tracks = library
+            .get_playlist_tracks(&playlist_id)
+            .expect("playlist tracks");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].id, "track-a");
+        assert_eq!(tracks[0].path, track_path);
+    }
+
+    #[test]
+    fn compact_playlist_positions_renumbers_without_unique_conflicts() {
+        let library = open_test_library().expect("library");
+        let playlist_id = library.default_playlist_id().expect("playlist");
+
+        {
+            let mut connection = library.lock_connection().expect("connection");
+            let track_a = sample_track("a", "/music/a.mp3");
+            let track_b = sample_track("b", "/music/b.mp3");
+            let track_c = sample_track("c", "/music/c.mp3");
+            let id_a = upsert_track(&*connection, &track_a).expect("upsert a");
+            let id_b = upsert_track(&*connection, &track_b).expect("upsert b");
+            let id_c = upsert_track(&*connection, &track_c).expect("upsert c");
+
+            insert_playlist_track_with_connection(&connection, &playlist_id, &id_a, 0)
+                .expect("insert a");
+            insert_playlist_track_with_connection(&connection, &playlist_id, &id_b, 2)
+                .expect("insert b");
+            insert_playlist_track_with_connection(&connection, &playlist_id, &id_c, 4)
+                .expect("insert c");
+
+            let tx = connection.transaction().expect("transaction");
+            compact_playlist_positions(&tx, &playlist_id).expect("compact");
+            tx.commit().expect("commit");
+        }
+
+        let connection = library.lock_connection().expect("connection");
+        let positions: Vec<i64> = connection
+            .prepare(
+                "SELECT position FROM playlist_tracks
+                 WHERE playlist_id = ?1
+                 ORDER BY position",
+            )
+            .expect("prepare")
+            .query_map(params![playlist_id], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows");
+
+        assert_eq!(positions, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn remove_track_by_path_fails_for_missing_entries() {
+        let library = open_test_library().expect("library");
+        let playlist_id = library.default_playlist_id().expect("playlist");
+
+        let err = library
+            .remove_track_from_playlist_by_path(&playlist_id, "/music/missing.mp3")
+            .expect_err("missing track should fail");
+        assert!(err.contains("not in the playlist"));
+    }
+
+    #[test]
+    fn remove_track_leaves_position_gaps_without_error() {
+        let library = open_test_library().expect("library");
+        let playlist_id = library.default_playlist_id().expect("playlist");
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let track_a = sample_track("a", "/music/a.mp3");
+            let track_b = sample_track("b", "/music/b.mp3");
+            let id_a = upsert_track(&*connection, &track_a).expect("upsert a");
+            let id_b = upsert_track(&*connection, &track_b).expect("upsert b");
+            insert_playlist_track_with_connection(&connection, &playlist_id, &id_a, 0)
+                .expect("insert a");
+            insert_playlist_track_with_connection(&connection, &playlist_id, &id_b, 1)
+                .expect("insert b");
+        }
+
+        library
+            .remove_track_from_playlist_by_path(&playlist_id, "/music/a.mp3")
+            .expect("remove first track");
+
+        let tracks = library
+            .get_playlist_tracks(&playlist_id)
+            .expect("playlist tracks");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].path, "/music/b.mp3");
+    }
 }
