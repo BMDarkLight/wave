@@ -217,6 +217,15 @@ input:disabled {
   letter-spacing: -0.08em;
 }
 
+img.hero-art,
+img.album-art,
+img.track-thumb {
+  display: block;
+  object-fit: cover;
+  background: var(--panel-raised);
+  color: transparent;
+}
+
 .eyebrow {
   margin-bottom: 8px;
   font-size: 13px;
@@ -446,6 +455,28 @@ input:disabled {
 
 @keyframes bars {
   50% { transform: scaleY(0.45); }
+}
+
+.lyrics-panel {
+  display: grid;
+  gap: 16px;
+  margin-top: 18px;
+  padding: 22px;
+  border-top: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.lyrics-panel h2 {
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.lyrics-panel pre {
+  max-height: 260px;
+  overflow: auto;
+  color: #d7d7d7;
+  font: 500 14px/1.7 "Avenir Next", "Helvetica Neue", sans-serif;
+  white-space: pre-wrap;
 }
 
 .player-bar {

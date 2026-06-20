@@ -155,7 +155,7 @@ pub fn play_track_from_playlist(
             artist: Some(track.artist.clone()),
             album: Some(track.album.clone()),
             duration_seconds: track.duration_seconds,
-            cover_url: None,
+            cover_url: track.cover_art_data_url.clone(),
         });
     });
     Ok(())

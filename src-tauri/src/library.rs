@@ -90,6 +90,14 @@ impl Library {
                     sample_rate INTEGER,
                     channels INTEGER,
                     bit_depth INTEGER,
+                    lyrics TEXT,
+                    lyrics_source TEXT,
+                    cover_art_data_url TEXT,
+                    cover_art_mime TEXT,
+                    cover_art_source TEXT,
+                    fingerprint_sha256 TEXT,
+                    acoustid_fingerprint TEXT,
+                    musicbrainz_recording_id TEXT,
                     file_size INTEGER NOT NULL,
                     modified_at INTEGER NOT NULL,
                     indexed_at INTEGER NOT NULL
@@ -123,6 +131,15 @@ impl Library {
                 ",
             )
             .map_err(|error| format!("Failed to initialize library database: {error}"))?;
+
+        ensure_track_column(&connection, "lyrics", "TEXT")?;
+        ensure_track_column(&connection, "lyrics_source", "TEXT")?;
+        ensure_track_column(&connection, "cover_art_data_url", "TEXT")?;
+        ensure_track_column(&connection, "cover_art_mime", "TEXT")?;
+        ensure_track_column(&connection, "cover_art_source", "TEXT")?;
+        ensure_track_column(&connection, "fingerprint_sha256", "TEXT")?;
+        ensure_track_column(&connection, "acoustid_fingerprint", "TEXT")?;
+        ensure_track_column(&connection, "musicbrainz_recording_id", "TEXT")?;
 
         // Seed the default profile and playlist. We do this once at startup.
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
@@ -244,8 +261,10 @@ impl Library {
             .prepare(
                 "SELECT t.id, t.path, t.name, t.title, t.artist, t.album, t.album_artist, t.genre,
                         t.year, t.track_number, t.disc_number, t.format, t.duration_seconds,
-                        t.sample_rate, t.channels, t.bit_depth, t.file_size, t.modified_at,
-                        t.indexed_at
+                        t.sample_rate, t.channels, t.bit_depth, t.lyrics, t.lyrics_source,
+                        t.cover_art_data_url, t.cover_art_mime, t.cover_art_source,
+                        t.fingerprint_sha256, t.acoustid_fingerprint, t.musicbrainz_recording_id,
+                        t.file_size, t.modified_at, t.indexed_at
                  FROM playlist_tracks pt
                  JOIN tracks t ON t.id = pt.track_id
                  WHERE pt.playlist_id = ?1
@@ -281,8 +300,10 @@ impl Library {
             .query_row(
                 "SELECT t.id, t.path, t.name, t.title, t.artist, t.album, t.album_artist, t.genre,
                         t.year, t.track_number, t.disc_number, t.format, t.duration_seconds,
-                        t.sample_rate, t.channels, t.bit_depth, t.file_size, t.modified_at,
-                        t.indexed_at
+                        t.sample_rate, t.channels, t.bit_depth, t.lyrics, t.lyrics_source,
+                        t.cover_art_data_url, t.cover_art_mime, t.cover_art_source,
+                        t.fingerprint_sha256, t.acoustid_fingerprint, t.musicbrainz_recording_id,
+                        t.file_size, t.modified_at, t.indexed_at
                  FROM playlist_tracks pt
                  JOIN tracks t ON t.id = pt.track_id
                  WHERE pt.playlist_id = ?1
@@ -429,9 +450,17 @@ fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         sample_rate: row.get(13)?,
         channels: row.get(14)?,
         bit_depth: row.get(15)?,
-        file_size: row.get(16)?,
-        modified_at: row.get(17)?,
-        indexed_at: row.get(18)?,
+        lyrics: row.get(16)?,
+        lyrics_source: row.get(17)?,
+        cover_art_data_url: row.get(18)?,
+        cover_art_mime: row.get(19)?,
+        cover_art_source: row.get(20)?,
+        fingerprint_sha256: row.get(21)?,
+        acoustid_fingerprint: row.get(22)?,
+        musicbrainz_recording_id: row.get(23)?,
+        file_size: row.get(24)?,
+        modified_at: row.get(25)?,
+        indexed_at: row.get(26)?,
     })
 }
 
@@ -544,10 +573,13 @@ fn upsert_track(conn: &impl Queryable, track: &Track) -> Result<(), String> {
         "INSERT INTO tracks (
             id, path, name, title, artist, album, album_artist, genre, year, track_number,
             disc_number, format, duration_seconds, sample_rate, channels, bit_depth,
-            file_size, modified_at, indexed_at
+            lyrics, lyrics_source, cover_art_data_url, cover_art_mime, cover_art_source,
+            fingerprint_sha256, acoustid_fingerprint, musicbrainz_recording_id, file_size,
+            modified_at, indexed_at
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19
+            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+            ?21, ?22, ?23, ?24, ?25, ?26, ?27
         )
         ON CONFLICT(path) DO UPDATE SET
             name = excluded.name,
@@ -564,6 +596,14 @@ fn upsert_track(conn: &impl Queryable, track: &Track) -> Result<(), String> {
             sample_rate = excluded.sample_rate,
             channels = excluded.channels,
             bit_depth = excluded.bit_depth,
+            lyrics = excluded.lyrics,
+            lyrics_source = excluded.lyrics_source,
+            cover_art_data_url = excluded.cover_art_data_url,
+            cover_art_mime = excluded.cover_art_mime,
+            cover_art_source = excluded.cover_art_source,
+            fingerprint_sha256 = excluded.fingerprint_sha256,
+            acoustid_fingerprint = excluded.acoustid_fingerprint,
+            musicbrainz_recording_id = excluded.musicbrainz_recording_id,
             file_size = excluded.file_size,
             modified_at = excluded.modified_at,
             indexed_at = excluded.indexed_at",
@@ -584,12 +624,47 @@ fn upsert_track(conn: &impl Queryable, track: &Track) -> Result<(), String> {
             track.sample_rate,
             track.channels,
             track.bit_depth,
+            track.lyrics,
+            track.lyrics_source,
+            track.cover_art_data_url,
+            track.cover_art_mime,
+            track.cover_art_source,
+            track.fingerprint_sha256,
+            track.acoustid_fingerprint,
+            track.musicbrainz_recording_id,
             track.file_size,
             track.modified_at,
             track.indexed_at
         ],
     )
     .map_err(|error| format!("Failed to upsert track: {error}"))?;
+    Ok(())
+}
+
+fn ensure_track_column(
+    connection: &Connection,
+    column_name: &str,
+    column_type: &str,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(tracks)")
+        .map_err(|error| format!("Failed to inspect tracks schema: {error}"))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| format!("Failed to inspect tracks columns: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Failed to read tracks columns: {error}"))?;
+
+    if columns.iter().any(|column| column == column_name) {
+        return Ok(());
+    }
+
+    connection
+        .execute(
+            &format!("ALTER TABLE tracks ADD COLUMN {column_name} {column_type}"),
+            [],
+        )
+        .map_err(|error| format!("Failed to add tracks.{column_name}: {error}"))?;
     Ok(())
 }
 

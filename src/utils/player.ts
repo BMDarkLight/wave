@@ -59,6 +59,14 @@ export interface Track {
   sample_rate: number | null;
   channels: number | null;
   bit_depth: number | null;
+  lyrics: string | null;
+  lyrics_source: string | null;
+  cover_art_data_url: string | null;
+  cover_art_mime: string | null;
+  cover_art_source: string | null;
+  fingerprint_sha256: string | null;
+  acoustid_fingerprint: string | null;
+  musicbrainz_recording_id: string | null;
   file_size: number;
   modified_at: number;
   indexed_at: number;

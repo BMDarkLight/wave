@@ -43,6 +43,29 @@ const getTrackTitle = (track?: Track | null, fallbackPath?: string | null) => {
   return fallbackPath ? getFileName(fallbackPath) : "Choose a song";
 };
 
+const Artwork = ({
+  track,
+  fallback,
+  className,
+}: {
+  track?: Track | null;
+  fallback: string;
+  className: string;
+}) => {
+  if (track?.cover_art_data_url) {
+    return (
+      <img
+        className={className}
+        src={track.cover_art_data_url}
+        alt={`${getTrackTitle(track)} cover`}
+        draggable={false}
+      />
+    );
+  }
+
+  return <div className={className}>{fallback}</div>;
+};
+
 function App() {
   const [playbackState, setPlaybackState] = useState<PlaybackState>(emptyPlaybackState);
   const [playlist, setPlaylist] = useState<Track[]>([]);
@@ -100,7 +123,7 @@ function App() {
         artist: currentTrack.artist,
         album: currentTrack.album,
         duration_seconds: currentTrack.duration_seconds,
-        cover_url: null,
+        cover_url: currentTrack.cover_art_data_url,
       }).catch(console.error);
     }
   }, [currentTrack, playbackState.is_playing]);
@@ -281,7 +304,7 @@ function App() {
 
       <main className="main-content">
         <section className="hero-panel">
-          <div className="hero-art">{coverLetters}</div>
+          <Artwork track={currentTrack} fallback={coverLetters} className="hero-art" />
           <div className="hero-copy">
             <p className="eyebrow">Playlist</p>
             <h1>Local Sessions</h1>
@@ -316,10 +339,14 @@ function App() {
                 <div key={`${track.path}-${index}`} className={`track-item ${isCurrentTrack(track) ? "active" : ""}`} onClick={() => handlePlayTrack(index)}>
                   <div className="track-col-index">{isCurrentTrack(track) && playbackState.is_playing ? <span className="mini-bars"><i /><i /><i /></span> : index + 1}</div>
                   <div className="track-title-cell">
-                    <div className="track-thumb">{getTrackTitle(track).slice(0, 1).toUpperCase()}</div>
+                    <Artwork track={track} fallback={getTrackTitle(track).slice(0, 1).toUpperCase()} className="track-thumb" />
                     <div>
                       <div className="track-name">{getTrackTitle(track)}</div>
-                      <div className="track-meta">{track.artist} - {track.name}</div>
+                      <div className="track-meta">
+                        {track.artist}
+                        {track.lyrics ? " · lyrics" : ""}
+                        {track.cover_art_source === "cover-art-archive" ? " · online cover" : ""}
+                      </div>
                     </div>
                   </div>
                   <div className="track-album">{track.album}</div>
@@ -331,11 +358,22 @@ function App() {
             </div>
           )}
         </section>
+
+        {currentTrack?.lyrics && (
+          <section className="lyrics-panel">
+            <div>
+              <p className="eyebrow">Lyrics</p>
+              <h2>{getTrackTitle(currentTrack)}</h2>
+              {currentTrack.lyrics_source && <p className="metadata-source">{currentTrack.lyrics_source}</p>}
+            </div>
+            <pre>{currentTrack.lyrics}</pre>
+          </section>
+        )}
       </main>
 
       <footer className="player-bar">
         <div className="player-left">
-          <div className="album-art">{coverLetters}</div>
+          <Artwork track={currentTrack} fallback={coverLetters} className="album-art" />
           <div className="now-playing-info">
             <div className="now-playing-name">{getTrackTitle(currentTrack, playbackState.current_path)}</div>
             <div className="now-playing-artist">{currentTrack?.artist ?? (playbackState.current_path ? "Local file" : "No track selected")}</div>
