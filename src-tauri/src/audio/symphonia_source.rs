@@ -9,6 +9,8 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
+use crate::error::AudioError;
+
 pub struct SymphoniaSource {
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
     track_id: u32,
@@ -20,8 +22,8 @@ pub struct SymphoniaSource {
 }
 
 impl SymphoniaSource {
-    pub fn new(path: &str) -> Result<Self, String> {
-        let file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
+    pub fn new(path: &str) -> Result<Self, AudioError> {
+        let file = File::open(path).map_err(|error| AudioError::FileOpen(error.to_string()))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
         let mut hint = Hint::new();
@@ -35,14 +37,14 @@ impl SymphoniaSource {
 
         let mut probed = symphonia::default::get_probe()
             .format(&hint, mss, &format_opts, &metadata_opts)
-            .map_err(|e| format!("Failed to probe format: {e}"))?;
+            .map_err(|error| AudioError::Decode(format!("Failed to probe format: {error}")))?;
 
         let track_id = probed
             .format
             .tracks()
             .iter()
             .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-            .ok_or_else(|| "No supported audio track found".to_string())?
+            .ok_or_else(|| AudioError::UnsupportedFormat("No supported audio track found".into()))?
             .id;
 
         let track = probed
@@ -56,7 +58,7 @@ impl SymphoniaSource {
 
         let mut decoder = symphonia::default::get_codecs()
             .make(&codec_params, &decoder_opts)
-            .map_err(|e| format!("Failed to create decoder: {e}"))?;
+            .map_err(|error| AudioError::Decode(format!("Failed to create decoder: {error}")))?;
 
         let total_duration =
             codec_params
@@ -84,7 +86,7 @@ impl SymphoniaSource {
         format: &mut Box<dyn symphonia::core::formats::FormatReader>,
         decoder: &mut Box<dyn symphonia::core::codecs::Decoder>,
         track_id: u32,
-    ) -> Result<(SampleBuffer<i16>, SignalSpec), String> {
+    ) -> Result<(SampleBuffer<i16>, SignalSpec), AudioError> {
         loop {
             match format.next_packet() {
                 Ok(packet) => {
@@ -106,12 +108,14 @@ impl SymphoniaSource {
                 Err(symphonia::core::errors::Error::IoError(ref e))
                     if e.kind() == std::io::ErrorKind::UnexpectedEof =>
                 {
-                    return Err("Unexpected end of file".to_string());
+                    return Err(AudioError::Decode("Unexpected end of file".into()));
                 }
                 Err(symphonia::core::errors::Error::SeekError(_)) => {
-                    return Err("Seek error during initialization".to_string());
+                    return Err(AudioError::Decode("Seek error during initialization".into()));
                 }
-                Err(e) => return Err(format!("Failed to read packet: {e}")),
+                Err(error) => {
+                    return Err(AudioError::Decode(format!("Failed to read packet: {error}")));
+                }
             }
         }
     }

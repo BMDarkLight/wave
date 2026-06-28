@@ -2,22 +2,19 @@ use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::error::AudioError;
+
 use super::symphonia_source::SymphoniaSource;
 
 // ── Playback modes ────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RepeatMode {
+    #[default]
     Off,
     One,
     All,
-}
-
-impl Default for RepeatMode {
-    fn default() -> Self {
-        Self::Off
-    }
 }
 
 // ── Playback clock ────────────────────────────────────────────────────────────
@@ -53,7 +50,6 @@ impl PlaybackClock {
 // ── Queue ─────────────────────────────────────────────────────────────────────
 
 /// In-memory playback queue (separate from the library's persisted playlist).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct Queue {
     tracks: Vec<String>,
@@ -77,8 +73,6 @@ impl Queue {
             return;
         }
         let mut order: Vec<usize> = (0..self.tracks.len()).collect();
-        // Simple deterministic shuffle using indices (no external RNG dep needed).
-        // Uses a linear-congruential-style permutation seeded from the current time.
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
@@ -87,16 +81,16 @@ impl Queue {
             let j = (seed.wrapping_mul(i + 1).wrapping_add(seed)) % (i + 1);
             order.swap(i, j);
         }
-        // Place the current track first in the shuffle order so it plays without interruption.
         if let Some(idx) = self.current_index {
             if let Some(pos) = order.iter().position(|&v| v == idx) {
                 order.swap(0, pos);
             }
         }
-        self.shuffle_pos = if self.current_index.is_some() { 0 } else { 0 };
+        self.shuffle_pos = 0;
         self.shuffle_order = Some(order);
     }
 
+    #[allow(dead_code)]
     pub fn current_path(&self) -> Option<&str> {
         let idx = self.current_index?;
         self.tracks.get(idx).map(String::as_str)
@@ -106,6 +100,7 @@ impl Queue {
         self.current_index
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.tracks.len()
     }
@@ -114,7 +109,7 @@ impl Queue {
         &self.tracks
     }
 
-    /// Returns the track at the given raw (unshuffled) index.
+    #[allow(dead_code)]
     pub fn track_at(&self, index: usize) -> Option<&str> {
         self.tracks.get(index).map(String::as_str)
     }
@@ -226,7 +221,8 @@ impl Queue {
 /// is only ever accessed through the `Mutex` guard – never concurrently – so the
 /// unsafety is sound as long as we never send the player to another thread without
 /// the lock.
-#[allow(dead_code)] // Field is held for its drop side-effect (silences audio on drop).
+/// Held for its drop side-effect (silences audio when the stream is dropped).
+#[allow(dead_code)]
 struct SendableStream(OutputStream);
 
 // SAFETY: AudioPlayer is always accessed through a Mutex; the OutputStream is
@@ -247,9 +243,9 @@ pub struct AudioPlayer {
 }
 
 impl AudioPlayer {
-    pub fn new() -> Result<Self, String> {
+    pub fn new() -> Result<Self, AudioError> {
         let (stream, handle) = OutputStream::try_default()
-            .map_err(|e| format!("Failed to create output stream: {}", e))?;
+            .map_err(|error| AudioError::StreamCreation(error.to_string()))?;
 
         Ok(Self {
             _stream: SendableStream(stream),
@@ -265,21 +261,20 @@ impl AudioPlayer {
 
     fn build_source(
         path: &str,
-    ) -> Result<(impl Source<Item = f32> + Send + 'static, Option<Duration>), String> {
+    ) -> Result<(impl Source<Item = f32> + Send + 'static, Option<Duration>), AudioError> {
         let source = SymphoniaSource::new(path)?;
         let duration = source.total_duration();
         Ok((source.convert_samples(), duration))
     }
 
-    fn play_from(&mut self, path: &str, should_play: bool) -> Result<(), String> {
-        // Stop and drop the previous sink.
+    fn play_from(&mut self, path: &str, should_play: bool) -> Result<(), AudioError> {
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
 
         let (source, duration) = Self::build_source(path)?;
-        let sink =
-            Sink::try_new(&self.handle).map_err(|e| format!("Failed to create sink: {e}"))?;
+        let sink = Sink::try_new(&self.handle)
+            .map_err(|error| AudioError::SinkCreation(error.to_string()))?;
         sink.set_volume(self.volume);
         sink.append(source);
 
@@ -300,11 +295,11 @@ impl AudioPlayer {
         Ok(())
     }
 
-    pub fn play(&mut self, path: &str) -> Result<(), String> {
+    pub fn play(&mut self, path: &str) -> Result<(), AudioError> {
         self.play_from(path, true)
     }
 
-    pub fn pause(&mut self) -> Result<(), String> {
+    pub fn pause(&mut self) -> Result<(), AudioError> {
         match &self.sink {
             Some(sink) => {
                 sink.pause();
@@ -312,22 +307,22 @@ impl AudioPlayer {
                 self.clock.started_at = None;
                 Ok(())
             }
-            None => Err("No track is currently playing".to_string()),
+            None => Err(AudioError::NoTrackLoaded),
         }
     }
 
-    pub fn resume(&mut self) -> Result<(), String> {
+    pub fn resume(&mut self) -> Result<(), AudioError> {
         match &self.sink {
             Some(sink) => {
                 sink.play();
                 self.clock.started_at = Some(Instant::now());
                 Ok(())
             }
-            None => Err("No track is currently paused".to_string()),
+            None => Err(AudioError::NoTrackLoaded),
         }
     }
 
-    pub fn stop(&mut self) -> Result<(), String> {
+    pub fn stop(&mut self) -> Result<(), AudioError> {
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
@@ -336,31 +331,31 @@ impl AudioPlayer {
         Ok(())
     }
 
-    pub fn seek(&mut self, seconds: f64) -> Result<(), String> {
+    pub fn seek(&mut self, seconds: f64) -> Result<(), AudioError> {
         let offset = Duration::from_secs_f64(seconds.max(0.0));
 
-        // Use rodio 0.19's native seek — instant, no re-decoding.
         match &self.sink {
             Some(sink) => {
                 sink.try_seek(offset)
-                    .map_err(|e| format!("Seek failed: {e}"))?;
+                    .map_err(|error| AudioError::Decode(format!("Seek failed: {error}")))?;
 
-                // Update our clock to match.
                 let was_playing = self.is_playing();
                 self.clock.elapsed_before_start = offset;
                 self.clock.started_at = was_playing.then(Instant::now);
 
                 Ok(())
             }
-            None => Err("No track loaded".to_string()),
+            None => Err(AudioError::NoTrackLoaded),
         }
     }
 
-    pub fn set_volume(&mut self, volume: f32) -> Result<(), String> {
-        let clamped = volume.clamp(0.0, 1.0);
-        self.volume = clamped;
+    pub fn set_volume(&mut self, volume: f32) -> Result<(), AudioError> {
+        if !(0.0..=1.0).contains(&volume) {
+            return Err(AudioError::InvalidVolume);
+        }
+        self.volume = volume;
         if let Some(ref sink) = self.sink {
-            sink.set_volume(clamped);
+            sink.set_volume(volume);
         }
         Ok(())
     }
@@ -388,43 +383,42 @@ impl AudioPlayer {
     }
 
     pub fn duration_seconds(&self) -> Option<f64> {
-        self.clock.duration.map(|d| d.as_secs_f64())
+        self.clock.duration.map(|duration| duration.as_secs_f64())
     }
 
     pub fn volume(&self) -> f32 {
         self.volume
     }
 
-    // ── Queue / mode helpers ──────────────────────────────────────────────────
-
-    pub fn play_next(&mut self) -> Result<Option<String>, String> {
+    pub fn play_next(&mut self) -> Result<Option<String>, AudioError> {
         if self.repeat == RepeatMode::One {
-            // Replay current track.
             if let Some(path) = self.current_path.clone() {
-                let path_str = path.to_str().ok_or("Invalid path encoding")?.to_string();
+                let path_str = path
+                    .to_str()
+                    .ok_or_else(|| AudioError::Decode("Invalid path encoding".to_string()))?
+                    .to_string();
                 self.play(&path_str)?;
                 return Ok(Some(path_str));
             }
         }
         let path = self.queue.next(&self.repeat).map(str::to_string);
-        if let Some(ref p) = path {
-            self.play(p)?;
+        if let Some(ref next_path) = path {
+            self.play(next_path)?;
         }
         Ok(path)
     }
 
-    pub fn play_previous(&mut self) -> Result<Option<String>, String> {
-        // If we're more than 3 seconds into a track, rewind instead of going back.
+    pub fn play_previous(&mut self) -> Result<Option<String>, AudioError> {
         if self.position_seconds() > 3.0 {
             self.seek(0.0)?;
             return Ok(self
                 .current_path
                 .as_ref()
-                .and_then(|p| p.to_str().map(str::to_string)));
+                .and_then(|path| path.to_str().map(str::to_string)));
         }
         let path = self.queue.previous(&self.repeat).map(str::to_string);
-        if let Some(ref p) = path {
-            self.play(p)?;
+        if let Some(ref previous_path) = path {
+            self.play(previous_path)?;
         }
         Ok(path)
     }

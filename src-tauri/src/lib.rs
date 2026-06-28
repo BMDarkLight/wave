@@ -1,5 +1,6 @@
 mod audio;
 mod commands;
+mod dto;
 mod error;
 mod library;
 mod media_controls;
@@ -17,8 +18,7 @@ pub fn run() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let player = AudioPlayer::new()
-        .expect("Failed to initialize audio player");
+    let player = AudioPlayer::new().expect("Failed to initialize audio player");
 
     let player_state = PlayerState(std::sync::Mutex::new(player));
 

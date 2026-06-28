@@ -1,7 +1,6 @@
 use std::io;
 use thiserror::Error;
 
-#[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum AppError {
     #[error("Audio error: {0}")]
@@ -35,9 +34,6 @@ pub enum AppError {
     Config(String),
 }
 
-pub type Result<T> = std::result::Result<T, AppError>;
-
-#[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum AudioError {
     #[error("Failed to create output stream: {0}")]
@@ -74,7 +70,6 @@ pub enum AudioError {
     PlaybackEnded,
 }
 
-#[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum DatabaseError {
     #[error("Connection error: {0}")]
@@ -96,7 +91,6 @@ pub enum DatabaseError {
     Transaction(String),
 }
 
-#[allow(dead_code)]
 #[derive(Error, Debug)]
 pub enum MetadataError {
     #[error("File not found: {0}")]

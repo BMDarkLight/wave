@@ -5,7 +5,8 @@ use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::{MetadataOptions, StandardTagKey, StandardVisualKey, Tag, Visual};
@@ -14,6 +15,18 @@ use uuid::Uuid;
 
 const MAX_EMBEDDED_ART_BYTES: usize = 8 * 1024 * 1024;
 const ONLINE_LOOKUP_TIMEOUT_SECONDS: u64 = 5;
+const USER_AGENT: &str = "Wave/0.1.0 (local metadata enrichment)";
+
+fn metadata_client() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        Client::builder()
+            .timeout(Duration::from_secs(ONLINE_LOOKUP_TIMEOUT_SECONDS))
+            .user_agent(USER_AGENT)
+            .build()
+            .expect("failed to build metadata HTTP client")
+    })
+}
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "aac", "aiff", "alac", "caf", "flac", "m4a", "m4b", "m4p", "mka", "mkv", "mp1", "mp2",
@@ -324,14 +337,7 @@ fn enrich_cover_art_online(track: &mut Track) {
 }
 
 fn enrich_lyrics_online(track: &mut Track) {
-    let client = match Client::builder()
-        .timeout(std::time::Duration::from_secs(ONLINE_LOOKUP_TIMEOUT_SECONDS))
-        .user_agent("Wave/0.1.0 (local metadata enrichment)")
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return,
-    };
+    let client = metadata_client();
 
     let mut request = client
         .get("https://lrclib.net/api/get")
@@ -374,11 +380,7 @@ fn enrich_lyrics_online(track: &mut Track) {
 }
 
 fn find_musicbrainz_release_id(track: &Track) -> Option<String> {
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(ONLINE_LOOKUP_TIMEOUT_SECONDS))
-        .user_agent("Wave/0.1.0 (local metadata enrichment)")
-        .build()
-        .ok()?;
+    let client = metadata_client();
 
     let mut query_parts = Vec::new();
     if !track.title.trim().is_empty() {

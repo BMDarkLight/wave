@@ -8,6 +8,13 @@ use tauri::Manager;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
+const TRACK_SELECT_COLUMNS: &str = "t.id, t.path, t.name, t.title, t.artist, t.album, t.album_artist, t.genre,
+                        t.year, t.track_number, t.disc_number, t.format, t.duration_seconds,
+                        t.sample_rate, t.channels, t.bit_depth, t.lyrics, t.lyrics_source,
+                        t.cover_art_data_url, t.cover_art_mime, t.cover_art_source,
+                        t.fingerprint_sha256, t.acoustid_fingerprint, t.musicbrainz_recording_id,
+                        t.file_size, t.modified_at, t.indexed_at";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistInfo {
     pub id: String,
@@ -268,16 +275,13 @@ impl Library {
         let connection = self.lock_connection()?;
         let mut statement = connection
             .prepare(
-                "SELECT t.id, t.path, t.name, t.title, t.artist, t.album, t.album_artist, t.genre,
-                        t.year, t.track_number, t.disc_number, t.format, t.duration_seconds,
-                        t.sample_rate, t.channels, t.bit_depth, t.lyrics, t.lyrics_source,
-                        t.cover_art_data_url, t.cover_art_mime, t.cover_art_source,
-                        t.fingerprint_sha256, t.acoustid_fingerprint, t.musicbrainz_recording_id,
-                        t.file_size, t.modified_at, t.indexed_at
+                &format!(
+                    "SELECT {TRACK_SELECT_COLUMNS}
                  FROM playlist_tracks pt
                  JOIN tracks t ON t.id = pt.track_id
                  WHERE pt.playlist_id = ?1
-                 ORDER BY pt.position",
+                 ORDER BY pt.position"
+                ),
             )
             .map_err(|error| format!("Failed to prepare playlist query: {error}"))?;
 
@@ -299,30 +303,6 @@ impl Library {
             )
             .map_err(|error| format!("Failed to clear playlist: {error}"))?;
         Ok(())
-    }
-
-    /// Fetches a single track by zero-based index without loading the whole playlist.
-    pub fn get_default_playlist_track(&self, index: usize) -> Result<Option<Track>, String> {
-        let playlist_id = self.default_playlist_id()?;
-        let connection = self.lock_connection()?;
-        connection
-            .query_row(
-                "SELECT t.id, t.path, t.name, t.title, t.artist, t.album, t.album_artist, t.genre,
-                        t.year, t.track_number, t.disc_number, t.format, t.duration_seconds,
-                        t.sample_rate, t.channels, t.bit_depth, t.lyrics, t.lyrics_source,
-                        t.cover_art_data_url, t.cover_art_mime, t.cover_art_source,
-                        t.fingerprint_sha256, t.acoustid_fingerprint, t.musicbrainz_recording_id,
-                        t.file_size, t.modified_at, t.indexed_at
-                 FROM playlist_tracks pt
-                 JOIN tracks t ON t.id = pt.track_id
-                 WHERE pt.playlist_id = ?1
-                 ORDER BY pt.position
-                 LIMIT 1 OFFSET ?2",
-                params![playlist_id, index as i64],
-                row_to_track,
-            )
-            .optional()
-            .map_err(|error| format!("Failed to read playlist track: {error}"))
     }
 
     pub fn index_directory(

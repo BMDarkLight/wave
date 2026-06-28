@@ -102,33 +102,49 @@ impl MediaBridge {
         Ok(Self { controls })
     }
 
+    pub fn set_playback(&mut self, playback: MediaPlayback) {
+        if let Err(error) = self.controls.set_playback(playback) {
+            tracing::debug!("Failed to update OS media playback state: {error:?}");
+        }
+    }
+
+    fn set_playback_state(&mut self, position_secs: f64, playing: bool) {
+        let pos = MediaPosition(Duration::from_secs_f64(position_secs));
+        let playback = if playing {
+            MediaPlayback::Playing { progress: Some(pos) }
+        } else {
+            MediaPlayback::Paused { progress: Some(pos) }
+        };
+        self.set_playback(playback);
+    }
+
     // ── Playback state ────────────────────────────────────────────────────────
 
     pub fn set_playing(&mut self, position_secs: f64) {
-        let pos = MediaPosition(Duration::from_secs_f64(position_secs));
-        let _ = self.controls.set_playback(MediaPlayback::Playing { progress: Some(pos) });
+        self.set_playback_state(position_secs, true);
     }
 
     pub fn set_paused(&mut self, position_secs: f64) {
-        let pos = MediaPosition(Duration::from_secs_f64(position_secs));
-        let _ = self.controls.set_playback(MediaPlayback::Paused { progress: Some(pos) });
+        self.set_playback_state(position_secs, false);
     }
 
     pub fn set_stopped(&mut self) {
-        let _ = self.controls.set_playback(MediaPlayback::Stopped);
+        self.set_playback(MediaPlayback::Stopped);
     }
 
     // ── Metadata ──────────────────────────────────────────────────────────────
 
     pub fn set_metadata(&mut self, meta: &TrackMetadata) {
         let duration = meta.duration_seconds.map(Duration::from_secs_f64);
-        let _ = self.controls.set_metadata(MediaMetadata {
+        if let Err(error) = self.controls.set_metadata(MediaMetadata {
             title: meta.title.as_deref(),
             artist: meta.artist.as_deref(),
             album: meta.album.as_deref(),
             duration,
             cover_url: meta.cover_url.as_deref(),
-        });
+        }) {
+            tracing::debug!("Failed to update OS media metadata: {error:?}");
+        }
     }
 
     /// Convenience: set metadata and immediately mark as playing.
@@ -140,12 +156,6 @@ impl MediaBridge {
     // ── Position tick (call periodically while playing) ───────────────────────
 
     pub fn update_position(&mut self, position_secs: f64, playing: bool) {
-        let pos = MediaPosition(Duration::from_secs_f64(position_secs));
-        let playback = if playing {
-            MediaPlayback::Playing { progress: Some(pos) }
-        } else {
-            MediaPlayback::Paused { progress: Some(pos) }
-        };
-        let _ = self.controls.set_playback(playback);
+        self.set_playback_state(position_secs, playing);
     }
 }
