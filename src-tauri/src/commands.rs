@@ -743,3 +743,15 @@ pub async fn update_media_metadata(
     with_bridge(&bridge, |b| b.set_metadata(&metadata));
     Ok(())
 }
+
+/// Called periodically (every 500 ms) by the frontend to keep the OS media
+/// interface playback position in sync with the actual audio clock.
+#[tauri::command]
+pub async fn update_media_position(
+    position_seconds: f64,
+    is_playing: bool,
+    bridge: tauri::State<'_, MediaBridgeState>,
+) -> Result<(), String> {
+    with_bridge(&bridge, |b| b.update_position(position_seconds, is_playing));
+    Ok(())
+}

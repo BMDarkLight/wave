@@ -37,6 +37,7 @@ import {
   setShuffle,
   stopTrack,
   updateMediaMetadata,
+  updateMediaPosition,
   type PlaybackMode,
   type PlaybackState,
   type PlaylistInfo,
@@ -156,6 +157,10 @@ function App() {
     if (!document.body.classList.contains("is-seeking")) {
       setSeekValue(state.position_seconds ?? 0);
     }
+    // Keep the OS media controls position in sync during playback.
+    if (state.is_playing) {
+      updateMediaPosition(state.position_seconds, true).catch(console.error);
+    }
   };
 
   const loadPlaylists = async () => {
@@ -264,7 +269,9 @@ function App() {
     playlistNameInputRef.current?.select();
   }, [playlistDialog]);
 
-  // Push track metadata to OS media controls (Control Center, SMTC, MPRIS)
+  // Push track metadata to OS media controls (Control Center, SMTC, MPRIS).
+  // Uses primitive dependencies only (path + play state) to avoid spurious
+  // re-fires when queue/playlist array references change during polling.
   useEffect(() => {
     if (currentTrack && playbackState.is_playing) {
       updateMediaMetadata({
@@ -275,7 +282,7 @@ function App() {
         cover_url: currentTrack.cover_art_data_url,
       }).catch(console.error);
     }
-  }, [currentTrack, playbackState.is_playing]);
+  }, [currentTrack?.path, playbackState.is_playing]);
 
   // Listen for OS media control events (play/pause/next/prev/seek from OS)
   useEffect(() => {

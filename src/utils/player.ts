@@ -361,6 +361,15 @@ export const updateMediaMetadata = (metadata: MediaMetadata): Promise<void> => {
 };
 
 /**
+ * Push a playback-position tick to the OS media interface so the system
+ * overlay / Control Center / MPRIS shows an accurate, moving progress bar.
+ * Call this periodically (e.g. every 500 ms) while the track is playing.
+ */
+export const updateMediaPosition = (position_seconds: number, is_playing: boolean): Promise<void> => {
+  return safeInvoke("update_media_position", { position_seconds, is_playing });
+};
+
+/**
  * Listen for OS media control events (play, pause, next, previous, seek).
  * Returns an unlisten function — call it when your component unmounts.
  *

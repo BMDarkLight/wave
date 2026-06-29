@@ -65,6 +65,7 @@ pub fn run() {
             commands::set_repeat,
             commands::get_playback_mode,
             commands::update_media_metadata,
+            commands::update_media_position,
             commands::create_playlist,
             commands::delete_playlist,
             commands::rename_playlist,
