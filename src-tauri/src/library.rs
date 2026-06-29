@@ -3,6 +3,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 use uuid::Uuid;
@@ -43,12 +44,12 @@ struct TrackExportJson {
     duration_seconds: Option<f64>,
 }
 
-/// Cached IDs for the "default" profile and "Local Sessions" playlist, so we
-/// don't need to hit the database on every single read operation.
+/// Cached ID for the "Local Sessions" playlist, so we don't need to hit the
+/// database on every single read operation.
 pub struct Library {
     db_path: PathBuf,
     connection: Mutex<Connection>,
-    default_playlist_id_cache: Mutex<Option<String>>,
+    default_playlist_id_cache: OnceLock<String>,
 }
 
 impl Library {
@@ -66,7 +67,7 @@ impl Library {
         let library = Self {
             db_path,
             connection: Mutex::new(connection),
-            default_playlist_id_cache: Mutex::new(None),
+            default_playlist_id_cache: OnceLock::new(),
         };
         library.initialize()?;
         Ok(library)
@@ -172,10 +173,7 @@ impl Library {
             ensure_playlist_with_connection(&connection, &profile_id, "Local Sessions")?;
 
         // Warm the cache.
-        *self
-            .default_playlist_id_cache
-            .lock()
-            .map_err(|_| "Lock error".to_string())? = Some(playlist_id.clone());
+        let _ = self.default_playlist_id_cache.set(playlist_id.clone());
 
         if let Err(error) = repair_all_playlist_positions(&connection) {
             tracing::warn!("Failed to repair playlist positions on startup: {error}");
@@ -186,24 +184,14 @@ impl Library {
 
     /// Returns the cached default playlist id, seeding if necessary.
     pub fn default_playlist_id(&self) -> Result<String, String> {
-        {
-            let cache = self
-                .default_playlist_id_cache
-                .lock()
-                .map_err(|_| "Lock error".to_string())?;
-            if let Some(ref id) = *cache {
-                return Ok(id.clone());
-            }
+        if let Some(id) = self.default_playlist_id_cache.get() {
+            return Ok(id.clone());
         }
-        // Cache miss — look it up once and store.
         let connection = self.lock_connection()?;
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
         let playlist_id =
             ensure_playlist_with_connection(&connection, &profile_id, "Local Sessions")?;
-        *self
-            .default_playlist_id_cache
-            .lock()
-            .map_err(|_| "Lock error".to_string())? = Some(playlist_id.clone());
+        let _ = self.default_playlist_id_cache.set(playlist_id.clone());
         Ok(playlist_id)
     }
 
@@ -879,48 +867,6 @@ fn ensure_profile_with_connection(
     Ok(id.to_string())
 }
 
-fn playlist_name_exists(conn: &Connection, profile_id: &str, name: &str) -> Result<bool, String> {
-    conn.query_row(
-        "SELECT 1 FROM playlists WHERE profile_id = ?1 AND name = ?2",
-        params![profile_id, name],
-        |_| Ok(()),
-    )
-    .optional()
-    .map(|row| row.is_some())
-    .map_err(|error| format!("Failed to check playlist name: {error}"))
-}
-
-fn allocate_unique_playlist_name(
-    conn: &Connection,
-    profile_id: &str,
-    desired: &str,
-) -> Result<String, String> {
-    if !playlist_name_exists(conn, profile_id, desired)? {
-        return Ok(desired.to_string());
-    }
-
-    for suffix in 2..=999 {
-        let candidate = format!("{desired} ({suffix})");
-        if !playlist_name_exists(conn, profile_id, &candidate)? {
-            return Ok(candidate);
-        }
-    }
-
-    Err(format!("Could not allocate a unique name for playlist \"{desired}\""))
-}
-
-fn insert_playlist(conn: &Connection, profile_id: &str, name: &str) -> Result<String, String> {
-    let now = now_timestamp();
-    let id = Uuid::new_v4().to_string();
-    conn.execute(
-        "INSERT INTO playlists (id, profile_id, name, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?4)",
-        params![id, profile_id, name, now],
-    )
-    .map_err(|error| format!("Failed to create playlist: {error}"))?;
-    Ok(id)
-}
-
 fn ensure_playlist_with_connection(
     conn: &impl Queryable,
     profile_id: &str,
@@ -1151,7 +1097,7 @@ mod tests {
         let library = Library {
             db_path: PathBuf::from(":memory:"),
             connection: Mutex::new(connection),
-            default_playlist_id_cache: Mutex::new(None),
+            default_playlist_id_cache: OnceLock::new(),
         };
         library.initialize()?;
         Ok(library)

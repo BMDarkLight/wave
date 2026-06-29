@@ -90,28 +90,12 @@ impl Queue {
         self.shuffle_order = Some(order);
     }
 
-    #[allow(dead_code)]
-    pub fn current_path(&self) -> Option<&str> {
-        let idx = self.current_index?;
-        self.tracks.get(idx).map(String::as_str)
-    }
-
     pub fn current_index(&self) -> Option<usize> {
         self.current_index
     }
 
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.tracks.len()
-    }
-
     pub fn tracks(&self) -> &[String] {
         &self.tracks
-    }
-
-    #[allow(dead_code)]
-    pub fn track_at(&self, index: usize) -> Option<&str> {
-        self.tracks.get(index).map(String::as_str)
     }
 
     /// Jump to a specific raw index and return its path.
@@ -371,7 +355,7 @@ impl AudioPlayer {
         Ok((source.convert_samples(), duration))
     }
 
-    fn play_from(&mut self, path: &str, should_play: bool) -> Result<(), AudioError> {
+    pub fn play(&mut self, path: &str) -> Result<(), AudioError> {
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
@@ -381,26 +365,17 @@ impl AudioPlayer {
             .map_err(|error| AudioError::SinkCreation(error.to_string()))?;
         sink.set_volume(self.volume);
         sink.append(source);
-
-        if should_play {
-            sink.play();
-        } else {
-            sink.pause();
-        }
+        sink.play();
 
         self.sink = Some(sink);
         self.current_path = Some(PathBuf::from(path));
         self.clock = PlaybackClock {
-            started_at: should_play.then(Instant::now),
+            started_at: Some(Instant::now()),
             elapsed_before_start: Duration::ZERO,
             duration,
         };
 
         Ok(())
-    }
-
-    pub fn play(&mut self, path: &str) -> Result<(), AudioError> {
-        self.play_from(path, true)
     }
 
     pub fn pause(&mut self) -> Result<(), AudioError> {
