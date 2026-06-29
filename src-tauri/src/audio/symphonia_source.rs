@@ -1,15 +1,28 @@
 use rodio::Source;
 use std::fs::File;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CodecRegistry, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 use crate::error::AudioError;
+
+/// A codec registry that combines all of Symphonia's built-in decoders with the
+/// libopus-backed `OpusDecoder`, since Symphonia has no first-party Opus codec.
+fn codec_registry() -> &'static CodecRegistry {
+    static REGISTRY: OnceLock<CodecRegistry> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut registry = CodecRegistry::new();
+        symphonia::default::register_enabled_codecs(&mut registry);
+        registry.register_all::<symphonia_adapter_libopus::OpusDecoder>();
+        registry
+    })
+}
 
 pub struct SymphoniaSource {
     decoder: Box<dyn symphonia::core::codecs::Decoder>,
@@ -56,7 +69,7 @@ impl SymphoniaSource {
 
         let codec_params = track.codec_params.clone();
 
-        let mut decoder = symphonia::default::get_codecs()
+        let mut decoder = codec_registry()
             .make(&codec_params, &decoder_opts)
             .map_err(|error| AudioError::Decode(format!("Failed to create decoder: {error}")))?;
 
