@@ -539,16 +539,16 @@ pub fn play_track_from_queue(
 
 #[tauri::command]
 pub fn export_playlist(
-    id: String,
+    playlist_id: String,
     path: String,
-    format: String,
+    export_format: String,
     library: tauri::State<LibraryState>,
 ) -> Result<(), String> {
     let lib = lock_library(&library)?;
-    match format.as_str() {
-        "m3u" => lib.export_playlist_m3u(&id, &path),
-        "json" => lib.export_playlist_json(&id, &path),
-        _ => Err(format!("Unknown export format: {format}")),
+    match export_format.as_str() {
+        "m3u" => lib.export_playlist_m3u(&playlist_id, &path),
+        "json" => lib.export_playlist_json(&playlist_id, &path),
+        _ => Err(format!("Unknown export format: {export_format}")),
     }
 }
 

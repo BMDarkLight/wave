@@ -26,6 +26,7 @@ import {
   queueInsertNext,
   removeTrackFromPlaylistById,
   removeFromQueue,
+  renamePlaylist,
   resumeTrack,
   savePlaylistDialog,
   seekTrack,
@@ -110,6 +111,14 @@ function App() {
   // Track context menu
   const [menuTrackPath, setMenuTrackPath] = useState<string | null>(null);
   const [showAddToPlaylist, setShowAddToPlaylist] = useState(false);
+
+  // Create / rename playlist dialog
+  const [playlistDialog, setPlaylistDialog] = useState<
+    { mode: "create" } | { mode: "rename"; playlistId: string; currentName: string } | null
+  >(null);
+  const [playlistNameInput, setPlaylistNameInput] = useState("");
+  const [playlistDialogError, setPlaylistDialogError] = useState<string | null>(null);
+  const playlistNameInputRef = useRef<HTMLInputElement>(null);
 
   const wasPlayingRef = useRef(false);
 
@@ -220,6 +229,12 @@ function App() {
     const interval = setInterval(() => loadQueueTracks().catch(() => {}), 500);
     return () => clearInterval(interval);
   }, [showQueue]);
+
+  useEffect(() => {
+    if (!playlistDialog) return;
+    playlistNameInputRef.current?.focus();
+    playlistNameInputRef.current?.select();
+  }, [playlistDialog]);
 
   // Push track metadata to OS media controls (Control Center, SMTC, MPRIS)
   useEffect(() => {
@@ -430,17 +445,49 @@ function App() {
 
   // ── Playlist management ────────────────────────────────────────────────────
 
-  const handleCreatePlaylist = async () => {
-    const name = prompt("Enter playlist name:");
-    if (!name?.trim()) return;
+  const openCreatePlaylistDialog = () => {
+    setPlaylistNameInput("");
+    setPlaylistDialogError(null);
+    setPlaylistDialog({ mode: "create" });
+  };
+
+  const openRenamePlaylistDialog = (playlistId: string, currentName: string) => {
+    setPlaylistNameInput(currentName);
+    setPlaylistDialogError(null);
+    setPlaylistDialog({ mode: "rename", playlistId, currentName });
+  };
+
+  const closePlaylistDialog = () => {
+    setPlaylistDialog(null);
+    setPlaylistDialogError(null);
+  };
+
+  const submitPlaylistDialog = async () => {
+    if (!playlistDialog) return;
+
+    const name = playlistNameInput.trim();
+    if (!name) {
+      setPlaylistDialogError("Enter a playlist name.");
+      return;
+    }
+
     try {
       setError(null);
-      const info = await createPlaylist(name.trim());
-      await loadPlaylists();
-      setSelectedPlaylistId(info.id);
-      await loadPlaylistTracks(info.id);
+      setPlaylistDialogError(null);
+
+      if (playlistDialog.mode === "create") {
+        const info = await createPlaylist(name);
+        await loadPlaylists();
+        setSelectedPlaylistId(info.id);
+        await loadPlaylistTracks(info.id);
+      } else {
+        await renamePlaylist(playlistDialog.playlistId, name);
+        await loadPlaylists();
+      }
+
+      closePlaylistDialog();
     } catch (err) {
-      setError(formatInvokeError(err, "Failed to create playlist"));
+      setPlaylistDialogError(formatInvokeError(err, "Failed to save playlist"));
     }
   };
 
@@ -553,18 +600,21 @@ function App() {
 
   // ── Export / Import ────────────────────────────────────────────────────────
 
-  const handleExportPlaylist = async () => {
-    if (!selectedPlaylistId) return;
+  const handleExportPlaylistById = async (playlistId: string, playlistName: string) => {
     try {
       setError(null);
-      const name = selectedPlaylist?.name ?? "playlist";
-      const path = await savePlaylistDialog(name);
+      const path = await savePlaylistDialog(playlistName);
       if (!path) return;
-      const format = path.toLowerCase().endsWith(".json") ? "json" : "m3u";
-      await exportPlaylist(selectedPlaylistId, path, format);
+      const exportFormat = path.toLowerCase().endsWith(".json") ? "json" : "m3u";
+      await exportPlaylist(playlistId, path, exportFormat);
     } catch (err) {
-      setError(formatInvokeError(err, "Failed to export playlist"));
+      setError(formatInvokeError(err, `Failed to export "${playlistName}"`));
     }
+  };
+
+  const handleExportSelectedPlaylist = async () => {
+    if (!selectedPlaylistId || !selectedPlaylist) return;
+    await handleExportPlaylistById(selectedPlaylistId, selectedPlaylist.name);
   };
 
   const handleImportPlaylist = async () => {
@@ -601,32 +651,65 @@ function App() {
         <div className="playlist-section">
           <div className="playlist-section-header">
             <p>Playlists</p>
-            <button className="playlist-add-btn" onClick={handleCreatePlaylist} type="button" title="Create playlist">+</button>
+            <button className="playlist-add-btn" onClick={openCreatePlaylistDialog} type="button" title="Create playlist">+</button>
           </div>
           <div className="playlist-list">
-            {playlists.map((pl) => (
-              <div
-                key={pl.id}
-                className={`playlist-item ${selectedPlaylistId === pl.id ? "active" : ""}`}
-                onClick={() => handleSelectPlaylist(pl.id)}
-              >
-                <span className="playlist-item-name">{pl.name}</span>
-                <span className="playlist-item-count">{pl.track_count}</span>
-                {pl.name !== "Local Sessions" && (
-                  <button
-                    className="playlist-delete-btn"
-                    onClick={(e) => { e.stopPropagation(); handleDeletePlaylist(pl.id); }}
-                    title="Delete playlist"
-                    type="button"
-                  >x</button>
-                )}
+            {playlists.length === 0 ? (
+              <div className="playlist-empty">
+                <p>No playlists yet</p>
+                <button className="btn-ghost btn-sm" onClick={openCreatePlaylistDialog} type="button">
+                  Create one
+                </button>
               </div>
-            ))}
+            ) : (
+              playlists.map((pl) => (
+                <div
+                  key={pl.id}
+                  className={`playlist-item ${selectedPlaylistId === pl.id ? "active" : ""}`}
+                  onClick={() => handleSelectPlaylist(pl.id)}
+                >
+                  <span className="playlist-item-name" title={pl.name}>{pl.name}</span>
+                  <span className="playlist-item-count">{pl.track_count}</span>
+                  <div className="playlist-item-actions">
+                    <button
+                      className="playlist-export-btn"
+                      onClick={(e) => { e.stopPropagation(); handleExportPlaylistById(pl.id, pl.name); }}
+                      title={`Export`}
+                      type="button"
+                    >↓</button>
+                    {pl.name !== "Local Sessions" && (
+                      <>
+                        <button
+                          className="playlist-rename-btn"
+                          onClick={(e) => { e.stopPropagation(); openRenamePlaylistDialog(pl.id, pl.name); }}
+                          title="Rename playlist"
+                          type="button"
+                        >···</button>
+                        <button
+                          className="playlist-delete-btn"
+                          onClick={(e) => { e.stopPropagation(); handleDeletePlaylist(pl.id); }}
+                          title="Delete playlist"
+                          type="button"
+                        >x</button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
           </div>
           <div className="playlist-actions">
             <button className="btn-pill" onClick={() => handleAddTrack(true)} disabled={isLoading} type="button">Add music</button>
             <div className="playlist-io">
-              <button className="btn-ghost btn-sm" onClick={handleExportPlaylist} disabled={!selectedPlaylistId} type="button">Export</button>
+              <button
+                className="btn-ghost btn-sm"
+                onClick={handleExportSelectedPlaylist}
+                disabled={!selectedPlaylistId}
+                type="button"
+                title="Export"
+              >
+                Export
+              </button>
               <button className="btn-ghost btn-sm" onClick={handleImportPlaylist} type="button">Import</button>
             </div>
           </div>
@@ -723,6 +806,50 @@ function App() {
 
       {menuTrackPath && (
         <div className="context-menu-backdrop" onClick={() => { setMenuTrackPath(null); setShowAddToPlaylist(false); }} />
+      )}
+
+      {playlistDialog && (
+        <div className="modal-backdrop" onClick={closePlaylistDialog}>
+          <div
+            className="modal-dialog playlist-dialog"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") closePlaylistDialog();
+            }}
+          >
+            <div className="modal-header">
+              <h2>{playlistDialog.mode === "create" ? "Create playlist" : "Rename playlist"}</h2>
+              <button className="modal-close-btn" onClick={closePlaylistDialog} type="button" title="Close">x</button>
+            </div>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                submitPlaylistDialog();
+              }}
+            >
+              <label className="modal-label" htmlFor="playlist-name-input">
+                Name
+              </label>
+              <input
+                id="playlist-name-input"
+                ref={playlistNameInputRef}
+                className="modal-input"
+                type="text"
+                value={playlistNameInput}
+                onChange={(event) => setPlaylistNameInput(event.target.value)}
+                placeholder="My playlist"
+                autoComplete="off"
+              />
+              {playlistDialogError && <p className="modal-error">{playlistDialogError}</p>}
+              <div className="modal-actions">
+                <button className="btn-ghost" onClick={closePlaylistDialog} type="button">Cancel</button>
+                <button className="btn-primary" type="submit">
+                  {playlistDialog.mode === "create" ? "Create" : "Save"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
 
       {showQueue && (

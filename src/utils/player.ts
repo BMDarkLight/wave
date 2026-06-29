@@ -271,8 +271,12 @@ export const playTrackFromQueue = (index: number): Promise<void> => {
 
 // ── Playlist export / import ─────────────────────────────────────────────────
 
-export const exportPlaylist = (id: string, path: string, format: string): Promise<void> => {
-  return safeInvoke("export_playlist", { id, path, format });
+export const exportPlaylist = (
+  playlistId: string,
+  path: string,
+  exportFormat: string
+): Promise<void> => {
+  return safeInvoke("export_playlist", { playlistId, path, exportFormat });
 };
 
 export const importPlaylist = (path: string, name?: string): Promise<ImportResult> => {

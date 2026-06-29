@@ -448,15 +448,100 @@ impl Library {
     // ── Playlist CRUD ────────────────────────────────────────────────────────
 
     pub fn create_playlist(&self, name: &str) -> Result<PlaylistInfo, String> {
+        self.insert_playlist(name, false)
+    }
+
+    /// Create a playlist for import flows, auto-suffixing duplicate names.
+    pub fn create_playlist_for_import(&self, name: &str) -> Result<PlaylistInfo, String> {
+        self.insert_playlist(name, true)
+    }
+
+    fn insert_playlist(&self, name: &str, allow_duplicate_suffix: bool) -> Result<PlaylistInfo, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Playlist name cannot be empty".to_string());
+        }
+
         let connection = self.lock_connection()?;
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
-        let playlist_id = ensure_playlist_with_connection(&connection, &profile_id, name)?;
-        self.playlist_info(&connection, &playlist_id)?
+        let final_name = if allow_duplicate_suffix {
+            self.resolve_unique_playlist_name(&connection, &profile_id, name)?
+        } else if self.playlist_name_exists(&connection, &profile_id, name)? {
+            return Err(format!("A playlist named \"{name}\" already exists"));
+        } else {
+            name.to_string()
+        };
+
+        let id = Uuid::new_v4().to_string();
+        let now = now_timestamp();
+        connection
+            .execute(
+                "INSERT INTO playlists (id, profile_id, name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![id, profile_id, final_name, now],
+            )
+            .map_err(|error| format!("Failed to create playlist: {error}"))?;
+
+        self.playlist_info(&connection, &id)?
             .ok_or_else(|| "Playlist vanished immediately after creation".to_string())
+    }
+
+    fn playlist_name_exists(
+        &self,
+        connection: &Connection,
+        profile_id: &str,
+        name: &str,
+    ) -> Result<bool, String> {
+        connection
+            .query_row(
+                "SELECT 1 FROM playlists WHERE profile_id = ?1 AND name = ?2",
+                params![profile_id, name],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| format!("Failed to check playlist name: {error}"))
+            .map(|row| row.is_some())
+    }
+
+    fn resolve_unique_playlist_name(
+        &self,
+        connection: &Connection,
+        profile_id: &str,
+        base: &str,
+    ) -> Result<String, String> {
+        if !self.playlist_name_exists(connection, profile_id, base)? {
+            return Ok(base.to_string());
+        }
+
+        for index in 2..1000 {
+            let candidate = format!("{base} ({index})");
+            if !self.playlist_name_exists(connection, profile_id, &candidate)? {
+                return Ok(candidate);
+            }
+        }
+
+        Err(format!("Could not find a unique name for playlist \"{base}\""))
     }
 
     pub fn delete_playlist(&self, playlist_id: &str) -> Result<(), String> {
         let connection = self.lock_connection()?;
+        let name: Option<String> = connection
+            .query_row(
+                "SELECT name FROM playlists WHERE id = ?1",
+                params![playlist_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("Failed to look up playlist: {error}"))?;
+
+        match name {
+            None => return Err("Playlist not found".to_string()),
+            Some(name) if name == "Local Sessions" => {
+                return Err("The default \"Local Sessions\" playlist cannot be deleted".to_string());
+            }
+            Some(_) => {}
+        }
+
         let deleted = connection
             .execute(
                 "DELETE FROM playlists WHERE id = ?1",
@@ -470,17 +555,37 @@ impl Library {
     }
 
     pub fn rename_playlist(&self, playlist_id: &str, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Playlist name cannot be empty".to_string());
+        }
+
         let connection = self.lock_connection()?;
+        let (current_name, profile_id): (String, String) = connection
+            .query_row(
+                "SELECT name, profile_id FROM playlists WHERE id = ?1",
+                params![playlist_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(|error| format!("Failed to look up playlist: {error}"))?
+            .ok_or_else(|| "Playlist not found".to_string())?;
+
+        if current_name == "Local Sessions" {
+            return Err("The default \"Local Sessions\" playlist cannot be renamed".to_string());
+        }
+
+        if name != current_name && self.playlist_name_exists(&connection, &profile_id, name)? {
+            return Err(format!("A playlist named \"{name}\" already exists"));
+        }
+
         let now = now_timestamp();
-        let updated = connection
+        connection
             .execute(
                 "UPDATE playlists SET name = ?1, updated_at = ?2 WHERE id = ?3",
                 params![name, now, playlist_id],
             )
             .map_err(|error| format!("Failed to rename playlist: {error}"))?;
-        if updated == 0 {
-            return Err("Playlist not found".to_string());
-        }
         Ok(())
     }
 
@@ -586,7 +691,7 @@ impl Library {
                 .unwrap_or("Imported Playlist")
         });
 
-        let playlist_info = self.create_playlist(name)?;
+        let playlist_info = self.create_playlist_for_import(name)?;
         let playlist_id = playlist_info.id;
 
         let mut tracks = Vec::new();
@@ -650,7 +755,7 @@ impl Library {
             .map_err(|error| format!("Failed to parse playlist JSON: {error}"))?;
 
         let name = playlist_name.unwrap_or(&export.name);
-        let playlist_info = self.create_playlist(name)?;
+        let playlist_info = self.create_playlist_for_import(name)?;
         let playlist_id = playlist_info.id;
 
         let mut tracks = Vec::new();
@@ -774,13 +879,53 @@ fn ensure_profile_with_connection(
     Ok(id.to_string())
 }
 
+fn playlist_name_exists(conn: &Connection, profile_id: &str, name: &str) -> Result<bool, String> {
+    conn.query_row(
+        "SELECT 1 FROM playlists WHERE profile_id = ?1 AND name = ?2",
+        params![profile_id, name],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|row| row.is_some())
+    .map_err(|error| format!("Failed to check playlist name: {error}"))
+}
+
+fn allocate_unique_playlist_name(
+    conn: &Connection,
+    profile_id: &str,
+    desired: &str,
+) -> Result<String, String> {
+    if !playlist_name_exists(conn, profile_id, desired)? {
+        return Ok(desired.to_string());
+    }
+
+    for suffix in 2..=999 {
+        let candidate = format!("{desired} ({suffix})");
+        if !playlist_name_exists(conn, profile_id, &candidate)? {
+            return Ok(candidate);
+        }
+    }
+
+    Err(format!("Could not allocate a unique name for playlist \"{desired}\""))
+}
+
+fn insert_playlist(conn: &Connection, profile_id: &str, name: &str) -> Result<String, String> {
+    let now = now_timestamp();
+    let id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO playlists (id, profile_id, name, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4)",
+        params![id, profile_id, name, now],
+    )
+    .map_err(|error| format!("Failed to create playlist: {error}"))?;
+    Ok(id)
+}
+
 fn ensure_playlist_with_connection(
     conn: &impl Queryable,
     profile_id: &str,
     name: &str,
 ) -> Result<String, String> {
-    let now = now_timestamp();
-
     if let Some(id) = conn
         .query_opt(
             "SELECT id FROM playlists WHERE profile_id = ?1 AND name = ?2",
@@ -792,6 +937,7 @@ fn ensure_playlist_with_connection(
         return Ok(id);
     }
 
+    let now = now_timestamp();
     let id = Uuid::new_v4().to_string();
     conn.exec(
         "INSERT INTO playlists (id, profile_id, name, created_at, updated_at)
