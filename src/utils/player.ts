@@ -92,6 +92,18 @@ export interface PlaylistInfo {
   updated_at: number;
 }
 
+export interface QueueTrackState {
+  tracks: Track[];
+  current_index: number | null;
+  is_shuffled: boolean;
+}
+
+export interface ImportResult {
+  playlist_id: string;
+  playlist_name: string;
+  track_count: number;
+}
+
 export const playTrack = (path: string): Promise<void> => {
   return safeInvoke("play_track", { path });
 };
@@ -196,6 +208,109 @@ export const getLibraryDatabasePath = (): Promise<string> => {
 export const getSupportedAudioExtensions = (): Promise<string[]> => {
   return safeInvoke<string[]>("get_supported_audio_extensions");
 }
+
+// ── Playlist CRUD ────────────────────────────────────────────────────────────
+
+export const createPlaylist = (name: string): Promise<PlaylistInfo> => {
+  return safeInvoke<PlaylistInfo>("create_playlist", { name });
+};
+
+export const deletePlaylist = (id: string): Promise<void> => {
+  return safeInvoke("delete_playlist", { id });
+};
+
+export const renamePlaylist = (id: string, name: string): Promise<void> => {
+  return safeInvoke("rename_playlist", { id, name });
+};
+
+export const getPlaylistTracksById = (id: string): Promise<Track[]> => {
+  return safeInvoke<Track[]>("get_playlist_tracks_by_id", { id });
+};
+
+export const addTrackToPlaylistById = (id: string, path: string): Promise<Track> => {
+  return safeInvoke<Track>("add_track_to_playlist_by_id", { id, path });
+};
+
+export const removeTrackFromPlaylistById = (id: string, path: string): Promise<void> => {
+  return safeInvoke("remove_track_from_playlist_by_id", { id, path });
+};
+
+export const clearPlaylistById = (id: string): Promise<void> => {
+  return safeInvoke("clear_playlist_by_id", { id });
+};
+
+export const playTrackFromSpecificPlaylist = (playlistId: string, index: number): Promise<void> => {
+  return safeInvoke("play_track_from_specific_playlist", { playlistId, index });
+};
+
+// ── Queue manipulation ──────────────────────────────────────────────────────
+
+export const addToQueue = (path: string): Promise<void> => {
+  return safeInvoke("add_to_queue", { path });
+};
+
+export const queueInsertNext = (path: string): Promise<void> => {
+  return safeInvoke("queue_insert_next", { path });
+};
+
+export const removeFromQueue = (index: number): Promise<string | null> => {
+  return safeInvoke<string | null>("remove_from_queue", { index });
+};
+
+export const clearQueue = (): Promise<void> => {
+  return safeInvoke("clear_queue");
+};
+
+export const getQueueTracks = (): Promise<QueueTrackState> => {
+  return safeInvoke<QueueTrackState>("get_queue_tracks");
+};
+
+export const playTrackFromQueue = (index: number): Promise<void> => {
+  return safeInvoke("play_track_from_queue", { index });
+};
+
+// ── Playlist export / import ─────────────────────────────────────────────────
+
+export const exportPlaylist = (id: string, path: string, format: string): Promise<void> => {
+  return safeInvoke("export_playlist", { id, path, format });
+};
+
+export const importPlaylist = (path: string, name?: string): Promise<ImportResult> => {
+  return safeInvoke<ImportResult>("import_playlist", { path, name });
+};
+
+// ── Dialog helpers for export / import ───────────────────────────────────────
+
+export const savePlaylistDialog = async (defaultName?: string): Promise<string | null> => {
+  await tauriInitialized;
+  if (!openFn) {
+    throw new Error("Tauri API is not available. Run the app inside the Tauri desktop window.");
+  }
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  return save({
+    title: "Export Playlist",
+    defaultPath: defaultName,
+    filters: [
+      { name: "M3U Playlist", extensions: ["m3u"] },
+      { name: "Wave Playlist (JSON)", extensions: ["json"] },
+    ],
+  });
+};
+
+export const openPlaylistDialog = async (): Promise<string | null> => {
+  await tauriInitialized;
+  if (!openFn) {
+    throw new Error("Tauri API is not available. Run the app inside the Tauri desktop window.");
+  }
+  const selected = await openFn({
+    multiple: false,
+    filters: [{ name: "Playlists", extensions: ["m3u", "m3u8", "json"] }],
+    title: "Import Playlist",
+  });
+  if (selected === null) return null;
+  if (typeof selected === "string") return selected;
+  return null;
+};
 
 // ── Queue / Playback Mode commands ────────────────────────────────────────────
 

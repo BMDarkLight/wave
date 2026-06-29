@@ -210,6 +210,105 @@ impl Queue {
     pub fn is_shuffled(&self) -> bool {
         self.shuffle_order.is_some()
     }
+
+    /// Append a track to the end of the queue.
+    pub fn enqueue(&mut self, path: String) {
+        let new_idx = self.tracks.len();
+        self.tracks.push(path);
+        if let Some(ref mut order) = self.shuffle_order {
+            order.push(new_idx);
+        }
+    }
+
+    /// Insert a track so it plays immediately after the current track.
+    /// If nothing is playing, it is appended.
+    pub fn insert_next(&mut self, path: String) {
+        let insert_at = match self.current_index {
+            Some(idx) => (idx + 1).min(self.tracks.len()),
+            None => self.tracks.len(),
+        };
+        self.tracks.insert(insert_at, path.clone());
+        if let Some(ref mut order) = self.shuffle_order {
+            for idx in order.iter_mut() {
+                if *idx >= insert_at {
+                    *idx += 1;
+                }
+            }
+            let pos = (self.shuffle_pos + 1).min(order.len());
+            order.insert(pos, insert_at);
+        }
+    }
+
+    /// Remove the track at `index` from the raw track list, adjusting
+    /// `current_index` and shuffle order accordingly. Returns the removed path.
+    pub fn remove_at(&mut self, index: usize) -> Option<String> {
+        if index >= self.tracks.len() {
+            return None;
+        }
+
+        let removed = self.tracks.remove(index);
+
+        match self.current_index {
+            Some(current) => {
+                if current == index {
+                    if self.tracks.is_empty() {
+                        self.current_index = None;
+                    } else if current >= self.tracks.len() {
+                        self.current_index = Some(self.tracks.len() - 1);
+                    }
+                } else if current > index {
+                    self.current_index = Some(current - 1);
+                }
+            }
+            None => {}
+        }
+
+        if let Some(ref mut order) = self.shuffle_order {
+            let mut new_order = Vec::with_capacity(order.len().saturating_sub(1));
+            let mut removed_pos = None;
+            for (i, &idx) in order.iter().enumerate() {
+                if idx == index {
+                    removed_pos = Some(i);
+                    continue;
+                }
+                new_order.push(if idx > index { idx - 1 } else { idx });
+            }
+            *order = new_order;
+            if let Some(rp) = removed_pos {
+                if rp <= self.shuffle_pos {
+                    self.shuffle_pos = self.shuffle_pos.saturating_sub(1);
+                }
+            }
+            if order.is_empty() {
+                self.shuffle_order = None;
+                self.shuffle_pos = 0;
+            }
+        }
+
+        Some(removed)
+    }
+
+    /// Remove all tracks from the queue except the one currently playing.
+    pub fn clear_upcoming(&mut self) {
+        if let Some(current_idx) = self.current_index {
+            if let Some(path) = self.tracks.get(current_idx).cloned() {
+                self.tracks = vec![path];
+                self.current_index = Some(0);
+            } else {
+                self.tracks.clear();
+                self.current_index = None;
+            }
+        } else {
+            self.tracks.clear();
+        }
+        self.shuffle_order = None;
+        self.shuffle_pos = 0;
+    }
+
+    /// Jump to a specific index in the queue and return its path.
+    pub fn jump_to(&mut self, index: usize) -> Option<&str> {
+        self.jump(index)
+    }
 }
 
 // ── AudioPlayer ───────────────────────────────────────────────────────────────
@@ -419,6 +518,32 @@ impl AudioPlayer {
         let path = self.queue.previous(&self.repeat).map(str::to_string);
         if let Some(ref previous_path) = path {
             self.play(previous_path)?;
+        }
+        Ok(path)
+    }
+
+    // ── Queue manipulation ───────────────────────────────────────────────────
+
+    pub fn enqueue(&mut self, path: &str) {
+        self.queue.enqueue(path.to_string());
+    }
+
+    pub fn insert_next(&mut self, path: &str) {
+        self.queue.insert_next(path.to_string());
+    }
+
+    pub fn remove_from_queue(&mut self, index: usize) -> Option<String> {
+        self.queue.remove_at(index)
+    }
+
+    pub fn clear_upcoming(&mut self) {
+        self.queue.clear_upcoming();
+    }
+
+    pub fn jump_to_queue_index(&mut self, index: usize) -> Result<Option<String>, AudioError> {
+        let path = self.queue.jump_to(index).map(str::to_string);
+        if let Some(ref path) = path {
+            self.play(path)?;
         }
         Ok(path)
     }

@@ -25,6 +25,24 @@ pub struct PlaylistInfo {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct PlaylistExportJson {
+    format: String,
+    version: u32,
+    name: String,
+    exported_at: i64,
+    tracks: Vec<TrackExportJson>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct TrackExportJson {
+    path: String,
+    title: String,
+    artist: String,
+    album: String,
+    duration_seconds: Option<f64>,
+}
+
 /// Cached IDs for the "default" profile and "Local Sessions" playlist, so we
 /// don't need to hit the database on every single read operation.
 pub struct Library {
@@ -425,6 +443,226 @@ impl Library {
 
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("Failed to read playlists: {error}"))
+    }
+
+    // ── Playlist CRUD ────────────────────────────────────────────────────────
+
+    pub fn create_playlist(&self, name: &str) -> Result<PlaylistInfo, String> {
+        let connection = self.lock_connection()?;
+        let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
+        let playlist_id = ensure_playlist_with_connection(&connection, &profile_id, name)?;
+        self.playlist_info(&connection, &playlist_id)?
+            .ok_or_else(|| "Playlist vanished immediately after creation".to_string())
+    }
+
+    pub fn delete_playlist(&self, playlist_id: &str) -> Result<(), String> {
+        let connection = self.lock_connection()?;
+        let deleted = connection
+            .execute(
+                "DELETE FROM playlists WHERE id = ?1",
+                params![playlist_id],
+            )
+            .map_err(|error| format!("Failed to delete playlist: {error}"))?;
+        if deleted == 0 {
+            return Err("Playlist not found".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn rename_playlist(&self, playlist_id: &str, name: &str) -> Result<(), String> {
+        let connection = self.lock_connection()?;
+        let now = now_timestamp();
+        let updated = connection
+            .execute(
+                "UPDATE playlists SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                params![name, now, playlist_id],
+            )
+            .map_err(|error| format!("Failed to rename playlist: {error}"))?;
+        if updated == 0 {
+            return Err("Playlist not found".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn clear_playlist(&self, playlist_id: &str) -> Result<(), String> {
+        let connection = self.lock_connection()?;
+        connection
+            .execute(
+                "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+                params![playlist_id],
+            )
+            .map_err(|error| format!("Failed to clear playlist: {error}"))?;
+        Ok(())
+    }
+
+    pub fn get_playlist_info(&self, playlist_id: &str) -> Result<Option<PlaylistInfo>, String> {
+        let connection = self.lock_connection()?;
+        self.playlist_info(&connection, playlist_id)
+    }
+
+    fn playlist_info(
+        &self,
+        connection: &Connection,
+        playlist_id: &str,
+    ) -> Result<Option<PlaylistInfo>, String> {
+        connection
+            .query_row(
+                "SELECT p.id, p.profile_id, p.name, COUNT(pt.track_id), p.created_at, p.updated_at
+                 FROM playlists p
+                 LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+                 WHERE p.id = ?1
+                 GROUP BY p.id",
+                params![playlist_id],
+                row_to_playlist,
+            )
+            .optional()
+            .map_err(|error| format!("Failed to query playlist: {error}"))
+    }
+
+    /// Look up full `Track` records for a list of file paths (used by the queue).
+    /// Returns `Some(track)` for found tracks and `None` for paths not in the
+    /// library, preserving the input order.
+    pub fn get_tracks_by_paths(&self, paths: &[String]) -> Result<Vec<Option<Track>>, String> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let connection = self.lock_connection()?;
+        let mut tracks = Vec::with_capacity(paths.len());
+        for path in paths {
+            let track = connection
+                .query_row(
+                    &format!(
+                        "SELECT {TRACK_SELECT_COLUMNS}
+                         FROM tracks t
+                         WHERE t.path = ?1"
+                    ),
+                    params![path],
+                    row_to_track,
+                )
+                .optional()
+                .map_err(|error| format!("Failed to query track by path: {error}"))?;
+            tracks.push(track);
+        }
+        Ok(tracks)
+    }
+
+    // ── Export / Import ──────────────────────────────────────────────────────
+
+    /// Export a playlist as an M3U8 file (a plain-text list of file paths).
+    pub fn export_playlist_m3u(
+        &self,
+        playlist_id: &str,
+        output_path: &str,
+    ) -> Result<(), String> {
+        let tracks = self.get_playlist_tracks(playlist_id)?;
+        let mut content = String::from("#EXTM3U\n");
+        for track in &tracks {
+            let duration = track.duration_seconds.map(|d| d as i64).unwrap_or(-1);
+            content.push_str(&format!(
+                "#EXTINF:{},{} - {}\n",
+                duration, track.artist, track.title
+            ));
+            content.push_str(&track.path);
+            content.push('\n');
+        }
+        std::fs::write(output_path, content)
+            .map_err(|error| format!("Failed to write M3U file: {error}"))?;
+        Ok(())
+    }
+
+    /// Import an M3U/M3U8 file, creating a new playlist and adding all
+    /// referenced files to it. Returns the new playlist id and imported tracks.
+    pub fn import_playlist_m3u(
+        &self,
+        m3u_path: &str,
+        playlist_name: Option<&str>,
+    ) -> Result<(String, Vec<Track>), String> {
+        let content =
+            std::fs::read_to_string(m3u_path).map_err(|error| format!("Failed to read M3U file: {error}"))?;
+        let name = playlist_name.unwrap_or_else(|| {
+            Path::new(m3u_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Imported Playlist")
+        });
+
+        let playlist_info = self.create_playlist(name)?;
+        let playlist_id = playlist_info.id;
+
+        let mut tracks = Vec::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            match self.add_track_to_playlist(&playlist_id, line.to_string()) {
+                Ok(track) => tracks.push(track),
+                Err(error) => tracing::warn!("Skipped during M3U import — {line}: {error}"),
+            }
+        }
+        Ok((playlist_id, tracks))
+    }
+
+    /// Export a playlist as a Wave JSON file (paths + metadata).
+    pub fn export_playlist_json(
+        &self,
+        playlist_id: &str,
+        output_path: &str,
+    ) -> Result<(), String> {
+        let tracks = self.get_playlist_tracks(playlist_id)?;
+        let info = self
+            .get_playlist_info(playlist_id)?
+            .ok_or("Playlist not found")?;
+
+        let export = PlaylistExportJson {
+            format: "wave-playlist".to_string(),
+            version: 1,
+            name: info.name,
+            exported_at: now_timestamp(),
+            tracks: tracks
+                .iter()
+                .map(|t| TrackExportJson {
+                    path: t.path.clone(),
+                    title: t.title.clone(),
+                    artist: t.artist.clone(),
+                    album: t.album.clone(),
+                    duration_seconds: t.duration_seconds,
+                })
+                .collect(),
+        };
+
+        let json = serde_json::to_string_pretty(&export)
+            .map_err(|error| format!("Failed to serialize playlist JSON: {error}"))?;
+        std::fs::write(output_path, json)
+            .map_err(|error| format!("Failed to write JSON file: {error}"))?;
+        Ok(())
+    }
+
+    /// Import a Wave JSON playlist file, creating a new playlist.
+    pub fn import_playlist_json(
+        &self,
+        json_path: &str,
+        playlist_name: Option<&str>,
+    ) -> Result<(String, Vec<Track>), String> {
+        let content = std::fs::read_to_string(json_path)
+            .map_err(|error| format!("Failed to read JSON file: {error}"))?;
+        let export: PlaylistExportJson = serde_json::from_str(&content)
+            .map_err(|error| format!("Failed to parse playlist JSON: {error}"))?;
+
+        let name = playlist_name.unwrap_or(&export.name);
+        let playlist_info = self.create_playlist(name)?;
+        let playlist_id = playlist_info.id;
+
+        let mut tracks = Vec::new();
+        for track in &export.tracks {
+            match self.add_track_to_playlist(&playlist_id, track.path.clone()) {
+                Ok(t) => tracks.push(t),
+                Err(error) => {
+                    tracing::warn!("Skipped during JSON import — {}: {error}", track.path)
+                }
+            }
+        }
+        Ok((playlist_id, tracks))
     }
 }
 

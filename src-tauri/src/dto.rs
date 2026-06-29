@@ -1,4 +1,5 @@
 use crate::audio::player::RepeatMode;
+use crate::metadata::Track;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -18,8 +19,24 @@ pub struct QueueStateDto {
     pub is_shuffled: bool,
 }
 
+/// Queue with full track metadata (for UI display).
+#[derive(Debug, Clone, Serialize)]
+pub struct QueueDto {
+    pub tracks: Vec<Track>,
+    pub current_index: Option<usize>,
+    pub is_shuffled: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PlaybackModeDto {
     pub repeat: RepeatMode,
     pub shuffle: bool,
+}
+
+/// Result of importing a playlist — the new playlist id and its tracks.
+#[derive(Debug, Clone, Serialize)]
+pub struct ImportResultDto {
+    pub playlist_id: String,
+    pub playlist_name: String,
+    pub track_count: usize,
 }

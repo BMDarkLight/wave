@@ -3,20 +3,38 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   addTrackToPlaylist,
+  addTrackToPlaylistById,
+  addToQueue,
   clearPlaylist,
+  clearPlaylistById,
+  clearQueue,
+  createPlaylist,
+  deletePlaylist,
+  exportPlaylist,
   getFileName,
   getPlaybackState,
   getPlaybackMode,
   getPlaylist,
+  getPlaylistTracksById,
   getQueue,
+  getQueueTracks,
+  importPlaylist,
+  listPlaylists,
   listenToMediaControls,
+  openPlaylistDialog,
   pauseTrack,
   playNext,
   playPrevious,
   playTrack,
   playTrackFromPlaylist,
+  playTrackFromQueue,
+  playTrackFromSpecificPlaylist,
+  queueInsertNext,
   removeTrackFromPlaylist,
+  removeTrackFromPlaylistById,
+  removeFromQueue,
   resumeTrack,
+  savePlaylistDialog,
   seekTrack,
   selectAudioFile,
   setPlayerVolume,
@@ -24,9 +42,12 @@ import {
   setShuffle,
   stopTrack,
   updateMediaMetadata,
+  type ImportResult,
   type PlaybackMode,
   type PlaybackState,
+  type PlaylistInfo,
   type QueueState,
+  type QueueTrackState,
   type Track,
 } from "./utils/player";
 import "./App.css";
@@ -90,6 +111,18 @@ function App() {
   const [seekValue, setSeekValue] = useState(0);
   const [volumeValue, setVolumeValue] = useState(0.8);
 
+  // Playlist management
+  const [playlists, setPlaylists] = useState<PlaylistInfo[]>([]);
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
+
+  // Queue panel
+  const [queueData, setQueueData] = useState<QueueTrackState>({ tracks: [], current_index: null, is_shuffled: false });
+  const [showQueue, setShowQueue] = useState(false);
+
+  // Track context menu
+  const [menuTrackPath, setMenuTrackPath] = useState<string | null>(null);
+  const [showAddToPlaylist, setShowAddToPlaylist] = useState(false);
+
   const currentIndex = useMemo(
     () => playlist.findIndex((track) => track.path === playbackState.current_path),
     [playlist, playbackState.current_path]
@@ -97,6 +130,8 @@ function App() {
   const currentTrack = currentIndex >= 0 ? playlist[currentIndex] : null;
   const displayDuration = playbackState.duration_seconds ?? currentTrack?.duration_seconds ?? 0;
   const displayPosition = Math.min(seekValue, displayDuration || seekValue);
+
+  const selectedPlaylist = playlists.find((p) => p.id === selectedPlaylistId) ?? null;
 
   const updatePlaybackState = async () => {
     const state = await getPlaybackState();
@@ -112,12 +147,38 @@ function App() {
     setPlaylist(tracks);
   };
 
+  const loadPlaylists = async () => {
+    const list = await listPlaylists();
+    setPlaylists(list);
+    return list;
+  };
+
+  const loadPlaylistTracks = async (playlistId: string) => {
+    const tracks = await getPlaylistTracksById(playlistId);
+    setPlaylist(tracks);
+  };
+
+  const loadQueueTracks = async () => {
+    const data = await getQueueTracks();
+    setQueueData(data);
+  };
+
+  // Resolve the default playlist ID from the playlists list.
+  const getDefaultPlaylistId = (list: PlaylistInfo[]): string | null => {
+    return (list.find((p) => p.name === "Local Sessions") ?? list[0])?.id ?? null;
+  };
+
   useEffect(() => {
     const initApp = async () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       try {
+        const list = await loadPlaylists();
+        const defaultId = getDefaultPlaylistId(list);
+        if (defaultId) {
+          setSelectedPlaylistId(defaultId);
+          await loadPlaylistTracks(defaultId);
+        }
         await updatePlaybackState();
-        await loadPlaylist();
       } catch (err: any) {
         if (err?.message?.includes("not available") || err?.message?.includes("undefined")) {
           setError("Tauri API not available. Run `npm run tauri dev` instead of plain Vite.");
@@ -129,6 +190,14 @@ function App() {
     const interval = setInterval(() => updatePlaybackState().catch(() => {}), 500);
     return () => clearInterval(interval);
   }, []);
+
+  // Poll queue tracks when the queue panel is visible
+  useEffect(() => {
+    if (!showQueue) return;
+    loadQueueTracks().catch(() => {});
+    const interval = setInterval(() => loadQueueTracks().catch(() => {}), 1000);
+    return () => clearInterval(interval);
+  }, [showQueue]);
 
   // Push track metadata to OS media controls (Control Center, SMTC, MPRIS)
   useEffect(() => {
@@ -173,17 +242,23 @@ function App() {
       setIsLoading(true);
       const paths = await selectAudioFile(multiple);
       if (paths?.length) {
+        const playlistId = selectedPlaylistId ?? getDefaultPlaylistId(playlists);
+        if (!playlistId) {
+          setError("No playlist selected.");
+          return;
+        }
         let failCount = 0;
         for (const path of paths) {
           try {
-            await addTrackToPlaylist(path);
+            await addTrackToPlaylistById(playlistId, path);
           } catch (err) {
             failCount++;
             console.error("Failed to add track:", path, err);
           }
         }
         if (failCount > 0) setError(`Failed to add ${failCount} track(s).`);
-        await loadPlaylist();
+        await loadPlaylistTracks(playlistId);
+        await loadPlaylists();
       }
     } catch (err) {
       setError(formatInvokeError(err, "Failed to add track"));
@@ -195,8 +270,10 @@ function App() {
   const handleRemoveTrack = async (path: string) => {
     try {
       setError(null);
-      await removeTrackFromPlaylist(path);
-      await loadPlaylist();
+      if (!selectedPlaylistId) return;
+      await removeTrackFromPlaylistById(selectedPlaylistId, path);
+      await loadPlaylistTracks(selectedPlaylistId);
+      await loadPlaylists();
     } catch (err) {
       setError(formatInvokeError(err, "Failed to remove track"));
     }
@@ -206,8 +283,10 @@ function App() {
     try {
       setError(null);
       setIsLoading(true);
-      await playTrackFromPlaylist(index);
+      if (!selectedPlaylistId) return;
+      await playTrackFromSpecificPlaylist(selectedPlaylistId, index);
       await updatePlaybackState();
+      if (showQueue) await loadQueueTracks();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to play track");
     } finally {
@@ -225,8 +304,8 @@ function App() {
         await resumeTrack();
       } else if (playbackState.current_path) {
         await playTrack(playbackState.current_path);
-      } else if (playlist.length > 0) {
-        await playTrackFromPlaylist(0);
+      } else if (playlist.length > 0 && selectedPlaylistId) {
+        await playTrackFromSpecificPlaylist(selectedPlaylistId, 0);
       } else {
         await handleAddTrack(false);
         return;
@@ -291,12 +370,159 @@ function App() {
     try {
       setError(null);
       setIsLoading(true);
-      await clearPlaylist();
-      await loadPlaylist();
+      if (!selectedPlaylistId) return;
+      await clearPlaylistById(selectedPlaylistId);
+      await loadPlaylistTracks(selectedPlaylistId);
+      await loadPlaylists();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to clear playlist");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // ── Playlist management ────────────────────────────────────────────────────
+
+  const handleCreatePlaylist = async () => {
+    const name = prompt("Enter playlist name:");
+    if (!name?.trim()) return;
+    try {
+      setError(null);
+      const info = await createPlaylist(name.trim());
+      await loadPlaylists();
+      setSelectedPlaylistId(info.id);
+      await loadPlaylistTracks(info.id);
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to create playlist"));
+    }
+  };
+
+  const handleDeletePlaylist = async (id: string) => {
+    const playlistInfo = playlists.find((p) => p.id === id);
+    if (!confirm(`Delete playlist "${playlistInfo?.name ?? "Unknown"}"?`)) return;
+    try {
+      setError(null);
+      await deletePlaylist(id);
+      const list = await loadPlaylists();
+      if (selectedPlaylistId === id) {
+        const defaultId = getDefaultPlaylistId(list);
+        if (defaultId) {
+          setSelectedPlaylistId(defaultId);
+          await loadPlaylistTracks(defaultId);
+        }
+      }
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to delete playlist"));
+    }
+  };
+
+  const handleSelectPlaylist = async (id: string) => {
+    setSelectedPlaylistId(id);
+    setMenuTrackPath(null);
+    try {
+      await loadPlaylistTracks(id);
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to load playlist"));
+    }
+  };
+
+  // ── Queue operations ───────────────────────────────────────────────────────
+
+  const handlePlayNext = async (path: string) => {
+    try {
+      setError(null);
+      await queueInsertNext(path);
+      setMenuTrackPath(null);
+      if (showQueue) await loadQueueTracks();
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to add track to play next"));
+    }
+  };
+
+  const handleAddToQueue = async (path: string) => {
+    try {
+      setError(null);
+      await addToQueue(path);
+      setMenuTrackPath(null);
+      if (showQueue) await loadQueueTracks();
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to add track to queue"));
+    }
+  };
+
+  const handleAddTrackToPlaylist = async (targetPlaylistId: string, path: string) => {
+    try {
+      setError(null);
+      await addTrackToPlaylistById(targetPlaylistId, path);
+      setShowAddToPlaylist(false);
+      setMenuTrackPath(null);
+      await loadPlaylists();
+      if (targetPlaylistId === selectedPlaylistId) {
+        await loadPlaylistTracks(targetPlaylistId);
+      }
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to add track to playlist"));
+    }
+  };
+
+  const handleRemoveFromQueue = async (index: number) => {
+    try {
+      setError(null);
+      await removeFromQueue(index);
+      await loadQueueTracks();
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to remove from queue"));
+    }
+  };
+
+  const handleClearQueue = async () => {
+    try {
+      setError(null);
+      await clearQueue();
+      await loadQueueTracks();
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to clear queue"));
+    }
+  };
+
+  const handlePlayFromQueue = async (index: number) => {
+    try {
+      setError(null);
+      await playTrackFromQueue(index);
+      await updatePlaybackState();
+      await loadQueueTracks();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to play track");
+    }
+  };
+
+  // ── Export / Import ────────────────────────────────────────────────────────
+
+  const handleExportPlaylist = async () => {
+    if (!selectedPlaylistId) return;
+    try {
+      setError(null);
+      const name = selectedPlaylist?.name ?? "playlist";
+      const path = await savePlaylistDialog(name);
+      if (!path) return;
+      const format = path.endsWith(".json") ? "json" : "m3u";
+      await exportPlaylist(selectedPlaylistId, path, format);
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to export playlist"));
+    }
+  };
+
+  const handleImportPlaylist = async () => {
+    try {
+      setError(null);
+      const path = await openPlaylistDialog();
+      if (!path) return;
+      const result = await importPlaylist(path);
+      await loadPlaylists();
+      setSelectedPlaylistId(result.playlist_id);
+      await loadPlaylistTracks(result.playlist_id);
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to import playlist"));
     }
   };
 
@@ -309,12 +535,42 @@ function App() {
         <div className="brand-mark"><span>W</span> Wave</div>
         <nav className="sidebar-nav">
           <button className="nav-item active" type="button"><span>Home</span></button>
-          <button className="nav-item" type="button"><span>Your Library</span></button>
+          <button className="nav-item" type="button" onClick={() => setShowQueue((v) => !v)}>
+            <span>Queue{queueData.tracks.length > 0 ? ` (${queueData.tracks.length})` : ""}</span>
+          </button>
         </nav>
-        <div className="library-card">
-          <p>Local Files</p>
-          <strong>{playlist.length} songs</strong>
-          <button className="btn-pill" onClick={() => handleAddTrack(true)} disabled={isLoading} type="button">Add music</button>
+        <div className="playlist-section">
+          <div className="playlist-section-header">
+            <p>Playlists</p>
+            <button className="playlist-add-btn" onClick={handleCreatePlaylist} type="button" title="Create playlist">+</button>
+          </div>
+          <div className="playlist-list">
+            {playlists.map((pl) => (
+              <div
+                key={pl.id}
+                className={`playlist-item ${selectedPlaylistId === pl.id ? "active" : ""}`}
+                onClick={() => handleSelectPlaylist(pl.id)}
+              >
+                <span className="playlist-item-name">{pl.name}</span>
+                <span className="playlist-item-count">{pl.track_count}</span>
+                {pl.name !== "Local Sessions" && (
+                  <button
+                    className="playlist-delete-btn"
+                    onClick={(e) => { e.stopPropagation(); handleDeletePlaylist(pl.id); }}
+                    title="Delete playlist"
+                    type="button"
+                  >x</button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="playlist-actions">
+            <button className="btn-pill" onClick={() => handleAddTrack(true)} disabled={isLoading} type="button">Add music</button>
+            <div className="playlist-io">
+              <button className="btn-ghost btn-sm" onClick={handleExportPlaylist} disabled={!selectedPlaylistId} type="button">Export</button>
+              <button className="btn-ghost btn-sm" onClick={handleImportPlaylist} type="button">Import</button>
+            </div>
+          </div>
         </div>
       </aside>
 
@@ -323,7 +579,7 @@ function App() {
           <Artwork track={currentTrack} fallback={coverLetters} className="hero-art" />
           <div className="hero-copy">
             <p className="eyebrow">Playlist</p>
-            <h1>Local Sessions</h1>
+            <h1>{selectedPlaylist?.name ?? "Local Sessions"}</h1>
             <p>{playlist.length ? `${playlist.length} tracks queued from your files` : "Add songs to start listening"}</p>
             <div className="hero-actions">
               <button className="big-play" onClick={handlePlayPause} disabled={isLoading} type="button" title="Play or pause">
@@ -368,7 +624,26 @@ function App() {
                   <div className="track-album">{track.album}</div>
                   <div className="track-format">{track.format}</div>
                   <div className="track-duration">{formatTime(track.duration_seconds)}</div>
-                  <button className="track-action-btn" onClick={(event) => { event.stopPropagation(); handleRemoveTrack(track.path); }} title="Remove" type="button">x</button>
+                  <div className="track-actions-cell">
+                    <button className="track-action-btn" onClick={(event) => { event.stopPropagation(); setMenuTrackPath(menuTrackPath === track.path ? null : track.path); }} title="More" type="button">...</button>
+                    <button className="track-action-btn" onClick={(event) => { event.stopPropagation(); handleRemoveTrack(track.path); }} title="Remove" type="button">x</button>
+                    {menuTrackPath === track.path && (
+                      <div className="track-context-menu" onClick={(e) => e.stopPropagation()}>
+                        <button type="button" onClick={() => handlePlayNext(track.path)}>Play Next</button>
+                        <button type="button" onClick={() => handleAddToQueue(track.path)}>Add to Queue</button>
+                        <button type="button" onClick={() => setShowAddToPlaylist(true)}>Add to Playlist...</button>
+                        {showAddToPlaylist && (
+                          <div className="add-to-playlist-submenu">
+                            {playlists.filter((p) => p.id !== selectedPlaylistId).map((p) => (
+                              <button key={p.id} type="button" onClick={() => handleAddTrackToPlaylist(p.id, track.path)}>
+                                {p.name}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
@@ -386,6 +661,53 @@ function App() {
           </section>
         )}
       </main>
+
+      {menuTrackPath && (
+        <div className="context-menu-backdrop" onClick={() => { setMenuTrackPath(null); setShowAddToPlaylist(false); }} />
+      )}
+
+      {showQueue && (
+        <div className="queue-panel">
+          <div className="queue-header">
+            <h2>Queue</h2>
+            <div className="queue-header-actions">
+              {queueData.tracks.length > 0 && (
+                <button className="btn-ghost btn-sm" onClick={handleClearQueue} type="button">Clear</button>
+              )}
+              <button className="queue-close-btn" onClick={() => setShowQueue(false)} type="button" title="Close">x</button>
+            </div>
+          </div>
+          <div className="queue-list">
+            {queueData.tracks.length === 0 ? (
+              <div className="queue-empty">
+                <p>Queue is empty</p>
+                <span>Add tracks with "Play Next" or "Add to Queue"</span>
+              </div>
+            ) : (
+              queueData.tracks.map((track, index) => (
+                <div
+                  key={`${track.path}-${index}`}
+                  className={`queue-item ${queueData.current_index === index ? "active" : ""}`}
+                  onClick={() => handlePlayFromQueue(index)}
+                >
+                  <Artwork track={track} fallback={getTrackTitle(track).slice(0, 1).toUpperCase()} className="queue-thumb" />
+                  <div className="queue-item-info">
+                    <div className="queue-item-name">{getTrackTitle(track)}</div>
+                    <div className="queue-item-artist">{track.artist}</div>
+                  </div>
+                  <div className="queue-item-duration">{formatTime(track.duration_seconds)}</div>
+                  <button
+                    className="queue-item-remove"
+                    onClick={(e) => { e.stopPropagation(); handleRemoveFromQueue(index); }}
+                    title="Remove from queue"
+                    type="button"
+                  >x</button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
 
       <footer className="player-bar">
         <div className="player-left">
@@ -423,6 +745,12 @@ function App() {
         </div>
 
         <div className="player-right">
+          <button
+            className={`control-btn queue-toggle ${showQueue ? "active" : ""}`}
+            onClick={() => setShowQueue((v) => !v)}
+            type="button"
+            title="Toggle queue"
+          >Queue</button>
           <span className={`status-dot ${playbackState.is_playing ? "playing" : playbackState.is_paused ? "paused" : ""}`} />
           <span className="volume-icon">Vol</span>
           <input className="range-slider volume" type="range" min="0" max="1" step="0.01" value={volumeValue} onChange={(event) => handleVolume(Number(event.target.value))} />
