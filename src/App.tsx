@@ -108,6 +108,7 @@ function App() {
   const [playlist, setPlaylist] = useState<Track[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isAddingTracks, setIsAddingTracks] = useState(false);
   const [seekValue, setSeekValue] = useState(0);
   const [volumeValue, setVolumeValue] = useState(0.8);
 
@@ -339,7 +340,7 @@ function App() {
   const handleAddTrack = async (multiple = false) => {
     try {
       setError(null);
-      setIsLoading(true);
+      setIsAddingTracks(true);
       const paths = await selectAudioFile(multiple);
       if (paths?.length) {
         const playlistId = selectedPlaylistId ?? getDefaultPlaylistId(playlists);
@@ -363,7 +364,7 @@ function App() {
     } catch (err) {
       setError(formatInvokeError(err, "Failed to add track"));
     } finally {
-      setIsLoading(false);
+      setIsAddingTracks(false);
     }
   };
 
@@ -613,8 +614,8 @@ function App() {
     try {
       setError(null);
       await toggleFavorite(path);
-      // Sync playlist counts (Favorites playlist track_count changes).
-      await loadPlaylists();
+      // Refresh playlist counts in the background (don't block the heart UI).
+      loadPlaylists().catch(() => {});
       // If viewing the Favorites playlist, refresh its tracks so it stays accurate.
       const favPlaylist = playlists.find((p) => p.name === "Favorites");
       if (favPlaylist && selectedPlaylistId === favPlaylist.id) {
@@ -832,7 +833,7 @@ function App() {
             )}
           </div>
           <div className="playlist-actions">
-            <button className="btn-pill" onClick={() => handleAddTrack(true)} disabled={isLoading} type="button">Add music</button>
+            <button className="btn-pill" onClick={() => handleAddTrack(true)} disabled={isAddingTracks} type="button">Add music</button>
             <div className="playlist-io">
               <button
                 className="btn-ghost btn-sm"
@@ -860,7 +861,7 @@ function App() {
               <button className="big-play" onClick={handlePlayPause} disabled={isLoading} type="button" title="Play or pause">
                 {playbackState.is_playing ? "Pause" : "Play"}
               </button>
-              <button className="btn-secondary" onClick={() => handleAddTrack(true)} disabled={isLoading} type="button">Add tracks</button>
+              <button className="btn-secondary" onClick={() => handleAddTrack(true)} disabled={isAddingTracks} type="button">Add tracks</button>
               {playlist.length > 0 && <button className="btn-ghost" onClick={handleClearPlaylist} type="button">Clear</button>}
             </div>
           </div>
@@ -875,7 +876,7 @@ function App() {
               <div className="empty-icon">music</div>
               <h2>Your playlist is empty</h2>
               <p>Drop in MP3, WAV, FLAC, AAC, OGG, M4A, OPUS, or MKA files.</p>
-              <button className="btn-primary" onClick={() => handleAddTrack(false)} disabled={isLoading} type="button">Add your first track</button>
+              <button className="btn-primary" onClick={() => handleAddTrack(false)} disabled={isAddingTracks} type="button">Add your first track</button>
             </div>
           ) : (
             <div className="track-list">

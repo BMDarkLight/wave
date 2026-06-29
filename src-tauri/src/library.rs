@@ -220,7 +220,26 @@ impl Library {
     }
 
     pub fn add_track_to_playlist(&self, playlist_id: &str, path: String) -> Result<Track, String> {
-        let mut track = extract_track(&path)?;
+        let existing = {
+            let connection = self.lock_connection()?;
+            connection
+                .query_row(
+                    &format!(
+                        "SELECT {TRACK_SELECT_COLUMNS}
+                         FROM tracks t
+                         WHERE t.path = ?1"
+                    ),
+                    params![path],
+                    row_to_track,
+                )
+                .optional()
+                .map_err(|error| format!("Failed to look up track: {error}"))?
+        };
+
+        let mut track = match existing {
+            Some(track) => track,
+            None => extract_track(&path)?,
+        };
         let now = now_timestamp();
         let mut connection = self.lock_connection()?;
         let tx = connection
@@ -2000,5 +2019,35 @@ mod tests {
             .rename_playlist(&favorites_id, "My Songs")
             .expect_err("should not rename favorites");
         assert!(err.contains("cannot be renamed"));
+    }
+
+    #[test]
+    fn add_track_to_playlist_reuses_existing_track_without_extraction() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let default_id = library.default_playlist_id().expect("default");
+        let track_path = "/music/already-indexed.mp3";
+
+        let original_track = sample_track("seeded-id", track_path);
+        {
+            let connection = library.lock_connection().expect("connection");
+            let id = upsert_track(&*connection, &original_track).expect("upsert");
+            assert_eq!(id, "seeded-id");
+            // Add it to the default playlist first.
+            insert_playlist_track_with_connection(&connection, &default_id, &id, 0)
+                .expect("insert to default");
+        }
+
+        let added = library
+            .add_track_to_playlist(&favorites_id, track_path.to_string())
+            .expect("add existing track to favorites");
+
+        assert_eq!(added.id, "seeded-id");
+        assert_eq!(added.title, original_track.title);
+        assert_eq!(added.artist, original_track.artist);
+
+        let favorites = library.get_favorites().expect("favorites");
+        assert_eq!(favorites.len(), 1);
+        assert_eq!(favorites[0].path, track_path);
     }
 }
