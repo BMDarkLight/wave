@@ -6,6 +6,7 @@ use crate::dto::{ImportResultDto, PlaybackModeDto, PlaybackStateDto, QueueDto, Q
 use crate::library::{Library, PlaylistInfo};
 use crate::media_controls::{MediaBridge, TrackMetadata};
 use crate::metadata::{supported_audio_extensions, Track};
+use tauri::Manager;
 
 pub struct PlayerState(pub Mutex<AudioPlayer>);
 pub struct LibraryState(pub Mutex<Library>);
@@ -41,6 +42,18 @@ where
 
 fn sync_bridge_playing(bridge: &tauri::State<MediaBridgeState>, position_secs: f64) {
     with_bridge(bridge, |b| b.set_playing(position_secs));
+}
+
+/// Run a blocking operation on a background thread pool so the UI stays
+/// responsive.  Returns the inner `Result` directly.
+async fn blocking<F, T>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("Background task failed: {e}"))?
 }
 
 fn sync_queue_from_tracks(player: &mut AudioPlayer, tracks: &[Track], index: usize) {
@@ -120,20 +133,26 @@ fn sync_bridge_now_playing(bridge: &tauri::State<MediaBridgeState>, track: &Trac
 // ── Playback commands ─────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn play_track(
+pub async fn play_track(
     path: String,
-    state: tauri::State<PlayerState>,
-    bridge: tauri::State<MediaBridgeState>,
+    app: tauri::AppHandle,
+    bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
-    lock_player(&state)?.play(&path)?;
+    let app = app.clone();
+    blocking(move || {
+        let player = app.state::<PlayerState>();
+        let mut guard = player.0.lock().map_err(|e| e.to_string())?;
+        guard.play(&path).map_err(|e| e.to_string())
+    })
+    .await?;
     sync_bridge_playing(&bridge, 0.0);
     Ok(())
 }
 
 #[tauri::command]
-pub fn pause_track(
-    state: tauri::State<PlayerState>,
-    bridge: tauri::State<MediaBridgeState>,
+pub async fn pause_track(
+    state: tauri::State<'_, PlayerState>,
+    bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
     let position = {
         let mut player = lock_player(&state)?;
@@ -146,9 +165,9 @@ pub fn pause_track(
 }
 
 #[tauri::command]
-pub fn resume_track(
-    state: tauri::State<PlayerState>,
-    bridge: tauri::State<MediaBridgeState>,
+pub async fn resume_track(
+    state: tauri::State<'_, PlayerState>,
+    bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
     let position = {
         let mut player = lock_player(&state)?;
@@ -160,9 +179,9 @@ pub fn resume_track(
 }
 
 #[tauri::command]
-pub fn stop_track(
-    state: tauri::State<PlayerState>,
-    bridge: tauri::State<MediaBridgeState>,
+pub async fn stop_track(
+    state: tauri::State<'_, PlayerState>,
+    bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
     lock_player(&state)?.stop()?;
     with_bridge(&bridge, |b| b.set_stopped());
@@ -170,7 +189,9 @@ pub fn stop_track(
 }
 
 #[tauri::command]
-pub fn get_playback_state(state: tauri::State<PlayerState>) -> Result<PlaybackStateDto, String> {
+pub async fn get_playback_state(
+    state: tauri::State<'_, PlayerState>,
+) -> Result<PlaybackStateDto, String> {
     let player = lock_player(&state)?;
     Ok(PlaybackStateDto {
         is_playing: player.is_playing(),
@@ -186,10 +207,10 @@ pub fn get_playback_state(state: tauri::State<PlayerState>) -> Result<PlaybackSt
 }
 
 #[tauri::command]
-pub fn seek_track(
+pub async fn seek_track(
     seconds: f64,
-    state: tauri::State<PlayerState>,
-    bridge: tauri::State<MediaBridgeState>,
+    state: tauri::State<'_, PlayerState>,
+    bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
     let playing = {
         let mut player = lock_player(&state)?;
@@ -201,7 +222,10 @@ pub fn seek_track(
 }
 
 #[tauri::command]
-pub fn set_volume(volume: f32, state: tauri::State<PlayerState>) -> Result<(), String> {
+pub async fn set_volume(
+    volume: f32,
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
     lock_player(&state)?.set_volume(volume)?;
     Ok(())
 }
@@ -209,92 +233,122 @@ pub fn set_volume(volume: f32, state: tauri::State<PlayerState>) -> Result<(), S
 // ── Library / playlist commands ───────────────────────────────────────────────
 
 #[tauri::command]
-pub fn add_track_to_playlist(
+pub async fn add_track_to_playlist(
     path: String,
-    library: tauri::State<LibraryState>,
+    app: tauri::AppHandle,
 ) -> Result<Track, String> {
-    lock_library(&library)?.add_track_to_default_playlist(path)
+    let app = app.clone();
+    blocking(move || {
+        let library = app.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        lib.add_track_to_default_playlist(path)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn remove_track_from_playlist(
+pub async fn remove_track_from_playlist(
     path: String,
-    library: tauri::State<LibraryState>,
+    library: tauri::State<'_, LibraryState>,
 ) -> Result<(), String> {
     lock_library(&library)?.remove_track_from_default_playlist(path)
 }
 
 #[tauri::command]
-pub fn get_playlist(library: tauri::State<LibraryState>) -> Result<Vec<Track>, String> {
+pub async fn get_playlist(
+    library: tauri::State<'_, LibraryState>,
+) -> Result<Vec<Track>, String> {
     lock_library(&library)?.get_default_playlist_tracks()
 }
 
 #[tauri::command]
-pub fn clear_playlist(library: tauri::State<LibraryState>) -> Result<(), String> {
+pub async fn clear_playlist(
+    library: tauri::State<'_, LibraryState>,
+) -> Result<(), String> {
     lock_library(&library)?.clear_default_playlist()
 }
 
 #[tauri::command]
-pub fn play_track_from_playlist(
+pub async fn play_track_from_playlist(
     index: usize,
-    player: tauri::State<PlayerState>,
-    library: tauri::State<LibraryState>,
-    bridge: tauri::State<MediaBridgeState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let tracks = lock_library(&library)?.get_default_playlist_tracks()?;
-    let track = tracks
-        .get(index)
-        .ok_or_else(|| format!("Track not found at index {index}"))?
-        .clone();
+    let app_clone = app.clone();
+    let (tracks, track) = blocking(move || {
+        let library = app_clone.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        let tracks = lib.get_default_playlist_tracks()?;
+        let track = tracks
+            .get(index)
+            .ok_or_else(|| format!("Track not found at index {index}"))?
+            .clone();
+        Ok((tracks, track))
+    })
+    .await?;
 
-    {
-        let mut player = lock_player(&player)?;
+    let track_path = track.path.clone();
+    let app_clone = app.clone();
+    blocking(move || {
+        let player = app_clone.state::<PlayerState>();
+        let mut player = player.0.lock().map_err(|e| e.to_string())?;
         sync_queue_from_tracks(&mut player, &tracks, index);
-        player.play(&track.path)?;
-    }
+        player.play(&track_path).map_err(|e| e.to_string())
+    })
+    .await?;
 
-    with_bridge(&bridge, |b| {
-        b.now_playing(&TrackMetadata {
+    let bridge = app.state::<MediaBridgeState>();
+    if let Ok(mut bridge) = bridge.0.lock() {
+        bridge.now_playing(&TrackMetadata {
             title: Some(track.title),
             artist: Some(track.artist),
             album: Some(track.album),
             duration_seconds: track.duration_seconds,
             cover_url: track.cover_art_data_url,
         });
-    });
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub fn index_music_library(
+pub async fn index_music_library(
     directory: String,
     profile_id: Option<String>,
     playlist_name: Option<String>,
-    library: tauri::State<LibraryState>,
+    app: tauri::AppHandle,
 ) -> Result<Vec<Track>, String> {
-    lock_library(&library)?.index_directory(profile_id, playlist_name, directory)
+    let app = app.clone();
+    blocking(move || {
+        let library = app.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        lib.index_directory(profile_id, playlist_name, directory)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn list_playlists(
+pub async fn list_playlists(
     profile_id: Option<String>,
-    library: tauri::State<LibraryState>,
+    library: tauri::State<'_, LibraryState>,
 ) -> Result<Vec<PlaylistInfo>, String> {
     lock_library(&library)?.list_playlists(profile_id)
 }
 
 #[tauri::command]
-pub fn get_library_database_path(library: tauri::State<LibraryState>) -> Result<String, String> {
+pub async fn get_library_database_path(
+    library: tauri::State<'_, LibraryState>,
+) -> Result<String, String> {
     Ok(lock_library(&library)?.db_path())
 }
 
 #[tauri::command]
-pub fn get_supported_audio_extensions() -> Result<Vec<String>, String> {
+pub async fn get_supported_audio_extensions() -> Result<Vec<String>, String> {
     Ok(supported_audio_extensions())
 }
 
 #[tauri::command]
-pub fn get_queue(state: tauri::State<PlayerState>) -> Result<QueueStateDto, String> {
+pub async fn get_queue(
+    state: tauri::State<'_, PlayerState>,
+) -> Result<QueueStateDto, String> {
     let player = lock_player(&state)?;
     Ok(QueueStateDto {
         tracks: player.queue.tracks().to_vec(),
@@ -304,49 +358,73 @@ pub fn get_queue(state: tauri::State<PlayerState>) -> Result<QueueStateDto, Stri
 }
 
 #[tauri::command]
-pub fn play_next(
-    state: tauri::State<PlayerState>,
-    library: tauri::State<LibraryState>,
-    bridge: tauri::State<MediaBridgeState>,
+pub async fn play_next(
+    app: tauri::AppHandle,
 ) -> Result<Option<String>, String> {
-    let path = {
-        let mut player = lock_player(&state)?;
-        player.play_next()?
-    };
-    if let Some(ref path) = path {
-        let lib = lock_library(&library)?;
-        let track = resolve_track(&lib, path);
-        sync_bridge_now_playing(&bridge, &track);
+    let app_clone = app.clone();
+    let path = blocking(move || {
+        let player = app_clone.state::<PlayerState>();
+        let mut guard = player.0.lock().map_err(|e| e.to_string())?;
+        guard.play_next().map_err(|e| e.to_string())
+    })
+    .await?;
+
+    if let Some(ref p) = path {
+        let p = p.clone();
+        let app_clone = app.clone();
+        let track = blocking(move || {
+            let lib = app_clone.state::<LibraryState>();
+            let lib = lib.0.lock().map_err(|e| e.to_string())?;
+            Ok::<_, String>(resolve_track(&lib, &p))
+        })
+        .await?;
+        sync_bridge_now_playing(&app.state::<MediaBridgeState>(), &track);
     }
+
     Ok(path)
 }
 
 #[tauri::command]
-pub fn play_previous(
-    state: tauri::State<PlayerState>,
-    library: tauri::State<LibraryState>,
-    bridge: tauri::State<MediaBridgeState>,
+pub async fn play_previous(
+    app: tauri::AppHandle,
 ) -> Result<Option<String>, String> {
-    let path = {
-        let mut player = lock_player(&state)?;
-        player.play_previous()?
-    };
-    if let Some(ref path) = path {
-        let lib = lock_library(&library)?;
-        let track = resolve_track(&lib, path);
-        sync_bridge_now_playing(&bridge, &track);
+    let app_clone = app.clone();
+    let path = blocking(move || {
+        let player = app_clone.state::<PlayerState>();
+        let mut guard = player.0.lock().map_err(|e| e.to_string())?;
+        guard.play_previous().map_err(|e| e.to_string())
+    })
+    .await?;
+
+    if let Some(ref p) = path {
+        let p = p.clone();
+        let app_clone = app.clone();
+        let track = blocking(move || {
+            let lib = app_clone.state::<LibraryState>();
+            let lib = lib.0.lock().map_err(|e| e.to_string())?;
+            Ok::<_, String>(resolve_track(&lib, &p))
+        })
+        .await?;
+        sync_bridge_now_playing(&app.state::<MediaBridgeState>(), &track);
     }
+
     Ok(path)
 }
 
 #[tauri::command]
-pub fn set_shuffle(enabled: bool, state: tauri::State<PlayerState>) -> Result<(), String> {
+pub async fn set_shuffle(
+    enabled: bool,
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
     lock_player(&state)?.queue.set_shuffle(enabled);
     Ok(())
 }
 
 #[tauri::command]
-pub fn set_repeat(mode: String, state: tauri::State<PlayerState>) -> Result<(), String> {
+pub async fn set_repeat(
+    mode: String,
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
     use crate::audio::player::RepeatMode;
 
     let repeat = match mode.as_str() {
@@ -360,7 +438,9 @@ pub fn set_repeat(mode: String, state: tauri::State<PlayerState>) -> Result<(), 
 }
 
 #[tauri::command]
-pub fn get_playback_mode(state: tauri::State<PlayerState>) -> Result<PlaybackModeDto, String> {
+pub async fn get_playback_mode(
+    state: tauri::State<'_, PlayerState>,
+) -> Result<PlaybackModeDto, String> {
     let player = lock_player(&state)?;
     Ok(PlaybackModeDto {
         repeat: player.repeat.clone(),
@@ -371,123 +451,143 @@ pub fn get_playback_mode(state: tauri::State<PlayerState>) -> Result<PlaybackMod
 // ── Playlist CRUD ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn create_playlist(
+pub async fn create_playlist(
     name: String,
-    library: tauri::State<LibraryState>,
+    library: tauri::State<'_, LibraryState>,
 ) -> Result<PlaylistInfo, String> {
     lock_library(&library)?.create_playlist(&name)
 }
 
 #[tauri::command]
-pub fn delete_playlist(id: String, library: tauri::State<LibraryState>) -> Result<(), String> {
+pub async fn delete_playlist(
+    id: String,
+    library: tauri::State<'_, LibraryState>,
+) -> Result<(), String> {
     lock_library(&library)?.delete_playlist(&id)
 }
 
 #[tauri::command]
-pub fn rename_playlist(
+pub async fn rename_playlist(
     id: String,
     name: String,
-    library: tauri::State<LibraryState>,
+    library: tauri::State<'_, LibraryState>,
 ) -> Result<(), String> {
     lock_library(&library)?.rename_playlist(&id, &name)
 }
 
 #[tauri::command]
-pub fn get_playlist_tracks_by_id(
+pub async fn get_playlist_tracks_by_id(
     id: String,
-    library: tauri::State<LibraryState>,
+    library: tauri::State<'_, LibraryState>,
 ) -> Result<Vec<Track>, String> {
     lock_library(&library)?.get_playlist_tracks(&id)
 }
 
 #[tauri::command]
-pub fn add_track_to_playlist_by_id(
+pub async fn add_track_to_playlist_by_id(
     id: String,
     path: String,
-    library: tauri::State<LibraryState>,
+    app: tauri::AppHandle,
 ) -> Result<Track, String> {
-    lock_library(&library)?.add_track_to_playlist(&id, path)
+    let app = app.clone();
+    blocking(move || {
+        let library = app.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        lib.add_track_to_playlist(&id, path)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn remove_track_from_playlist_by_id(
+pub async fn remove_track_from_playlist_by_id(
     id: String,
     path: String,
-    library: tauri::State<LibraryState>,
+    library: tauri::State<'_, LibraryState>,
 ) -> Result<(), String> {
     lock_library(&library)?.remove_track_from_playlist_by_path(&id, &path)
 }
 
 #[tauri::command]
-pub fn clear_playlist_by_id(
+pub async fn clear_playlist_by_id(
     id: String,
-    library: tauri::State<LibraryState>,
+    library: tauri::State<'_, LibraryState>,
 ) -> Result<(), String> {
     lock_library(&library)?.clear_playlist(&id)
 }
 
 #[tauri::command]
-pub fn play_track_from_specific_playlist(
+pub async fn play_track_from_specific_playlist(
     playlist_id: String,
     index: usize,
-    player: tauri::State<PlayerState>,
-    library: tauri::State<LibraryState>,
-    bridge: tauri::State<MediaBridgeState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let tracks = lock_library(&library)?.get_playlist_tracks(&playlist_id)?;
-    let track = tracks
-        .get(index)
-        .ok_or_else(|| format!("Track not found at index {index}"))?
-        .clone();
+    let app_clone = app.clone();
+    let (tracks, track) = blocking(move || {
+        let library = app_clone.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        let tracks = lib.get_playlist_tracks(&playlist_id)?;
+        let track = tracks
+            .get(index)
+            .ok_or_else(|| format!("Track not found at index {index}"))?
+            .clone();
+        Ok((tracks, track))
+    })
+    .await?;
 
-    {
-        let mut player = lock_player(&player)?;
+    let track_path = track.path.clone();
+    let app_clone = app.clone();
+    blocking(move || {
+        let player = app_clone.state::<PlayerState>();
+        let mut player = player.0.lock().map_err(|e| e.to_string())?;
         sync_queue_from_tracks(&mut player, &tracks, index);
-        player.play(&track.path)?;
-    }
+        player.play(&track_path).map_err(|e| e.to_string())
+    })
+    .await?;
 
-    sync_bridge_now_playing(&bridge, &track);
+    sync_bridge_now_playing(&app.state::<MediaBridgeState>(), &track);
     Ok(())
 }
 
 // ── Queue manipulation ────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn add_to_queue(
+pub async fn add_to_queue(
     path: String,
-    state: tauri::State<PlayerState>,
+    state: tauri::State<'_, PlayerState>,
 ) -> Result<(), String> {
     lock_player(&state)?.enqueue(&path);
     Ok(())
 }
 
 #[tauri::command]
-pub fn queue_insert_next(
+pub async fn queue_insert_next(
     path: String,
-    state: tauri::State<PlayerState>,
+    state: tauri::State<'_, PlayerState>,
 ) -> Result<(), String> {
     lock_player(&state)?.insert_next(&path);
     Ok(())
 }
 
 #[tauri::command]
-pub fn remove_from_queue(
+pub async fn remove_from_queue(
     index: usize,
-    state: tauri::State<PlayerState>,
+    state: tauri::State<'_, PlayerState>,
 ) -> Result<Option<String>, String> {
     Ok(lock_player(&state)?.remove_from_queue(index))
 }
 
 #[tauri::command]
-pub fn clear_queue(state: tauri::State<PlayerState>) -> Result<(), String> {
+pub async fn clear_queue(
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
     lock_player(&state)?.clear_upcoming();
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_queue_tracks(
-    state: tauri::State<PlayerState>,
-    library: tauri::State<LibraryState>,
+pub async fn get_queue_tracks(
+    state: tauri::State<'_, PlayerState>,
+    library: tauri::State<'_, LibraryState>,
 ) -> Result<QueueDto, String> {
     let (paths, current_index, is_shuffled) = {
         let player = lock_player(&state)?;
@@ -516,49 +616,62 @@ pub fn get_queue_tracks(
 }
 
 #[tauri::command]
-pub fn play_track_from_queue(
+pub async fn play_track_from_queue(
     index: usize,
-    player: tauri::State<PlayerState>,
-    library: tauri::State<LibraryState>,
-    bridge: tauri::State<MediaBridgeState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let path = {
-        let mut player = lock_player(&player)?;
-        player.jump_to_queue_index(index)?
-    };
+    let app_clone = app.clone();
+    let path = blocking(move || {
+        let player = app_clone.state::<PlayerState>();
+        let mut guard = player.0.lock().map_err(|e| e.to_string())?;
+        guard.jump_to_queue_index(index).map_err(|e| e.to_string())
+    })
+    .await?;
 
-    if let Some(ref path) = path {
-        let lib = lock_library(&library)?;
-        let track = resolve_track(&lib, path);
-        sync_bridge_now_playing(&bridge, &track);
+    if let Some(ref p) = path {
+        let p = p.clone();
+        let app_clone = app.clone();
+        let track = blocking(move || {
+            let lib = app_clone.state::<LibraryState>();
+            let lib = lib.0.lock().map_err(|e| e.to_string())?;
+            Ok::<_, String>(resolve_track(&lib, &p))
+        })
+        .await?;
+        sync_bridge_now_playing(&app.state::<MediaBridgeState>(), &track);
     }
+
     Ok(())
 }
 
 // ── Playlist export / import ─────────────────────────────────────────────────
 
 #[tauri::command]
-pub fn export_playlist(
+pub async fn export_playlist(
     playlist_id: String,
     path: String,
     export_format: String,
-    library: tauri::State<LibraryState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let lib = lock_library(&library)?;
-    match export_format.as_str() {
-        "m3u" => lib.export_playlist_m3u(&playlist_id, &path),
-        "json" => lib.export_playlist_json(&playlist_id, &path),
-        _ => Err(format!("Unknown export format: {export_format}")),
-    }
+    let app = app.clone();
+    blocking(move || {
+        let library = app.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        match export_format.as_str() {
+            "m3u" => lib.export_playlist_m3u(&playlist_id, &path),
+            "json" => lib.export_playlist_json(&playlist_id, &path),
+            _ => Err(format!("Unknown export format: {export_format}")),
+        }
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn import_playlist(
+pub async fn import_playlist(
     path: String,
     name: Option<String>,
-    library: tauri::State<LibraryState>,
+    app: tauri::AppHandle,
 ) -> Result<ImportResultDto, String> {
-    let lib = lock_library(&library)?;
+    let app = app.clone();
     let extension = Path::new(&path)
         .extension()
         .and_then(|e| e.to_str())
@@ -566,14 +679,37 @@ pub fn import_playlist(
         .unwrap_or_default();
 
     let (playlist_id, tracks) = match extension.as_str() {
-        "json" => lib.import_playlist_json(&path, name.as_deref())?,
-        "m3u" | "m3u8" => lib.import_playlist_m3u(&path, name.as_deref())?,
+        "json" => {
+            blocking({
+                let app = app.clone();
+                move || {
+                    let library = app.state::<LibraryState>();
+                    let lib = library.0.lock().map_err(|e| e.to_string())?;
+                    lib.import_playlist_json(&path, name.as_deref())
+                }
+            })
+            .await?
+        }
+        "m3u" | "m3u8" => {
+            let app = app.clone();
+            blocking(move || {
+                let library = app.state::<LibraryState>();
+                let lib = library.0.lock().map_err(|e| e.to_string())?;
+                lib.import_playlist_m3u(&path, name.as_deref())
+            })
+            .await?
+        }
         _ => return Err(format!("Unsupported playlist file format: .{extension}")),
     };
 
-    let info = lib
-        .get_playlist_info(&playlist_id)?
-        .ok_or("Imported playlist not found")?;
+    let pid = playlist_id.clone();
+    let info = blocking(move || {
+        let library = app.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        lib.get_playlist_info(&pid)?
+            .ok_or_else(|| "Imported playlist not found".to_string())
+    })
+    .await?;
 
     Ok(ImportResultDto {
         playlist_id,
@@ -588,9 +724,9 @@ pub fn import_playlist(
 /// Pushes rich metadata (title, artist, album, duration, cover art URL) to the
 /// OS media interface so it shows up in the system media overlay / Control Center.
 #[tauri::command]
-pub fn update_media_metadata(
+pub async fn update_media_metadata(
     metadata: TrackMetadata,
-    bridge: tauri::State<MediaBridgeState>,
+    bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
     with_bridge(&bridge, |b| b.set_metadata(&metadata));
     Ok(())

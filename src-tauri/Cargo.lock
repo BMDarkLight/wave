@@ -22,6 +22,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "thiserror 2.0.17",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
