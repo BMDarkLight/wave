@@ -347,6 +347,44 @@ impl AudioPlayer {
         })
     }
 
+    /// Create a player that outputs to a specific audio device (by name).
+    pub fn new_with_device(device_name: &str) -> Result<Self, AudioError> {
+        use cpal::traits::{DeviceTrait, HostTrait};
+
+        let host = cpal::default_host();
+        let device = host
+            .output_devices()
+            .map_err(|e| AudioError::DeviceUnavailable(e.to_string()))?
+            .find(|d| d.name().map(|n| n == device_name).unwrap_or(false))
+            .ok_or_else(|| AudioError::DeviceUnavailable(format!("Device not found: {device_name}")))?;
+
+        let (stream, handle) = OutputStream::try_from_device(&device)
+            .map_err(|error| AudioError::StreamCreation(error.to_string()))?;
+
+        Ok(Self {
+            _stream: SendableStream(stream),
+            handle,
+            sink: None,
+            current_path: None,
+            clock: PlaybackClock::stopped(),
+            volume: 0.8,
+            queue: Queue::default(),
+            repeat: RepeatMode::default(),
+        })
+    }
+
+    /// List all available audio output device names.
+    pub fn list_output_devices() -> Vec<String> {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        match cpal::default_host().output_devices() {
+            Ok(devices) => devices
+                .filter_map(|d| d.name().ok())
+                .filter(|n| !n.is_empty())
+                .collect(),
+            Err(_) => vec![],
+        }
+    }
+
     fn build_source(
         path: &str,
     ) -> Result<(impl Source<Item = f32> + Send + 'static, Option<Duration>), AudioError> {
@@ -467,6 +505,15 @@ impl AudioPlayer {
 
     pub fn volume(&self) -> f32 {
         self.volume
+    }
+
+    /// Query the current default audio output device name (live, every call).
+    pub fn current_output_name() -> String {
+        use cpal::traits::{DeviceTrait, HostTrait};
+        cpal::default_host()
+            .default_output_device()
+            .and_then(|d| d.name().ok())
+            .unwrap_or_else(|| "Unknown".to_string())
     }
 
     pub fn play_next(&mut self) -> Result<Option<String>, AudioError> {

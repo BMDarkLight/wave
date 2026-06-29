@@ -588,6 +588,150 @@ impl Library {
         Ok(())
     }
 
+    /// Create a playlist from all tracks matching the given album name.
+    /// Uses the album name as the playlist name unless `playlist_name` is provided.
+    /// Returns an error if no tracks are found for the given album.
+    pub fn create_album_playlist(
+        &self,
+        album: &str,
+        playlist_name: Option<&str>,
+    ) -> Result<PlaylistInfo, String> {
+        let album = album.trim();
+        if album.is_empty() {
+            return Err("Album name cannot be empty".to_string());
+        }
+
+        let mut connection = self.lock_connection()?;
+        let tracks = Self::get_tracks_by_column(&connection, "album", album)?;
+        if tracks.is_empty() {
+            return Err(format!("No tracks found for album \"{album}\""));
+        }
+
+        let name = playlist_name.unwrap_or(album);
+        let playlist_name_str = name.to_string();
+
+        // Resolve profile and create the playlist outside the transaction.
+        let profile_id =
+            ensure_profile_with_connection(&connection, "default", "Default")?;
+        // Allow duplicate suffixes for auto-generated playlists.
+        let final_name =
+            self.resolve_unique_playlist_name(&connection, &profile_id, &playlist_name_str)?;
+
+        let playlist_id = Uuid::new_v4().to_string();
+        let now = now_timestamp();
+        connection
+            .execute(
+                "INSERT INTO playlists (id, profile_id, name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![playlist_id, profile_id, final_name, now],
+            )
+            .map_err(|error| format!("Failed to create playlist: {error}"))?;
+
+        let tx = connection
+            .transaction()
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
+        for (index, track) in tracks.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![playlist_id, track.id, index as i64, now],
+            )
+            .map_err(|error| {
+                format!("Failed to add track to album playlist: {error}")
+            })?;
+        }
+
+        tx.commit()
+            .map_err(|e| format!("Failed to commit album playlist transaction: {e}"))?;
+
+        self.playlist_info(&connection, &playlist_id)?
+            .ok_or_else(|| "Playlist vanished immediately after creation".to_string())
+    }
+
+    /// Create a playlist from all tracks matching the given artist name.
+    /// Uses the artist name as the playlist name unless `playlist_name` is provided.
+    /// Returns an error if no tracks are found for the given artist.
+    pub fn create_artist_playlist(
+        &self,
+        artist: &str,
+        playlist_name: Option<&str>,
+    ) -> Result<PlaylistInfo, String> {
+        let artist = artist.trim();
+        if artist.is_empty() {
+            return Err("Artist name cannot be empty".to_string());
+        }
+
+        let mut connection = self.lock_connection()?;
+        let tracks = Self::get_tracks_by_column(&connection, "artist", artist)?;
+        if tracks.is_empty() {
+            return Err(format!("No tracks found for artist \"{artist}\""));
+        }
+
+        let name = playlist_name.unwrap_or(artist);
+        let playlist_name_str = name.to_string();
+
+        let profile_id =
+            ensure_profile_with_connection(&connection, "default", "Default")?;
+        let final_name =
+            self.resolve_unique_playlist_name(&connection, &profile_id, &playlist_name_str)?;
+
+        let playlist_id = Uuid::new_v4().to_string();
+        let now = now_timestamp();
+        connection
+            .execute(
+                "INSERT INTO playlists (id, profile_id, name, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?4)",
+                params![playlist_id, profile_id, final_name, now],
+            )
+            .map_err(|error| format!("Failed to create playlist: {error}"))?;
+
+        let tx = connection
+            .transaction()
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
+        for (index, track) in tracks.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO playlist_tracks (playlist_id, track_id, position, added_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![playlist_id, track.id, index as i64, now],
+            )
+            .map_err(|error| {
+                format!("Failed to add track to artist playlist: {error}")
+            })?;
+        }
+
+        tx.commit()
+            .map_err(|e| format!("Failed to commit artist playlist transaction: {e}"))?;
+
+        self.playlist_info(&connection, &playlist_id)?
+            .ok_or_else(|| "Playlist vanished immediately after creation".to_string())
+    }
+
+    /// Query tracks where a given column equals a value, ordered by
+    /// album → disc_number → track_number for sensible ordering.
+    fn get_tracks_by_column(
+        connection: &Connection,
+        column: &str,
+        value: &str,
+    ) -> Result<Vec<Track>, String> {
+        let sql = format!(
+            "SELECT {TRACK_SELECT_COLUMNS}
+             FROM tracks t
+             WHERE t.{column} = ?1
+             ORDER BY t.album, COALESCE(t.disc_number, 1), COALESCE(t.track_number, 0)"
+        );
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| format!("Failed to prepare query by {column}: {error}"))?;
+        let tracks = statement
+            .query_map(params![value], row_to_track)
+            .map_err(|error| format!("Failed to query by {column}: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to read tracks by {column}: {error}"))?;
+        Ok(tracks)
+    }
+
     pub fn get_playlist_info(&self, playlist_id: &str) -> Result<Option<PlaylistInfo>, String> {
         let connection = self.lock_connection()?;
         self.playlist_info(&connection, playlist_id)

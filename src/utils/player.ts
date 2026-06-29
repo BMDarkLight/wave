@@ -40,6 +40,7 @@ export interface PlaybackState {
   position_seconds: number;
   duration_seconds: number | null;
   volume: number;
+  output_device_name: string;
 }
 
 export interface Track {
@@ -340,6 +341,16 @@ export const setRepeat = (mode: "off" | "one" | "all"): Promise<void> => {
 
 export const getPlaybackMode = (): Promise<PlaybackMode> => {
   return safeInvoke<PlaybackMode>("get_playback_mode");
+};
+
+// ── Audio Output Devices ──────────────────────────────────────────────────────
+
+export const listOutputDevices = (): Promise<string[]> => {
+  return safeInvoke<string[]>("list_output_devices");
+};
+
+export const setOutputDevice = (deviceName: string): Promise<void> => {
+  return safeInvoke("set_output_device", { deviceName });
 };
 
 // ── OS Media Controls ─────────────────────────────────────────────────────────

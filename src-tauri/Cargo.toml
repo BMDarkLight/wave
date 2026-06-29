@@ -24,6 +24,7 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rodio = { version = "0.19", features = ["symphonia-all"] }
+cpal = "0.15"
 rusqlite = { version = "0.32", features = ["bundled"] }
 symphonia = { version = "0.5", features = ["all"] }
 symphonia-adapter-libopus = "0.2"

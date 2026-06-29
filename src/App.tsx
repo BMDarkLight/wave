@@ -38,6 +38,8 @@ import {
   stopTrack,
   updateMediaMetadata,
   updateMediaPosition,
+  listOutputDevices,
+  setOutputDevice,
   type PlaybackMode,
   type PlaybackState,
   type PlaylistInfo,
@@ -59,6 +61,7 @@ const emptyPlaybackState: PlaybackState = {
   position_seconds: 0,
   duration_seconds: null,
   volume: 0.8,
+  output_device_name: "",
 };
 
 const formatTime = (seconds?: number | null) => {
@@ -115,6 +118,10 @@ function App() {
   // Queue panel
   const [queueData, setQueueData] = useState<QueueTrackState>({ tracks: [], current_index: null, is_shuffled: false });
   const [showQueue, setShowQueue] = useState(false);
+
+  // Audio output device selection
+  const [outputDevices, setOutputDevices] = useState<string[]>([]);
+  const [showDeviceList, setShowDeviceList] = useState(false);
 
   // Track context menu
   const [menuTrackPath, setMenuTrackPath] = useState<string | null>(null);
@@ -204,6 +211,7 @@ function App() {
         await updatePlaybackState();
         await loadQueueTracks();
         await loadPlaybackMode();
+        listOutputDevices().then(setOutputDevices).catch(console.error);
       } catch (err: any) {
         if (err?.message?.includes("not available") || err?.message?.includes("undefined")) {
           setError("Tauri API not available. Run `npm run tauri dev` instead of plain Vite.");
@@ -1021,6 +1029,45 @@ function App() {
           <span className="volume-icon">Vol</span>
           <input className="range-slider volume" type="range" min="0" max="1" step="0.01" value={volumeValue} onChange={(event) => handleVolume(Number(event.target.value))} />
           <span className="volume-percent">{Math.round(volumeValue * 100)}%</span>
+          <div className="device-selector">
+            <button
+              className="output-device-name"
+              onClick={() => {
+                listOutputDevices().then(setOutputDevices).catch(console.error);
+                setShowDeviceList((v) => !v);
+              }}
+              title="Click to change audio output device"
+              type="button"
+            >
+              {playbackState.output_device_name || "No device"}
+            </button>
+            {showDeviceList && (
+              <>
+                <div className="device-list-backdrop" onClick={() => setShowDeviceList(false)} />
+                <div className="device-list">
+                  {outputDevices.map((name) => (
+                    <button
+                      key={name}
+                      className={`device-list-item ${name === playbackState.output_device_name ? "active" : ""}`}
+                      onClick={async () => {
+                        try {
+                          await setOutputDevice(name);
+                          await updatePlaybackState();
+                          setShowDeviceList(false);
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : "Failed to change audio device");
+                          setShowDeviceList(false);
+                        }
+                      }}
+                      type="button"
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </footer>
     </div>
