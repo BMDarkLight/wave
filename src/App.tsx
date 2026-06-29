@@ -1,11 +1,9 @@
 // The Code for Frontend of Wave is currently completely AI Generated and may contain bugs or rough edges. Please report any issues you encounter at
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  addTrackToPlaylist,
   addTrackToPlaylistById,
   addToQueue,
-  clearPlaylist,
   clearPlaylistById,
   clearQueue,
   createPlaylist,
@@ -13,10 +11,7 @@ import {
   exportPlaylist,
   getFileName,
   getPlaybackState,
-  getPlaybackMode,
-  getPlaylist,
   getPlaylistTracksById,
-  getQueue,
   getQueueTracks,
   importPlaylist,
   listPlaylists,
@@ -26,11 +21,9 @@ import {
   playNext,
   playPrevious,
   playTrack,
-  playTrackFromPlaylist,
   playTrackFromQueue,
   playTrackFromSpecificPlaylist,
   queueInsertNext,
-  removeTrackFromPlaylist,
   removeTrackFromPlaylistById,
   removeFromQueue,
   resumeTrack,
@@ -38,15 +31,10 @@ import {
   seekTrack,
   selectAudioFile,
   setPlayerVolume,
-  setRepeat,
-  setShuffle,
   stopTrack,
   updateMediaMetadata,
-  type ImportResult,
-  type PlaybackMode,
   type PlaybackState,
   type PlaylistInfo,
-  type QueueState,
   type QueueTrackState,
   type Track,
 } from "./utils/player";
@@ -123,11 +111,23 @@ function App() {
   const [menuTrackPath, setMenuTrackPath] = useState<string | null>(null);
   const [showAddToPlaylist, setShowAddToPlaylist] = useState(false);
 
-  const currentIndex = useMemo(
+  const wasPlayingRef = useRef(false);
+
+  const currentTrack = useMemo(() => {
+    if (!playbackState.current_path) return null;
+    const fromQueue = queueData.tracks.find((track) => track.path === playbackState.current_path);
+    if (fromQueue) return fromQueue;
+    const fromPlaylist = playlist.find((track) => track.path === playbackState.current_path);
+    return fromPlaylist ?? null;
+  }, [playbackState.current_path, queueData.tracks, playlist]);
+
+  const currentPlaylistIndex = useMemo(
     () => playlist.findIndex((track) => track.path === playbackState.current_path),
     [playlist, playbackState.current_path]
   );
-  const currentTrack = currentIndex >= 0 ? playlist[currentIndex] : null;
+
+  const hasActiveQueue = queueData.tracks.length > 0;
+  const canSkip = hasActiveQueue || playlist.length > 0;
   const displayDuration = playbackState.duration_seconds ?? currentTrack?.duration_seconds ?? 0;
   const displayPosition = Math.min(seekValue, displayDuration || seekValue);
 
@@ -140,11 +140,6 @@ function App() {
     if (!document.body.classList.contains("is-seeking")) {
       setSeekValue(state.position_seconds ?? 0);
     }
-  };
-
-  const loadPlaylist = async () => {
-    const tracks = await getPlaylist();
-    setPlaylist(tracks);
   };
 
   const loadPlaylists = async () => {
@@ -179,6 +174,7 @@ function App() {
           await loadPlaylistTracks(defaultId);
         }
         await updatePlaybackState();
+        await loadQueueTracks();
       } catch (err: any) {
         if (err?.message?.includes("not available") || err?.message?.includes("undefined")) {
           setError("Tauri API not available. Run `npm run tauri dev` instead of plain Vite.");
@@ -188,14 +184,40 @@ function App() {
 
     initApp();
     const interval = setInterval(() => updatePlaybackState().catch(() => {}), 500);
-    return () => clearInterval(interval);
+    const queueInterval = setInterval(() => loadQueueTracks().catch(() => {}), 2000);
+    return () => {
+      clearInterval(interval);
+      clearInterval(queueInterval);
+    };
   }, []);
 
-  // Poll queue tracks when the queue panel is visible
+  // Auto-advance when a track finishes naturally
+  useEffect(() => {
+    const wasPlaying = wasPlayingRef.current;
+    const { is_playing, is_paused, current_path, position_seconds, duration_seconds } = playbackState;
+
+    if (
+      wasPlaying &&
+      !is_playing &&
+      !is_paused &&
+      current_path &&
+      duration_seconds != null &&
+      position_seconds >= duration_seconds - 1
+    ) {
+      playNext()
+        .then(() => updatePlaybackState())
+        .then(() => loadQueueTracks())
+        .catch(console.error);
+    }
+
+    wasPlayingRef.current = is_playing;
+  }, [playbackState]);
+
+  // Poll queue more frequently while the panel is open
   useEffect(() => {
     if (!showQueue) return;
     loadQueueTracks().catch(() => {});
-    const interval = setInterval(() => loadQueueTracks().catch(() => {}), 1000);
+    const interval = setInterval(() => loadQueueTracks().catch(() => {}), 500);
     return () => clearInterval(interval);
   }, [showQueue]);
 
@@ -286,7 +308,7 @@ function App() {
       if (!selectedPlaylistId) return;
       await playTrackFromSpecificPlaylist(selectedPlaylistId, index);
       await updatePlaybackState();
-      if (showQueue) await loadQueueTracks();
+      await loadQueueTracks();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to play track");
     } finally {
@@ -304,6 +326,9 @@ function App() {
         await resumeTrack();
       } else if (playbackState.current_path) {
         await playTrack(playbackState.current_path);
+      } else if (hasActiveQueue) {
+        const startIndex = queueData.current_index ?? 0;
+        await playTrackFromQueue(startIndex);
       } else if (playlist.length > 0 && selectedPlaylistId) {
         await playTrackFromSpecificPlaylist(selectedPlaylistId, 0);
       } else {
@@ -330,15 +355,37 @@ function App() {
   };
 
   const handlePrevious = async () => {
-    if (!playlist.length) return;
-    const nextIndex = currentIndex > 0 ? currentIndex - 1 : playlist.length - 1;
-    await handlePlayTrack(nextIndex);
+    if (!canSkip) return;
+    try {
+      setError(null);
+      const path = await playPrevious();
+      if (!path && selectedPlaylistId && playlist.length > 0) {
+        const prevIndex =
+          currentPlaylistIndex > 0 ? currentPlaylistIndex - 1 : playlist.length - 1;
+        await playTrackFromSpecificPlaylist(selectedPlaylistId, prevIndex);
+      }
+      await updatePlaybackState();
+      await loadQueueTracks();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to go to previous track");
+    }
   };
 
   const handleNext = async () => {
-    if (!playlist.length) return;
-    const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % playlist.length : 0;
-    await handlePlayTrack(nextIndex);
+    if (!canSkip) return;
+    try {
+      setError(null);
+      const path = await playNext();
+      if (!path && selectedPlaylistId && playlist.length > 0) {
+        const nextIndex =
+          currentPlaylistIndex >= 0 ? (currentPlaylistIndex + 1) % playlist.length : 0;
+        await playTrackFromSpecificPlaylist(selectedPlaylistId, nextIndex);
+      }
+      await updatePlaybackState();
+      await loadQueueTracks();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to go to next track");
+    }
   };
 
   const handleSeek = async (value: number) => {
@@ -433,7 +480,15 @@ function App() {
       setError(null);
       await queueInsertNext(path);
       setMenuTrackPath(null);
-      if (showQueue) await loadQueueTracks();
+      if (!playbackState.current_path && !playbackState.is_paused) {
+        const data = await getQueueTracks();
+        const idx = data.tracks.findIndex((track) => track.path === path);
+        if (idx >= 0) {
+          await playTrackFromQueue(idx);
+          await updatePlaybackState();
+        }
+      }
+      await loadQueueTracks();
     } catch (err) {
       setError(formatInvokeError(err, "Failed to add track to play next"));
     }
@@ -444,7 +499,7 @@ function App() {
       setError(null);
       await addToQueue(path);
       setMenuTrackPath(null);
-      if (showQueue) await loadQueueTracks();
+      await loadQueueTracks();
     } catch (err) {
       setError(formatInvokeError(err, "Failed to add track to queue"));
     }
@@ -505,7 +560,7 @@ function App() {
       const name = selectedPlaylist?.name ?? "playlist";
       const path = await savePlaylistDialog(name);
       if (!path) return;
-      const format = path.endsWith(".json") ? "json" : "m3u";
+      const format = path.toLowerCase().endsWith(".json") ? "json" : "m3u";
       await exportPlaylist(selectedPlaylistId, path, format);
     } catch (err) {
       setError(formatInvokeError(err, "Failed to export playlist"));
@@ -535,7 +590,11 @@ function App() {
         <div className="brand-mark"><span>W</span> Wave</div>
         <nav className="sidebar-nav">
           <button className="nav-item active" type="button"><span>Home</span></button>
-          <button className="nav-item" type="button" onClick={() => setShowQueue((v) => !v)}>
+          <button
+            className={`nav-item ${showQueue ? "active" : ""}`}
+            type="button"
+            onClick={() => setShowQueue((v) => !v)}
+          >
             <span>Queue{queueData.tracks.length > 0 ? ` (${queueData.tracks.length})` : ""}</span>
           </button>
         </nav>
@@ -580,7 +639,7 @@ function App() {
           <div className="hero-copy">
             <p className="eyebrow">Playlist</p>
             <h1>{selectedPlaylist?.name ?? "Local Sessions"}</h1>
-            <p>{playlist.length ? `${playlist.length} tracks queued from your files` : "Add songs to start listening"}</p>
+            <p>{playlist.length ? `${playlist.length} tracks in this playlist` : "Add songs to start listening"}</p>
             <div className="hero-actions">
               <button className="big-play" onClick={handlePlayPause} disabled={isLoading} type="button" title="Play or pause">
                 {playbackState.is_playing ? "Pause" : "Play"}
@@ -721,10 +780,10 @@ function App() {
 
         <div className="player-center">
           <div className="player-controls">
-            <button className="control-btn" onClick={handlePrevious} disabled={!playlist.length} type="button" title="Previous">Prev</button>
+            <button className="control-btn" onClick={handlePrevious} disabled={!canSkip} type="button" title="Previous">Prev</button>
             <button className="control-btn" onClick={handleStop} disabled={!playbackState.current_path} type="button" title="Stop">Stop</button>
             <button className="control-btn play-pause-btn" onClick={handlePlayPause} disabled={isLoading} type="button" title="Play/Pause">{playbackState.is_playing ? "||" : ">"}</button>
-            <button className="control-btn" onClick={handleNext} disabled={!playlist.length} type="button" title="Next">Next</button>
+            <button className="control-btn" onClick={handleNext} disabled={!canSkip} type="button" title="Next">Next</button>
           </div>
           <div className="seek-row">
             <span>{formatTime(displayPosition)}</span>

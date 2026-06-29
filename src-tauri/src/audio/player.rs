@@ -151,15 +151,20 @@ impl Queue {
                 }
             }
         } else {
-            let current = self.current_index.unwrap_or(0);
-            let next = current + 1;
-            match repeat {
-                RepeatMode::All => Some(next % self.tracks.len()),
-                RepeatMode::Off | RepeatMode::One => {
-                    if next < self.tracks.len() {
-                        Some(next)
-                    } else {
-                        None
+            match self.current_index {
+                None if !self.tracks.is_empty() => Some(0),
+                None => None,
+                Some(current) => {
+                    let next = current + 1;
+                    match repeat {
+                        RepeatMode::All => Some(next % self.tracks.len()),
+                        RepeatMode::Off | RepeatMode::One => {
+                            if next < self.tracks.len() {
+                                Some(next)
+                            } else {
+                                None
+                            }
+                        }
                     }
                 }
             }

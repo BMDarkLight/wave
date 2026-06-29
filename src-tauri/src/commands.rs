@@ -306,25 +306,37 @@ pub fn get_queue(state: tauri::State<PlayerState>) -> Result<QueueStateDto, Stri
 #[tauri::command]
 pub fn play_next(
     state: tauri::State<PlayerState>,
+    library: tauri::State<LibraryState>,
     bridge: tauri::State<MediaBridgeState>,
 ) -> Result<Option<String>, String> {
-    let result = lock_player(&state)?.play_next()?;
-    if result.is_some() {
-        sync_bridge_playing(&bridge, 0.0);
+    let path = {
+        let mut player = lock_player(&state)?;
+        player.play_next()?
+    };
+    if let Some(ref path) = path {
+        let lib = lock_library(&library)?;
+        let track = resolve_track(&lib, path);
+        sync_bridge_now_playing(&bridge, &track);
     }
-    Ok(result)
+    Ok(path)
 }
 
 #[tauri::command]
 pub fn play_previous(
     state: tauri::State<PlayerState>,
+    library: tauri::State<LibraryState>,
     bridge: tauri::State<MediaBridgeState>,
 ) -> Result<Option<String>, String> {
-    let result = lock_player(&state)?.play_previous()?;
-    if result.is_some() {
-        sync_bridge_playing(&bridge, 0.0);
+    let path = {
+        let mut player = lock_player(&state)?;
+        player.play_previous()?
+    };
+    if let Some(ref path) = path {
+        let lib = lock_library(&library)?;
+        let track = resolve_track(&lib, path);
+        sync_bridge_now_playing(&bridge, &track);
     }
-    Ok(result)
+    Ok(path)
 }
 
 #[tauri::command]
