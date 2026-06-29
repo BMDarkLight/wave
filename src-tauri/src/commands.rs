@@ -215,6 +215,7 @@ pub async fn get_playback_state(
         position_seconds: player.position_seconds(),
         duration_seconds: player.duration_seconds(),
         volume: player.volume(),
+        output_device_name: AudioPlayer::current_output_name(),
     })
 }
 
@@ -528,6 +529,36 @@ pub async fn clear_playlist_by_id(
 }
 
 #[tauri::command]
+pub async fn create_album_playlist(
+    album: String,
+    name: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<PlaylistInfo, String> {
+    let app = app.clone();
+    blocking(move || {
+        let library = app.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        lib.create_album_playlist(&album, name.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn create_artist_playlist(
+    artist: String,
+    name: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<PlaylistInfo, String> {
+    let app = app.clone();
+    blocking(move || {
+        let library = app.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        lib.create_artist_playlist(&artist, name.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn play_track_from_specific_playlist(
     playlist_id: String,
     index: usize,
@@ -728,6 +759,52 @@ pub async fn import_playlist(
         playlist_name: info.name,
         track_count: tracks.len(),
     })
+}
+
+// ── Audio output devices ─────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn list_output_devices() -> Result<Vec<String>, String> {
+    Ok(AudioPlayer::list_output_devices())
+}
+
+#[tauri::command]
+pub async fn set_output_device(
+    device_name: String,
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+
+    // Save state from the current player before replacing it.
+    let was_playing = guard.is_playing();
+    let was_paused = guard.is_paused();
+    let current_path = guard.get_current_path().and_then(|p| p.to_str().map(String::from));
+    let position = guard.position_seconds();
+    let volume = guard.volume();
+    let queue = std::mem::take(&mut guard.queue);
+    let repeat = guard.repeat.clone();
+
+    // Build a new player on the requested device.
+    let mut new_player = AudioPlayer::new_with_device(&device_name)?;
+    new_player.queue = queue;
+    new_player.repeat = repeat;
+    new_player.set_volume(volume)?;
+
+    // Resume playback if something was playing.
+    if let Some(ref path) = current_path {
+        if was_playing || was_paused {
+            new_player.play(path)?;
+            if position > 0.0 {
+                new_player.seek(position)?;
+            }
+            if was_paused {
+                new_player.pause()?;
+            }
+        }
+    }
+
+    *guard = new_player;
+    Ok(())
 }
 
 // ── OS media controls ─────────────────────────────────────────────────────────

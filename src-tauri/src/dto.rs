@@ -10,6 +10,7 @@ pub struct PlaybackStateDto {
     pub position_seconds: f64,
     pub duration_seconds: Option<f64>,
     pub volume: f32,
+    pub output_device_name: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

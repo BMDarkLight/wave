@@ -3,6 +3,7 @@ use souvlaki::{
 };
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+use tauri::Manager;
 
 // ── Public metadata struct (mirrors what the frontend sends) ─────────────────
 

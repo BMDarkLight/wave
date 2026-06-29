@@ -1062,6 +1062,74 @@ img.queue-thumb {
   text-align: right;
 }
 
+.output-device-name {
+  color: var(--muted);
+  font-size: 11px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  transition: color 0.15s;
+}
+
+.output-device-name:hover {
+  color: var(--fg);
+}
+
+.device-selector {
+  position: relative;
+  border-left: 1px solid var(--line);
+  padding-left: 10px;
+}
+
+.device-list-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99;
+}
+
+.device-list {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 8px;
+  padding: 4px;
+  min-width: 200px;
+  max-height: 240px;
+  overflow-y: auto;
+  z-index: 100;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.device-list-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
+}
+
+.device-list-item:hover {
+  background: #2a2a2a;
+  color: var(--fg);
+}
+
+.device-list-item.active {
+  color: var(--green-hot);
+}
+
 ::-webkit-scrollbar {
   width: 12px;
 }
