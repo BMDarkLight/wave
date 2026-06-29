@@ -57,10 +57,22 @@ where
 }
 
 fn sync_queue_from_tracks(player: &mut AudioPlayer, tracks: &[Track], index: usize) {
-    let paths: Vec<String> = tracks.iter().map(|track| track.path.clone()).collect();
-    player.queue.set_tracks(paths);
+    let new_paths: Vec<String> = tracks.iter().map(|track| track.path.clone()).collect();
+    let old_paths: Vec<String> = player.queue.tracks().to_vec();
+
+    // Preserve any manually-added queue items (those not in the new playlist).
+    let manual: Vec<String> = old_paths
+        .into_iter()
+        .filter(|p| !new_paths.contains(p))
+        .collect();
+
+    player.queue.set_tracks(new_paths);
     if player.queue.jump(index).is_none() {
         tracing::warn!("Failed to align playback queue with playlist index {index}");
+    }
+    // Re-append manual items so they play after the playlist finishes.
+    for path in manual {
+        player.queue.enqueue(path);
     }
 }
 

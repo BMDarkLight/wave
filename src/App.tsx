@@ -10,6 +10,7 @@ import {
   deletePlaylist,
   exportPlaylist,
   getFileName,
+  getPlaybackMode,
   getPlaybackState,
   getPlaylistTracksById,
   getQueueTracks,
@@ -32,8 +33,11 @@ import {
   seekTrack,
   selectAudioFile,
   setPlayerVolume,
+  setRepeat,
+  setShuffle,
   stopTrack,
   updateMediaMetadata,
+  type PlaybackMode,
   type PlaybackState,
   type PlaylistInfo,
   type QueueTrackState,
@@ -104,6 +108,9 @@ function App() {
   const [playlists, setPlaylists] = useState<PlaylistInfo[]>([]);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
 
+  // Playback mode
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>({ repeat: "off", shuffle: false });
+
   // Queue panel
   const [queueData, setQueueData] = useState<QueueTrackState>({ tracks: [], current_index: null, is_shuffled: false });
   const [showQueue, setShowQueue] = useState(false);
@@ -162,6 +169,13 @@ function App() {
     setPlaylist(tracks);
   };
 
+  const loadPlaybackMode = async () => {
+    try {
+      const mode = await getPlaybackMode();
+      setPlaybackMode(mode);
+    } catch { /* ignore */ }
+  };
+
   const loadQueueTracks = async () => {
     const data = await getQueueTracks();
     setQueueData(data);
@@ -184,6 +198,7 @@ function App() {
         }
         await updatePlaybackState();
         await loadQueueTracks();
+        await loadPlaybackMode();
       } catch (err: any) {
         if (err?.message?.includes("not available") || err?.message?.includes("undefined")) {
           setError("Tauri API not available. Run `npm run tauri dev` instead of plain Vite.");
@@ -194,13 +209,16 @@ function App() {
     initApp();
     const interval = setInterval(() => updatePlaybackState().catch(() => {}), 500);
     const queueInterval = setInterval(() => loadQueueTracks().catch(() => {}), 2000);
+    const modeInterval = setInterval(() => loadPlaybackMode().catch(() => {}), 2000);
     return () => {
       clearInterval(interval);
       clearInterval(queueInterval);
+      clearInterval(modeInterval);
     };
   }, []);
 
-  // Auto-advance when a track finishes naturally
+  // Auto-advance when a track finishes naturally.
+  // Falls back to the selected playlist if the queue is exhausted.
   useEffect(() => {
     const wasPlaying = wasPlayingRef.current;
     const { is_playing, is_paused, current_path, position_seconds, duration_seconds } = playbackState;
@@ -213,10 +231,20 @@ function App() {
       duration_seconds != null &&
       position_seconds >= duration_seconds - 1
     ) {
-      playNext()
-        .then(() => updatePlaybackState())
-        .then(() => loadQueueTracks())
-        .catch(console.error);
+      (async () => {
+        const path = await playNext();
+        if (!path) {
+          const mode = await getPlaybackMode();
+          if (mode.repeat === "one") return;
+          if (selectedPlaylistId && playlist.length > 0) {
+            const nextIndex = (currentPlaylistIndex + 1) % playlist.length;
+            await playTrackFromSpecificPlaylist(selectedPlaylistId, nextIndex);
+          }
+        }
+        await updatePlaybackState();
+        await loadQueueTracks();
+        await loadPlaybackMode();
+      })();
     }
 
     wasPlayingRef.current = is_playing;
@@ -339,11 +367,24 @@ function App() {
         await pauseTrack();
       } else if (playbackState.is_paused) {
         await resumeTrack();
-      } else if (playbackState.current_path) {
+      } else if (
+        playbackState.current_path &&
+        playbackState.duration_seconds != null &&
+        playbackState.position_seconds < playbackState.duration_seconds - 1
+      ) {
         await playTrack(playbackState.current_path);
+      } else if (hasActiveQueue && queueData.current_index != null) {
+        const nextIdx = queueData.current_index + 1;
+        if (nextIdx < queueData.tracks.length) {
+          await playTrackFromQueue(nextIdx);
+        } else if (selectedPlaylistId && playlist.length > 0) {
+          const nextIndex = (currentPlaylistIndex + 1) % playlist.length;
+          await playTrackFromSpecificPlaylist(selectedPlaylistId, nextIndex);
+        } else {
+          await playTrackFromQueue(queueData.current_index);
+        }
       } else if (hasActiveQueue) {
-        const startIndex = queueData.current_index ?? 0;
-        await playTrackFromQueue(startIndex);
+        await playTrackFromQueue(0);
       } else if (playlist.length > 0 && selectedPlaylistId) {
         await playTrackFromSpecificPlaylist(selectedPlaylistId, 0);
       } else {
@@ -584,6 +625,26 @@ function App() {
       await loadQueueTracks();
     } catch (err) {
       setError(formatInvokeError(err, "Failed to clear queue"));
+    }
+  };
+
+  const handleToggleShuffle = async () => {
+    try {
+      const next = !playbackMode.shuffle;
+      await setShuffle(next);
+      await loadPlaybackMode();
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to toggle shuffle"));
+    }
+  };
+
+  const handleCycleRepeat = async () => {
+    try {
+      const next = playbackMode.repeat === "off" ? "all" : playbackMode.repeat === "all" ? "one" : "off";
+      await setRepeat(next);
+      await loadPlaybackMode();
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to change repeat mode"));
     }
   };
 
@@ -907,10 +968,22 @@ function App() {
 
         <div className="player-center">
           <div className="player-controls">
+            <button
+              className={`control-btn shuffle-btn ${playbackMode.shuffle ? "active" : ""}`}
+              onClick={handleToggleShuffle}
+              type="button"
+              title={playbackMode.shuffle ? "Disable shuffle" : "Enable shuffle"}
+            >Shuf</button>
             <button className="control-btn" onClick={handlePrevious} disabled={!canSkip} type="button" title="Previous">Prev</button>
             <button className="control-btn" onClick={handleStop} disabled={!playbackState.current_path} type="button" title="Stop">Stop</button>
             <button className="control-btn play-pause-btn" onClick={handlePlayPause} disabled={isLoading} type="button" title="Play/Pause">{playbackState.is_playing ? "||" : ">"}</button>
             <button className="control-btn" onClick={handleNext} disabled={!canSkip} type="button" title="Next">Next</button>
+            <button
+              className={`control-btn repeat-btn ${playbackMode.repeat !== "off" ? "active" : ""} ${playbackMode.repeat === "one" ? "repeat-one" : ""}`}
+              onClick={handleCycleRepeat}
+              type="button"
+              title={playbackMode.repeat === "off" ? "Repeat off" : playbackMode.repeat === "all" ? "Repeat all" : "Repeat one"}
+            >{playbackMode.repeat === "one" ? "R1" : "Rpt"}</button>
           </div>
           <div className="seek-row">
             <span>{formatTime(displayPosition)}</span>
