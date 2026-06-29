@@ -45,7 +45,7 @@ struct TrackExportJson {
     duration_seconds: Option<f64>,
 }
 
-/// Cached ID for the "Local Sessions" playlist, so we don't need to hit the
+/// Cached ID for the "All Local Files" playlist, so we don't need to hit the
 /// database on every single read operation.
 pub struct Library {
     db_path: PathBuf,
@@ -173,7 +173,7 @@ impl Library {
         // Seed the default profile and playlist. We do this once at startup.
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
         let playlist_id =
-            ensure_playlist_with_connection(&connection, &profile_id, "Local Sessions")?;
+            ensure_playlist_with_connection(&connection, &profile_id, "All Local Files")?;
         let favorites_id =
             ensure_playlist_with_connection(&connection, &profile_id, "Favorites")?;
 
@@ -196,7 +196,7 @@ impl Library {
         let connection = self.lock_connection()?;
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
         let playlist_id =
-            ensure_playlist_with_connection(&connection, &profile_id, "Local Sessions")?;
+            ensure_playlist_with_connection(&connection, &profile_id, "All Local Files")?;
         let _ = self.default_playlist_id_cache.set(playlist_id.clone());
         Ok(playlist_id)
     }
@@ -389,6 +389,25 @@ impl Library {
         Ok(in_favorites)
     }
 
+    /// Whether a track is registered in the library and belongs to at least one playlist.
+    pub fn is_track_in_any_playlist(&self, path: &str) -> Result<bool, String> {
+        let connection = self.lock_connection()?;
+        let in_playlist = connection
+            .query_row(
+                "SELECT 1
+                 FROM tracks t
+                 INNER JOIN playlist_tracks pt ON pt.track_id = t.id
+                 WHERE t.path = ?1
+                 LIMIT 1",
+                params![path],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| format!("Failed to check playlist membership: {error}"))?
+            .is_some();
+        Ok(in_playlist)
+    }
+
     /// Toggle the favorite state of a track. Returns the new state
     /// (`true` = now favorited, `false` = now unfavorited).
     pub fn toggle_favorite(&self, path: &str) -> Result<bool, String> {
@@ -422,7 +441,7 @@ impl Library {
     ) -> Result<Vec<Track>, String> {
         let profile_id_str = profile_id.unwrap_or_else(|| "default".to_string());
         let playlist_name_str =
-            playlist_name.unwrap_or_else(|| "Local Sessions".to_string());
+            playlist_name.unwrap_or_else(|| "All Local Files".to_string());
 
         // Resolve / create the profile and playlist outside the connection lock.
         let playlist_id = {
@@ -627,8 +646,8 @@ impl Library {
 
         match name {
             None => return Err("Playlist not found".to_string()),
-            Some(name) if name == "Local Sessions" => {
-                return Err("The default \"Local Sessions\" playlist cannot be deleted".to_string());
+            Some(name) if name == "All Local Files" => {
+                return Err("The default \"All Local Files\" playlist cannot be deleted".to_string());
             }
             Some(name) if name == "Favorites" => {
                 return Err("The \"Favorites\" playlist cannot be deleted".to_string());
@@ -665,8 +684,8 @@ impl Library {
             .map_err(|error| format!("Failed to look up playlist: {error}"))?
             .ok_or_else(|| "Playlist not found".to_string())?;
 
-        if current_name == "Local Sessions" {
-            return Err("The default \"Local Sessions\" playlist cannot be renamed".to_string());
+        if current_name == "All Local Files" {
+            return Err("The default \"All Local Files\" playlist cannot be renamed".to_string());
         }
 
         if current_name == "Favorites" {
@@ -1905,7 +1924,7 @@ mod tests {
         let playlists = library.list_playlists(None).expect("playlists");
         let names: Vec<&str> = playlists.iter().map(|p| p.name.as_str()).collect();
         assert!(names.contains(&"Favorites"));
-        assert!(names.contains(&"Local Sessions"));
+        assert!(names.contains(&"All Local Files"));
     }
 
     #[test]
@@ -1939,6 +1958,37 @@ mod tests {
             .expect("remove");
 
         assert!(!library.is_track_in_favorites(track_path).expect("removed"));
+    }
+
+    #[test]
+    fn is_track_in_any_playlist_requires_registered_membership() {
+        let library = open_test_library().expect("library");
+        let playlist_id = library.default_playlist_id().expect("playlist");
+        let track_path = "/music/registered.mp3";
+
+        assert!(!library
+            .is_track_in_any_playlist(track_path)
+            .expect("absent before insert"));
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let track = sample_track("reg-1", track_path);
+            let id = upsert_track(&*connection, &track).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &playlist_id, &id, 0)
+                .expect("insert");
+        }
+
+        assert!(library
+            .is_track_in_any_playlist(track_path)
+            .expect("present after insert"));
+
+        library
+            .remove_track_from_playlist_by_path(&playlist_id, track_path)
+            .expect("remove");
+
+        assert!(!library
+            .is_track_in_any_playlist(track_path)
+            .expect("absent after remove"));
     }
 
     #[test]

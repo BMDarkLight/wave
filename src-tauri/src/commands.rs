@@ -324,6 +324,14 @@ pub async fn is_track_in_favorites(
 }
 
 #[tauri::command]
+pub async fn is_track_in_playlist(
+    path: String,
+    library: tauri::State<'_, LibraryState>,
+) -> Result<bool, String> {
+    lock_library(&library)?.is_track_in_any_playlist(&path)
+}
+
+#[tauri::command]
 pub async fn toggle_favorite(
     path: String,
     app: tauri::AppHandle,

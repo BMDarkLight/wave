@@ -31,7 +31,7 @@ Wave separates three layers:
 
 | Layer | Storage | Purpose |
 |-------|---------|---------|
-| **Library playlist** | SQLite (`wave-library.sqlite`) | Persisted track list for the default “Local Sessions” playlist |
+| **Library playlist** | SQLite (`wave-library.sqlite`) | Persisted track list for the default "All Local Files" playlist |
 | **Playback queue** | In-memory (Rust) | Order used by `play_next`, `play_previous`, shuffle, and repeat |
 | **Audio engine** | In-memory (Rodio + Symphonia) | Actual decode/play/pause/seek/volume |
 
@@ -80,7 +80,7 @@ Important behaviors:
 
 ### Favorites
 
-The **Favorites** playlist is a special seeded playlist (like "Local Sessions") that shows up in `list_playlists` and cannot be deleted or renamed. See [Commands → Favorites](./commands.md#favorites).
+The **Favorites** playlist is a special seeded playlist (like "All Local Files") that shows up in `list_playlists` and cannot be deleted or renamed. See [Commands → Favorites](./commands.md#favorites).
 
 | Command | Description |
 |---------|-------------|

@@ -220,6 +220,10 @@ export const isTrackInFavorites = (path: string): Promise<boolean> => {
   return safeInvoke<boolean>("is_track_in_favorites", { path });
 };
 
+export const isTrackInPlaylist = (path: string): Promise<boolean> => {
+  return safeInvoke<boolean>("is_track_in_playlist", { path });
+};
+
 /** Toggle the favorite state of a track. Returns the new state (true = favorited). */
 export const toggleFavorite = (path: string): Promise<boolean> => {
   return safeInvoke<boolean>("toggle_favorite", { path });

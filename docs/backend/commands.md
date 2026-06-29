@@ -115,7 +115,7 @@ Set output volume.
 
 ## Library & playlists
 
-The default profile is `"default"` and the default playlist is `"Local Sessions"`. Most library commands operate on that playlist unless noted.
+The default profile is `"default"` and the default playlist is `"All Local Files"`. Most library commands operate on that playlist unless noted.
 
 ### `add_track_to_playlist`
 
@@ -201,7 +201,7 @@ Recursively scan a directory for supported audio files, extract metadata, and im
 |------|------|----------|---------|-------------|
 | `directory` | `string` | yes | — | Folder to scan |
 | `profileId` | `string` | no | `"default"` | Profile id |
-| `playlistName` | `string` | no | `"Local Sessions"` | Target playlist name |
+| `playlistName` | `string` | no | `"All Local Files"` | Target playlist name |
 
 **Returns:** `Track[]` — only tracks **newly added** to the playlist during this scan (skipped/duplicate files are omitted)
 
@@ -244,7 +244,7 @@ mp3, mp4, oga, ogg, opus, wav, wave, weba
 
 ## Favorites
 
-**Favorites** is a special seeded playlist — just like "Local Sessions" — that is created automatically on startup, shows up in `list_playlists`, and **cannot be deleted or renamed**. Use these commands to manage it; it also works with the generic by-id playlist commands (`get_playlist_tracks_by_id`, `play_track_from_specific_playlist`, etc.) using the playlist id from `list_playlists`.
+**Favorites** is a special seeded playlist — just like "All Local Files" — that is created automatically on startup, shows up in `list_playlists`, and **cannot be deleted or renamed**. Use these commands to manage it; it also works with the generic by-id playlist commands (`get_playlist_tracks_by_id`, `play_track_from_specific_playlist`, etc.) using the playlist id from `list_playlists`.
 
 ### `add_track_to_favorites`
 

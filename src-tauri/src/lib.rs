@@ -57,6 +57,7 @@ pub fn run() {
             commands::remove_track_from_favorites,
             commands::get_favorites,
             commands::is_track_in_favorites,
+            commands::is_track_in_playlist,
             commands::toggle_favorite,
             commands::clear_favorites,
             commands::play_track_from_playlist,
