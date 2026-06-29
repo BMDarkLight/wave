@@ -1,3 +1,4 @@
+use crate::dto::{AlbumSummaryDto, ArtistSummaryDto};
 use crate::metadata::{extract_track, is_supported_audio_file, Track};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
@@ -732,6 +733,129 @@ impl Library {
         Ok(tracks)
     }
 
+    // ── Album / artist browsing & querying ───────────────────────────────────
+
+    /// List every distinct album in the library grouped by
+    /// `(album, COALESCE(album_artist, artist))`, ordered by album artist then
+    /// album name. Each entry carries aggregate info (track count, year,
+    /// representative cover art) suitable for a browse grid.
+    pub fn list_albums(&self) -> Result<Vec<AlbumSummaryDto>, String> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT
+                    t.album,
+                    COALESCE(NULLIF(t.album_artist, ''), t.artist) AS album_artist,
+                    MIN(t.artist) AS artist,
+                    COUNT(*) AS track_count,
+                    MIN(t.year) AS year,
+                    MIN(t.cover_art_data_url) AS cover_art_data_url,
+                    MIN(t.cover_art_mime) AS cover_art_mime
+                 FROM tracks t
+                 GROUP BY t.album, COALESCE(NULLIF(t.album_artist, ''), t.artist)
+                 ORDER BY album_artist, t.album",
+            )
+            .map_err(|error| format!("Failed to prepare albums query: {error}"))?;
+        let albums = statement
+            .query_map([], row_to_album_summary)
+            .map_err(|error| format!("Failed to query albums: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to read albums: {error}"))?;
+        Ok(albums)
+    }
+
+    /// List every distinct artist in the library (by the track `artist` tag),
+    /// with aggregate track and album counts, ordered by artist name.
+    pub fn list_artists(&self) -> Result<Vec<ArtistSummaryDto>, String> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT
+                    t.artist,
+                    COUNT(*) AS track_count,
+                    COUNT(DISTINCT t.album) AS album_count
+                 FROM tracks t
+                 GROUP BY t.artist
+                 ORDER BY t.artist",
+            )
+            .map_err(|error| format!("Failed to prepare artists query: {error}"))?;
+        let artists = statement
+            .query_map([], row_to_artist_summary)
+            .map_err(|error| format!("Failed to query artists: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to read artists: {error}"))?;
+        Ok(artists)
+    }
+
+    /// Return every track belonging to an album.
+    ///
+    /// When `album_artist` is provided, tracks are matched on both `album` and
+    /// the resolved album artist (`COALESCE(album_artist, artist)`). This keeps
+    /// same-named albums by different artists apart — pass the value from an
+    /// [`AlbumSummaryDto`] (or a clicked `Track`'s `album_artist` falling back to
+    /// `artist`) for a precise, Spotify-style "go to album" result.
+    ///
+    /// When `album_artist` is `None`, only the `album` name is matched (which may
+    /// merge same-named albums across artists).
+    ///
+    /// Tracks are ordered by disc number then track number.
+    pub fn get_tracks_by_album(
+        &self,
+        album: &str,
+        album_artist: Option<&str>,
+    ) -> Result<Vec<Track>, String> {
+        let album = album.trim();
+        if album.is_empty() {
+            return Err("Album name cannot be empty".to_string());
+        }
+        let album_artist = album_artist.map(str::trim).filter(|a| !a.is_empty());
+
+        let connection = self.lock_connection()?;
+        let sql = if album_artist.is_some() {
+            format!(
+                "SELECT {TRACK_SELECT_COLUMNS}
+                 FROM tracks t
+                 WHERE t.album = ?1
+                   AND COALESCE(NULLIF(t.album_artist, ''), t.artist) = ?2
+                 ORDER BY COALESCE(t.disc_number, 1), COALESCE(t.track_number, 0)"
+            )
+        } else {
+            format!(
+                "SELECT {TRACK_SELECT_COLUMNS}
+                 FROM tracks t
+                 WHERE t.album = ?1
+                 ORDER BY COALESCE(t.disc_number, 1), COALESCE(t.track_number, 0)"
+            )
+        };
+
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| format!("Failed to prepare album tracks query: {error}"))?;
+
+        let rows = match album_artist {
+            Some(album_artist) => statement
+                .query_map(params![album, album_artist], row_to_track)
+                .map_err(|error| format!("Failed to query album tracks: {error}"))?,
+            None => statement
+                .query_map(params![album], row_to_track)
+                .map_err(|error| format!("Failed to query album tracks: {error}"))?,
+        };
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to read album tracks: {error}"))
+    }
+
+    /// Return every track by an artist (a discography), ordered by album then
+    /// disc number then track number. Matches the track `artist` tag.
+    pub fn get_tracks_by_artist(&self, artist: &str) -> Result<Vec<Track>, String> {
+        let artist = artist.trim();
+        if artist.is_empty() {
+            return Err("Artist name cannot be empty".to_string());
+        }
+        let connection = self.lock_connection()?;
+        Self::get_tracks_by_column(&connection, "artist", artist)
+    }
+
     pub fn get_playlist_info(&self, playlist_id: &str) -> Result<Option<PlaylistInfo>, String> {
         let connection = self.lock_connection()?;
         self.playlist_info(&connection, playlist_id)
@@ -943,6 +1067,26 @@ fn row_to_playlist(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaylistInfo> {
         track_count: row.get(3)?,
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
+    })
+}
+
+fn row_to_album_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumSummaryDto> {
+    Ok(AlbumSummaryDto {
+        name: row.get(0)?,
+        album_artist: row.get(1)?,
+        artist: row.get(2)?,
+        track_count: row.get(3)?,
+        year: row.get(4)?,
+        cover_art_data_url: row.get(5)?,
+        cover_art_mime: row.get(6)?,
+    })
+}
+
+fn row_to_artist_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtistSummaryDto> {
+    Ok(ArtistSummaryDto {
+        name: row.get(0)?,
+        track_count: row.get(1)?,
+        album_count: row.get(2)?,
     })
 }
 
@@ -1421,5 +1565,225 @@ mod tests {
             .expect("playlist tracks");
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].path, "/music/b.mp3");
+    }
+
+    // ── Album / artist browsing & querying ──────────────────────────────────
+
+    /// Build a `Track` with customizable album/artist metadata for browse tests.
+    fn track_with(
+        id: &str,
+        path: &str,
+        artist: &str,
+        album: &str,
+        album_artist: Option<&str>,
+        track_number: Option<i32>,
+        disc_number: Option<i32>,
+        year: Option<i32>,
+        cover: Option<&str>,
+    ) -> Track {
+        let mut t = sample_track(id, path);
+        t.artist = artist.to_string();
+        t.album = album.to_string();
+        t.album_artist = album_artist.map(String::from);
+        t.track_number = track_number;
+        t.disc_number = disc_number;
+        t.year = year;
+        t.cover_art_data_url = cover.map(String::from);
+        t.cover_art_mime = cover.map(|_| "image/jpeg".to_string());
+        t
+    }
+
+    fn upsert_many(connection: &Connection, tracks: &[Track]) {
+        for track in tracks {
+            upsert_track(connection, track).expect("upsert");
+        }
+    }
+
+    fn seed_library_for_browse_tests(library: &Library) {
+        let connection = library.lock_connection().expect("connection");
+        upsert_many(
+            &connection,
+            &[
+                // "Abbey Road" by The Beatles (album_artist set, 3 tracks).
+                track_with("b1", "/m/abbey-1.flac", "The Beatles", "Abbey Road", Some("The Beatles"), Some(1), Some(1), Some(1969), Some("data:abbey")),
+                track_with("b2", "/m/abbey-2.flac", "The Beatles", "Abbey Road", Some("The Beatles"), Some(2), Some(1), Some(1969), Some("data:abbey")),
+                track_with("b3", "/m/abbey-3.flac", "The Beatles", "Abbey Road", Some("The Beatles"), Some(3), Some(1), Some(1969), Some("data:abbey")),
+                // A second Beatles album so album_count > 1.
+                track_with("b4", "/m/letitbe-1.flac", "The Beatles", "Let It Be", Some("The Beatles"), Some(1), Some(1), Some(1970), Some("data:letitbe")),
+                // "Greatest Hits" collision: Queen (2 tracks) vs ABBA (1 track, no cover).
+                track_with("q1", "/m/queen-1.flac", "Queen", "Greatest Hits", Some("Queen"), Some(1), Some(1), Some(1981), Some("data:queen")),
+                track_with("q2", "/m/queen-2.flac", "Queen", "Greatest Hits", Some("Queen"), Some(2), Some(1), Some(1981), Some("data:queen")),
+                track_with("a1", "/m/abba-1.flac", "ABBA", "Greatest Hits", Some("ABBA"), Some(1), Some(1), Some(1975), None),
+                // Album with no album_artist tag → resolved album_artist falls back to artist.
+                track_with("s1", "/m/solo-1.flac", "Solo", "No Album Artist", None, Some(1), Some(1), Some(2020), None),
+            ],
+        );
+    }
+
+    #[test]
+    fn list_albums_groups_by_album_and_resolved_album_artist() {
+        let library = open_test_library().expect("library");
+        seed_library_for_browse_tests(&library);
+
+        let albums = library.list_albums().expect("albums");
+
+        // 5 distinct (album, album_artist) groups — "Greatest Hits" appears twice
+        // and The Beatles have two separate albums.
+        assert_eq!(albums.len(), 5);
+
+        // Ordered by album_artist then album.
+        let names: Vec<(&str, &str, i64)> = albums
+            .iter()
+            .map(|a| (a.name.as_str(), a.album_artist.as_deref().unwrap_or(""), a.track_count))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("Greatest Hits", "ABBA", 1),
+                ("Greatest Hits", "Queen", 2),
+                ("No Album Artist", "Solo", 1),
+                ("Abbey Road", "The Beatles", 3),
+                ("Let It Be", "The Beatles", 1),
+            ]
+        );
+
+        let abbey = albums.iter().find(|a| a.name == "Abbey Road").unwrap();
+        assert_eq!(abbey.artist, "The Beatles");
+        assert_eq!(abbey.year, Some(1969));
+        assert_eq!(abbey.cover_art_data_url.as_deref(), Some("data:abbey"));
+        assert_eq!(abbey.cover_art_mime.as_deref(), Some("image/jpeg"));
+
+        let abba = albums.iter().find(|a| a.name == "Greatest Hits" && a.album_artist.as_deref() == Some("ABBA")).unwrap();
+        assert_eq!(abba.year, Some(1975));
+        assert!(abba.cover_art_data_url.is_none());
+
+        // An album with a NULL album_artist tag resolves to the track artist.
+        let solo = albums.iter().find(|a| a.name == "No Album Artist").unwrap();
+        assert_eq!(solo.album_artist.as_deref(), Some("Solo"));
+    }
+
+    #[test]
+    fn list_artists_aggregates_track_and_album_counts() {
+        let library = open_test_library().expect("library");
+        seed_library_for_browse_tests(&library);
+
+        let artists = library.list_artists().expect("artists");
+
+        // Ordered by artist name.
+        let by_name: Vec<(&str, i64, i64)> = artists
+            .iter()
+            .map(|a| (a.name.as_str(), a.track_count, a.album_count))
+            .collect();
+        assert_eq!(
+            by_name,
+            vec![
+                ("ABBA", 1, 1),
+                ("Queen", 2, 1),
+                ("Solo", 1, 1),
+                ("The Beatles", 4, 2), // 4 tracks across 2 albums
+            ]
+        );
+    }
+
+    #[test]
+    fn get_tracks_by_album_disambiguates_same_named_albums() {
+        let library = open_test_library().expect("library");
+        seed_library_for_browse_tests(&library);
+
+        // Precise match using album_artist keeps the two "Greatest Hits" apart.
+        let queen = library
+            .get_tracks_by_album("Greatest Hits", Some("Queen"))
+            .expect("queen");
+        assert_eq!(queen.len(), 2);
+        assert!(queen.iter().all(|t| t.artist == "Queen"));
+        // Ordered by track_number.
+        assert_eq!(queen[0].track_number, Some(1));
+        assert_eq!(queen[1].track_number, Some(2));
+
+        let abba = library
+            .get_tracks_by_album("Greatest Hits", Some("ABBA"))
+            .expect("abba");
+        assert_eq!(abba.len(), 1);
+
+        // Without album_artist, both merge into one result set.
+        let merged = library
+            .get_tracks_by_album("Greatest Hits", None)
+            .expect("merged");
+        assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn get_tracks_by_album_matches_resolved_album_artist_when_tag_is_null() {
+        let library = open_test_library().expect("library");
+        seed_library_for_browse_tests(&library);
+
+        // "No Album Artist" has a NULL album_artist tag; resolved value is "Solo".
+        let tracks = library
+            .get_tracks_by_album("No Album Artist", Some("Solo"))
+            .expect("tracks");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].artist, "Solo");
+    }
+
+    #[test]
+    fn get_tracks_by_album_orders_by_disc_then_track() {
+        let library = open_test_library().expect("library");
+        {
+            let connection = library.lock_connection().expect("connection");
+            upsert_many(
+                &connection,
+                &[
+                    track_with("d1", "/m/d1.flac", "X", "Double", Some("X"), Some(1), Some(2), None, None),
+                    track_with("d2", "/m/d2.flac", "X", "Double", Some("X"), Some(2), Some(1), None, None),
+                    track_with("d3", "/m/d3.flac", "X", "Double", Some("X"), Some(1), Some(1), None, None),
+                ],
+            );
+        }
+
+        let tracks = library
+            .get_tracks_by_album("Double", Some("X"))
+            .expect("tracks");
+        let order: Vec<(Option<i32>, Option<i32>)> = tracks
+            .iter()
+            .map(|t| (t.disc_number, t.track_number))
+            .collect();
+        assert_eq!(
+            order,
+            vec![(Some(1), Some(1)), (Some(1), Some(2)), (Some(2), Some(1))]
+        );
+    }
+
+    #[test]
+    fn get_tracks_by_artist_returns_discography_ordered_by_album_disc_track() {
+        let library = open_test_library().expect("library");
+        seed_library_for_browse_tests(&library);
+
+        let tracks = library.get_tracks_by_artist("The Beatles").expect("tracks");
+        assert_eq!(tracks.len(), 4);
+        // Ordered by album name: "Abbey Road" before "Let It Be".
+        assert_eq!(tracks[0].album, "Abbey Road");
+        assert_eq!(tracks[3].album, "Let It Be");
+        // Within Abbey Road: disc 1, tracks 1..3.
+        assert_eq!(tracks[0].track_number, Some(1));
+        assert_eq!(tracks[1].track_number, Some(2));
+        assert_eq!(tracks[2].track_number, Some(3));
+    }
+
+    #[test]
+    fn get_tracks_by_album_rejects_empty_name() {
+        let library = open_test_library().expect("library");
+        let err = library
+            .get_tracks_by_album("   ", None)
+            .expect_err("empty album should fail");
+        assert!(err.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn get_tracks_by_artist_rejects_empty_name() {
+        let library = open_test_library().expect("library");
+        let err = library
+            .get_tracks_by_artist("")
+            .expect_err("empty artist should fail");
+        assert!(err.contains("cannot be empty"));
     }
 }

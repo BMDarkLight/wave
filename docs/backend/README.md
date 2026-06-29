@@ -89,6 +89,21 @@ Important behaviors:
 | `set_repeat` | Set repeat mode: `"off"`, `"one"`, or `"all"` |
 | `get_playback_mode` | Current repeat and shuffle settings |
 
+### Albums & artists
+
+Browse and query the library by album/artist metadata (for Spotify-like album
+grids, “go to album”, and discography views). See [Commands → Albums &
+artists](./commands.md#albums--artists).
+
+| Command | Description |
+|---------|-------------|
+| `list_albums` | List every distinct album (grouped by album + album artist) |
+| `list_artists` | List every distinct artist with track/album counts |
+| `get_album_tracks` | Every track in an album (right-click → go to album) |
+| `get_artist_tracks` | Every track by an artist (discography) |
+| `create_album_playlist` | Persist an album’s tracks as a playlist |
+| `create_artist_playlist` | Persist an artist’s tracks as a playlist |
+
 ### OS integration
 
 | Command | Description |

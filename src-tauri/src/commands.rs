@@ -2,7 +2,10 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::audio::player::AudioPlayer;
-use crate::dto::{ImportResultDto, PlaybackModeDto, PlaybackStateDto, QueueDto, QueueStateDto};
+use crate::dto::{
+    AlbumSummaryDto, ArtistSummaryDto, ImportResultDto, PlaybackModeDto, PlaybackStateDto,
+    QueueDto, QueueStateDto,
+};
 use crate::library::{Library, PlaylistInfo};
 use crate::media_controls::{MediaBridge, TrackMetadata};
 use crate::metadata::{supported_audio_extensions, Track};
@@ -556,6 +559,45 @@ pub async fn create_artist_playlist(
         lib.create_artist_playlist(&artist, name.as_deref())
     })
     .await
+}
+
+// ── Album & artist browsing / querying ────────────────────────────────────────
+
+/// List every distinct album in the library (grouped by album + album artist).
+#[tauri::command]
+pub async fn list_albums(
+    library: tauri::State<'_, LibraryState>,
+) -> Result<Vec<AlbumSummaryDto>, String> {
+    lock_library(&library)?.list_albums()
+}
+
+/// List every distinct artist in the library with track and album counts.
+#[tauri::command]
+pub async fn list_artists(
+    library: tauri::State<'_, LibraryState>,
+) -> Result<Vec<ArtistSummaryDto>, String> {
+    lock_library(&library)?.list_artists()
+}
+
+/// Return every track in an album. Pass `albumArtist` (from an
+/// [`AlbumSummaryDto`] or a clicked `Track`'s `album_artist` falling back to
+/// `artist`) to keep same-named albums by different artists apart.
+#[tauri::command]
+pub async fn get_album_tracks(
+    album: String,
+    album_artist: Option<String>,
+    library: tauri::State<'_, LibraryState>,
+) -> Result<Vec<Track>, String> {
+    lock_library(&library)?.get_tracks_by_album(&album, album_artist.as_deref())
+}
+
+/// Return every track by an artist (a discography).
+#[tauri::command]
+pub async fn get_artist_tracks(
+    artist: String,
+    library: tauri::State<'_, LibraryState>,
+) -> Result<Vec<Track>, String> {
+    lock_library(&library)?.get_tracks_by_artist(&artist)
 }
 
 #[tauri::command]

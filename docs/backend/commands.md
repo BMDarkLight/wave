@@ -242,6 +242,140 @@ mp3, mp4, oga, ogg, opus, wav, wave, weba
 
 ---
 
+## Albums & artists
+
+These commands let the frontend build Spotify-style browse views and “go to
+album” / “go to artist” flows straight from file metadata — no playlists
+required.
+
+Albums are grouped by `(album, album_artist)` (falling back to the track
+`artist` when the `album_artist` tag is missing), so same-named albums by
+different artists stay separate. Artists are grouped by the track `artist`
+tag.
+
+### `list_albums`
+
+List every distinct album in the library with aggregate info. Use this to
+render an album grid.
+
+**Arguments:** none
+
+**Returns:** [`AlbumSummary[]`](./types.md#albumsummary)
+
+```typescript
+const albums = await invoke<AlbumSummary[]>("list_albums");
+// albums[0] => { name: "Abbey Road", album_artist: "The Beatles",
+//                track_count: 3, year: 1969, cover_art_data_url: "data:..." }
+```
+
+---
+
+### `list_artists`
+
+List every distinct artist with track and album counts. Use this to render an
+artist list / discography index.
+
+**Arguments:** none
+
+**Returns:** [`ArtistSummary[]`](./types.md#artistsummary)
+
+```typescript
+const artists = await invoke<ArtistSummary[]>("list_artists");
+// artists[0] => { name: "The Beatles", track_count: 12, album_count: 3 }
+```
+
+---
+
+### `get_album_tracks`
+
+Return every track belonging to an album — the backend of the “right-click a
+song → go to album” flow.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `album` | `string` | yes | Album name (matches the track `album` tag) |
+| `albumArtist` | `string` \| null | no | Resolved album artist. Pass `Track.album_artist ?? Track.artist` (or the `AlbumSummary.album_artist` value) to keep same-named albums apart. Omit to match the album name only |
+
+**Returns:** `Track[]` — ordered by disc number then track number.
+
+**Errors:** `"Album name cannot be empty"`.
+
+```typescript
+// From a clicked track:
+const tracks = await invoke<Track[]>("get_album_tracks", {
+  album: track.album,
+  albumArtist: track.album_artist ?? track.artist,
+});
+```
+
+When `albumArtist` is omitted, every track whose `album` tag matches is
+returned, even across different artists.
+
+---
+
+### `get_artist_tracks`
+
+Return every track by an artist (a discography) — the backend of the
+“right-click a song → go to artist” flow. Matches the track `artist` tag.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `artist` | `string` | yes | Artist name (matches the track `artist` tag) |
+
+**Returns:** `Track[]` — ordered by album, then disc number, then track number.
+
+**Errors:** `"Artist name cannot be empty"`.
+
+```typescript
+const tracks = await invoke<Track[]>("get_artist_tracks", { artist: "The Beatles" });
+```
+
+---
+
+### `create_album_playlist`
+
+Create a new persisted playlist from every track matching an album name. Useful
+when you want the album as a real playlist (e.g. to export, reorder, or keep).
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `album` | `string` | yes | Album name |
+| `name` | `string` \| null | no | Playlist name; defaults to the album name. Auto-suffixed on collision |
+
+**Returns:** [`PlaylistInfo`](./types.md#playlistinfo)
+
+**Errors:** `"Album name cannot be empty"`, `"No tracks found for album \"{album}\""`.
+
+---
+
+### `create_artist_playlist`
+
+Create a new persisted playlist from every track matching an artist name (a
+discography playlist).
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `artist` | `string` | yes | Artist name |
+| `name` | `string` \| null | no | Playlist name; defaults to the artist name. Auto-suffixed on collision |
+
+**Returns:** [`PlaylistInfo`](./types.md#playlistinfo)
+
+**Errors:** `"Artist name cannot be empty"`, `"No tracks found for artist \"{artist}\""`.
+
+> `get_album_tracks` / `get_artist_tracks` are the read-only queries you’ll
+> usually want for browse views. The `create_*_playlist` commands persist the
+> same result into a playlist you can save/export.
+
+---
+
 ## Queue & playback modes
 
 The playback queue is **in-memory** and separate from the SQLite playlist. It is populated automatically when you call `play_track_from_playlist`.
