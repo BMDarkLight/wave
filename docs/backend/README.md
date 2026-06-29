@@ -78,6 +78,19 @@ Important behaviors:
 | `get_library_database_path` | Absolute path to the SQLite database |
 | `get_supported_audio_extensions` | Lowercase extensions the backend accepts |
 
+### Favorites
+
+The **Favorites** playlist is a special seeded playlist (like "Local Sessions") that shows up in `list_playlists` and cannot be deleted or renamed. See [Commands → Favorites](./commands.md#favorites).
+
+| Command | Description |
+|---------|-------------|
+| `add_track_to_favorites` | Add a track to the Favorites playlist |
+| `remove_track_from_favorites` | Remove a track from Favorites by path |
+| `get_favorites` | List every track in Favorites |
+| `is_track_in_favorites` | Whether a track is favorited (for heart UI state) |
+| `toggle_favorite` | Toggle favorite state; returns new state |
+| `clear_favorites` | Remove all tracks from Favorites |
+
 ### Queue & playback modes
 
 | Command | Description |

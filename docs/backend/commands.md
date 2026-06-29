@@ -242,6 +242,99 @@ mp3, mp4, oga, ogg, opus, wav, wave, weba
 
 ---
 
+## Favorites
+
+**Favorites** is a special seeded playlist — just like "Local Sessions" — that is created automatically on startup, shows up in `list_playlists`, and **cannot be deleted or renamed**. Use these commands to manage it; it also works with the generic by-id playlist commands (`get_playlist_tracks_by_id`, `play_track_from_specific_playlist`, etc.) using the playlist id from `list_playlists`.
+
+### `add_track_to_favorites`
+
+Read metadata from disk, upsert into SQLite, and append to the Favorites playlist. The track is added to the library if not already present.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Absolute path to an audio file |
+
+**Returns:** [`Track`](./types.md#track)
+
+**Errors:** file missing, unsupported extension, `"Track is already in the playlist"`.
+
+---
+
+### `remove_track_from_favorites`
+
+Remove a track from the Favorites playlist by file path. Does not delete the file or the track record from the library.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Absolute file path |
+
+**Returns:** `void`
+
+**Errors:** `"Track is not in the playlist"`.
+
+---
+
+### `get_favorites`
+
+List every track in the Favorites playlist, ordered by position.
+
+**Arguments:** none
+
+**Returns:** `Track[]`
+
+---
+
+### `is_track_in_favorites`
+
+Whether a track (by file path) is in the Favorites playlist. Use this to render the heart toggle state in the UI.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Absolute file path |
+
+**Returns:** `boolean`
+
+---
+
+### `toggle_favorite`
+
+Toggle the favorite state of a track. Returns the **new** state.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Absolute file path |
+
+**Returns:** `boolean` — `true` if now favorited, `false` if unfavorited
+
+**Example**
+
+```typescript
+const nowFavorited = await invoke<boolean>("toggle_favorite", { path: track.path });
+// update heart icon accordingly
+```
+
+**Errors:** when favoriting: file missing, unsupported extension. When unfavoriting: `"Track is not in the playlist"`.
+
+---
+
+### `clear_favorites`
+
+Remove every track from the Favorites playlist. Does not delete files or track records from the library database.
+
+**Arguments:** none
+
+**Returns:** `void`
+
+---
+
 ## Albums & artists
 
 These commands let the frontend build Spotify-style browse views and “go to

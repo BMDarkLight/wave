@@ -51,6 +51,7 @@ pub struct Library {
     db_path: PathBuf,
     connection: Mutex<Connection>,
     default_playlist_id_cache: OnceLock<String>,
+    favorites_playlist_id_cache: OnceLock<String>,
 }
 
 impl Library {
@@ -69,6 +70,7 @@ impl Library {
             db_path,
             connection: Mutex::new(connection),
             default_playlist_id_cache: OnceLock::new(),
+            favorites_playlist_id_cache: OnceLock::new(),
         };
         library.initialize()?;
         Ok(library)
@@ -172,9 +174,12 @@ impl Library {
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
         let playlist_id =
             ensure_playlist_with_connection(&connection, &profile_id, "Local Sessions")?;
+        let favorites_id =
+            ensure_playlist_with_connection(&connection, &profile_id, "Favorites")?;
 
-        // Warm the cache.
+        // Warm the caches.
         let _ = self.default_playlist_id_cache.set(playlist_id.clone());
+        let _ = self.favorites_playlist_id_cache.set(favorites_id);
 
         if let Err(error) = repair_all_playlist_positions(&connection) {
             tracing::warn!("Failed to repair playlist positions on startup: {error}");
@@ -193,6 +198,19 @@ impl Library {
         let playlist_id =
             ensure_playlist_with_connection(&connection, &profile_id, "Local Sessions")?;
         let _ = self.default_playlist_id_cache.set(playlist_id.clone());
+        Ok(playlist_id)
+    }
+
+    /// Returns the cached favorites playlist id, seeding if necessary.
+    pub fn favorites_playlist_id(&self) -> Result<String, String> {
+        if let Some(id) = self.favorites_playlist_id_cache.get() {
+            return Ok(id.clone());
+        }
+        let connection = self.lock_connection()?;
+        let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
+        let playlist_id =
+            ensure_playlist_with_connection(&connection, &profile_id, "Favorites")?;
+        let _ = self.favorites_playlist_id_cache.set(playlist_id.clone());
         Ok(playlist_id)
     }
 
@@ -309,6 +327,71 @@ impl Library {
                 params![playlist_id],
             )
             .map_err(|error| format!("Failed to clear playlist: {error}"))?;
+        Ok(())
+    }
+
+    // ── Favorites ────────────────────────────────────────────────────────────
+
+    /// Add a track to the Favorites playlist. Extracts metadata and upserts the
+    /// track into the library first (so favorites work for any file, not just
+    /// already-indexed ones).
+    pub fn add_track_to_favorites(&self, path: String) -> Result<Track, String> {
+        let playlist_id = self.favorites_playlist_id()?;
+        self.add_track_to_playlist(&playlist_id, path)
+    }
+
+    /// Remove a track from the Favorites playlist by file path.
+    pub fn remove_track_from_favorites(&self, path: &str) -> Result<(), String> {
+        let playlist_id = self.favorites_playlist_id()?;
+        self.remove_track_from_playlist_by_path(&playlist_id, path)
+    }
+
+    /// List every track in the Favorites playlist, ordered by position.
+    pub fn get_favorites(&self) -> Result<Vec<Track>, String> {
+        let playlist_id = self.favorites_playlist_id()?;
+        self.get_playlist_tracks(&playlist_id)
+    }
+
+    /// Whether a track (by file path) is in the Favorites playlist.
+    pub fn is_track_in_favorites(&self, path: &str) -> Result<bool, String> {
+        let playlist_id = self.favorites_playlist_id()?;
+        let connection = self.lock_connection()?;
+        let in_favorites = connection
+            .query_row(
+                "SELECT 1 FROM playlist_tracks
+                 WHERE playlist_id = ?1
+                   AND track_id = (SELECT id FROM tracks WHERE path = ?2)",
+                params![playlist_id, path],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| format!("Failed to check favorites: {error}"))?
+            .is_some();
+        Ok(in_favorites)
+    }
+
+    /// Toggle the favorite state of a track. Returns the new state
+    /// (`true` = now favorited, `false` = now unfavorited).
+    pub fn toggle_favorite(&self, path: &str) -> Result<bool, String> {
+        if self.is_track_in_favorites(path)? {
+            self.remove_track_from_favorites(path)?;
+            Ok(false)
+        } else {
+            self.add_track_to_favorites(path.to_string())?;
+            Ok(true)
+        }
+    }
+
+    /// Remove every track from the Favorites playlist.
+    pub fn clear_favorites(&self) -> Result<(), String> {
+        let playlist_id = self.favorites_playlist_id()?;
+        let connection = self.lock_connection()?;
+        connection
+            .execute(
+                "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+                params![playlist_id],
+            )
+            .map_err(|error| format!("Failed to clear favorites: {error}"))?;
         Ok(())
     }
 
@@ -528,6 +611,9 @@ impl Library {
             Some(name) if name == "Local Sessions" => {
                 return Err("The default \"Local Sessions\" playlist cannot be deleted".to_string());
             }
+            Some(name) if name == "Favorites" => {
+                return Err("The \"Favorites\" playlist cannot be deleted".to_string());
+            }
             Some(_) => {}
         }
 
@@ -562,6 +648,10 @@ impl Library {
 
         if current_name == "Local Sessions" {
             return Err("The default \"Local Sessions\" playlist cannot be renamed".to_string());
+        }
+
+        if current_name == "Favorites" {
+            return Err("The \"Favorites\" playlist cannot be renamed".to_string());
         }
 
         if name != current_name && self.playlist_name_exists(&connection, &profile_id, name)? {
@@ -1386,6 +1476,7 @@ mod tests {
             db_path: PathBuf::from(":memory:"),
             connection: Mutex::new(connection),
             default_playlist_id_cache: OnceLock::new(),
+            favorites_playlist_id_cache: OnceLock::new(),
         };
         library.initialize()?;
         Ok(library)
@@ -1785,5 +1876,129 @@ mod tests {
             .get_tracks_by_artist("")
             .expect_err("empty artist should fail");
         assert!(err.contains("cannot be empty"));
+    }
+
+    // ── Favorites ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn favorites_playlist_is_seeded_and_listed() {
+        let library = open_test_library().expect("library");
+        let playlists = library.list_playlists(None).expect("playlists");
+        let names: Vec<&str> = playlists.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"Favorites"));
+        assert!(names.contains(&"Local Sessions"));
+    }
+
+    #[test]
+    fn favorites_id_is_stable_across_calls() {
+        let library = open_test_library().expect("library");
+        let a = library.favorites_playlist_id().expect("id a");
+        let b = library.favorites_playlist_id().expect("id b");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn is_track_in_favorites_reflects_membership() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let track_path = "/music/fav.mp3";
+
+        assert!(!library.is_track_in_favorites(track_path).expect("absent"));
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let track = sample_track("fav-1", track_path);
+            let id = upsert_track(&*connection, &track).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id, 0)
+                .expect("insert");
+        }
+
+        assert!(library.is_track_in_favorites(track_path).expect("present"));
+
+        library
+            .remove_track_from_favorites(track_path)
+            .expect("remove");
+
+        assert!(!library.is_track_in_favorites(track_path).expect("removed"));
+    }
+
+    #[test]
+    fn toggle_favorite_removes_when_present() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let track_path = "/music/toggle.mp3";
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let track = sample_track("tog-1", track_path);
+            let id = upsert_track(&*connection, &track).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id, 0)
+                .expect("insert");
+        }
+
+        let now_favorited = library.toggle_favorite(track_path).expect("toggle off");
+        assert!(!now_favorited);
+        assert!(library.get_favorites().expect("favorites").is_empty());
+    }
+
+    #[test]
+    fn get_favorites_returns_tracks_in_position_order() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let t1 = sample_track("f1", "/music/f1.mp3");
+            let t2 = sample_track("f2", "/music/f2.mp3");
+            let id1 = upsert_track(&*connection, &t1).expect("upsert 1");
+            let id2 = upsert_track(&*connection, &t2).expect("upsert 2");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id1, 0)
+                .expect("insert 1");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id2, 1)
+                .expect("insert 2");
+        }
+
+        let favorites = library.get_favorites().expect("favorites");
+        assert_eq!(favorites.len(), 2);
+        assert_eq!(favorites[0].path, "/music/f1.mp3");
+        assert_eq!(favorites[1].path, "/music/f2.mp3");
+    }
+
+    #[test]
+    fn clear_favorites_removes_all() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let t = sample_track("cf-1", "/music/cf.mp3");
+            let id = upsert_track(&*connection, &t).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id, 0)
+                .expect("insert");
+        }
+
+        assert_eq!(library.get_favorites().expect("favorites").len(), 1);
+        library.clear_favorites().expect("clear");
+        assert!(library.get_favorites().expect("favorites").is_empty());
+    }
+
+    #[test]
+    fn delete_playlist_rejects_favorites() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let err = library
+            .delete_playlist(&favorites_id)
+            .expect_err("should not delete favorites");
+        assert!(err.contains("cannot be deleted"));
+    }
+
+    #[test]
+    fn rename_playlist_rejects_favorites() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let err = library
+            .rename_playlist(&favorites_id, "My Songs")
+            .expect_err("should not rename favorites");
+        assert!(err.contains("cannot be renamed"));
     }
 }

@@ -284,6 +284,66 @@ pub async fn clear_playlist(
     lock_library(&library)?.clear_default_playlist()
 }
 
+// ── Favorites ─────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn add_track_to_favorites(
+    path: String,
+    app: tauri::AppHandle,
+) -> Result<Track, String> {
+    let app = app.clone();
+    blocking(move || {
+        let library = app.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        lib.add_track_to_favorites(path)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn remove_track_from_favorites(
+    path: String,
+    library: tauri::State<'_, LibraryState>,
+) -> Result<(), String> {
+    lock_library(&library)?.remove_track_from_favorites(&path)
+}
+
+#[tauri::command]
+pub async fn get_favorites(
+    library: tauri::State<'_, LibraryState>,
+) -> Result<Vec<Track>, String> {
+    lock_library(&library)?.get_favorites()
+}
+
+#[tauri::command]
+pub async fn is_track_in_favorites(
+    path: String,
+    library: tauri::State<'_, LibraryState>,
+) -> Result<bool, String> {
+    lock_library(&library)?.is_track_in_favorites(&path)
+}
+
+#[tauri::command]
+pub async fn toggle_favorite(
+    path: String,
+    app: tauri::AppHandle,
+) -> Result<bool, String> {
+    let app = app.clone();
+    blocking(move || {
+        let library = app.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        lib.toggle_favorite(&path)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn clear_favorites(
+    library: tauri::State<'_, LibraryState>,
+) -> Result<(), String> {
+    lock_library(&library)?.clear_favorites()
+}
+
 #[tauri::command]
 pub async fn play_track_from_playlist(
     index: usize,

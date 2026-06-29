@@ -1,6 +1,7 @@
 // The Code for Frontend of Wave is currently completely AI Generated and may contain bugs or rough edges. Please report any issues you encounter at
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   addTrackToPlaylistById,
   addToQueue,
@@ -10,6 +11,7 @@ import {
   deletePlaylist,
   exportPlaylist,
   getFileName,
+  getFavorites,
   getPlaybackMode,
   getPlaybackState,
   getPlaylistTracksById,
@@ -36,6 +38,7 @@ import {
   setRepeat,
   setShuffle,
   stopTrack,
+  toggleFavorite,
   updateMediaMetadata,
   updateMediaPosition,
   listOutputDevices,
@@ -112,6 +115,9 @@ function App() {
   const [playlists, setPlaylists] = useState<PlaylistInfo[]>([]);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
 
+  // Favorited track paths (for heart toggle state in the track list)
+  const [favoritePaths, setFavoritePaths] = useState<Set<string>>(new Set());
+
   // Playback mode
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>({ repeat: "off", shuffle: false });
 
@@ -125,6 +131,7 @@ function App() {
 
   // Track context menu
   const [menuTrackPath, setMenuTrackPath] = useState<string | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
   const [showAddToPlaylist, setShowAddToPlaylist] = useState(false);
 
   // Create / rename playlist dialog
@@ -179,6 +186,7 @@ function App() {
   const loadPlaylistTracks = async (playlistId: string) => {
     const tracks = await getPlaylistTracksById(playlistId);
     setPlaylist(tracks);
+    await loadFavoritePaths();
   };
 
   const loadPlaybackMode = async () => {
@@ -191,6 +199,17 @@ function App() {
   const loadQueueTracks = async () => {
     const data = await getQueueTracks();
     setQueueData(data);
+  };
+
+  // Refresh the set of favorited track paths (drives heart toggle state).
+  const loadFavoritePaths = async () => {
+    try {
+      const favorites = await getFavorites();
+      setFavoritePaths(new Set(favorites.map((t) => t.path)));
+    } catch (err) {
+      // Loading favorites is best-effort; don't surface hard errors for the heart UI.
+      console.warn("Failed to load favorites:", err);
+    }
   };
 
   // Resolve the default playlist ID from the playlists list.
@@ -211,6 +230,7 @@ function App() {
         await updatePlaybackState();
         await loadQueueTracks();
         await loadPlaybackMode();
+        await loadFavoritePaths();
         listOutputDevices().then(setOutputDevices).catch(console.error);
       } catch (err: any) {
         if (err?.message?.includes("not available") || err?.message?.includes("undefined")) {
@@ -578,6 +598,43 @@ function App() {
 
   // ── Queue operations ───────────────────────────────────────────────────────
 
+  const handleToggleFavorite = async (path: string) => {
+    // Optimistic update: flip the heart immediately so the UI feels instant.
+    const wasFavorited = favoritePaths.has(path);
+    setFavoritePaths((prev) => {
+      const next = new Set(prev);
+      if (wasFavorited) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+    try {
+      setError(null);
+      await toggleFavorite(path);
+      // Sync playlist counts (Favorites playlist track_count changes).
+      await loadPlaylists();
+      // If viewing the Favorites playlist, refresh its tracks so it stays accurate.
+      const favPlaylist = playlists.find((p) => p.name === "Favorites");
+      if (favPlaylist && selectedPlaylistId === favPlaylist.id) {
+        await loadPlaylistTracks(favPlaylist.id);
+      }
+    } catch (err) {
+      // Revert on failure.
+      setFavoritePaths((prev) => {
+        const next = new Set(prev);
+        if (wasFavorited) {
+          next.add(path);
+        } else {
+          next.delete(path);
+        }
+        return next;
+      });
+      setError(formatInvokeError(err, "Failed to toggle favorite"));
+    }
+  };
+
   const handlePlayNext = async (path: string) => {
     try {
       setError(null);
@@ -753,7 +810,7 @@ function App() {
                       title={`Export`}
                       type="button"
                     >↓</button>
-                    {pl.name !== "Local Sessions" && (
+                    {pl.name !== "Local Sessions" && pl.name !== "Favorites" && (
                       <>
                         <button
                           className="playlist-rename-btn"
@@ -843,24 +900,26 @@ function App() {
                   <div className="track-format">{track.format}</div>
                   <div className="track-duration">{formatTime(track.duration_seconds)}</div>
                   <div className="track-actions-cell">
-                    <button className="track-action-btn" onClick={(event) => { event.stopPropagation(); setMenuTrackPath(menuTrackPath === track.path ? null : track.path); }} title="More" type="button">...</button>
+                    <button
+                      className={`track-action-btn favorite-btn ${favoritePaths.has(track.path) ? "active" : ""}`}
+                      onClick={(event) => { event.stopPropagation(); handleToggleFavorite(track.path); }}
+                      title={favoritePaths.has(track.path) ? "Remove from Favorites" : "Add to Favorites"}
+                      type="button"
+                    >{favoritePaths.has(track.path) ? "♥" : "♡"}</button>
+                    <button className="track-action-btn" onClick={(event) => {
+                      event.stopPropagation();
+                      if (menuTrackPath === track.path) {
+                        setMenuTrackPath(null);
+                        setMenuAnchor(null);
+                        setShowAddToPlaylist(false);
+                      } else {
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setMenuTrackPath(track.path);
+                        setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                        setShowAddToPlaylist(false);
+                      }
+                    }} title="More" type="button">...</button>
                     <button className="track-action-btn" onClick={(event) => { event.stopPropagation(); handleRemoveTrack(track.path); }} title="Remove" type="button">x</button>
-                    {menuTrackPath === track.path && (
-                      <div className="track-context-menu" onClick={(e) => e.stopPropagation()}>
-                        <button type="button" onClick={() => handlePlayNext(track.path)}>Play Next</button>
-                        <button type="button" onClick={() => handleAddToQueue(track.path)}>Add to Queue</button>
-                        <button type="button" onClick={() => setShowAddToPlaylist(true)}>Add to Playlist...</button>
-                        {showAddToPlaylist && (
-                          <div className="add-to-playlist-submenu">
-                            {playlists.filter((p) => p.id !== selectedPlaylistId).map((p) => (
-                              <button key={p.id} type="button" onClick={() => handleAddTrackToPlaylist(p.id, track.path)}>
-                                {p.name}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
                   </div>
                 </div>
               ))}
@@ -880,8 +939,34 @@ function App() {
         )}
       </main>
 
+      {menuTrackPath && menuAnchor && (() => {
+        const menuTrack = playlist.find((t) => t.path === menuTrackPath);
+        if (!menuTrack) return null;
+        return createPortal(
+          <div
+            className="track-context-menu"
+            style={{ position: "fixed", top: `${menuAnchor.top}px`, right: `${menuAnchor.right}px` }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button type="button" onClick={() => handlePlayNext(menuTrack.path)}>Play Next</button>
+            <button type="button" onClick={() => handleAddToQueue(menuTrack.path)}>Add to Queue</button>
+            <button type="button" onClick={() => setShowAddToPlaylist(true)}>Add to Playlist...</button>
+            {showAddToPlaylist && (
+              <div className="add-to-playlist-submenu">
+                {playlists.filter((p) => p.id !== selectedPlaylistId).map((p) => (
+                  <button key={p.id} type="button" onClick={() => handleAddTrackToPlaylist(p.id, menuTrack.path)}>
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>,
+          document.body
+        );
+      })()}
+
       {menuTrackPath && (
-        <div className="context-menu-backdrop" onClick={() => { setMenuTrackPath(null); setShowAddToPlaylist(false); }} />
+        <div className="context-menu-backdrop" onClick={() => { setMenuTrackPath(null); setMenuAnchor(null); setShowAddToPlaylist(false); }} />
       )}
 
       {playlistDialog && (

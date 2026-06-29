@@ -200,6 +200,35 @@ export const clearPlaylist = (): Promise<void> => {
   return safeInvoke("clear_playlist");
 };
 
+// ── Favorites ─────────────────────────────────────────────────────────────────
+// "Favorites" is a special seeded playlist that appears in list_playlists and
+// cannot be deleted or renamed. Use these helpers to manage it.
+
+export const addTrackToFavorites = (path: string): Promise<Track> => {
+  return safeInvoke<Track>("add_track_to_favorites", { path });
+};
+
+export const removeTrackFromFavorites = (path: string): Promise<void> => {
+  return safeInvoke("remove_track_from_favorites", { path });
+};
+
+export const getFavorites = (): Promise<Track[]> => {
+  return safeInvoke<Track[]>("get_favorites");
+};
+
+export const isTrackInFavorites = (path: string): Promise<boolean> => {
+  return safeInvoke<boolean>("is_track_in_favorites", { path });
+};
+
+/** Toggle the favorite state of a track. Returns the new state (true = favorited). */
+export const toggleFavorite = (path: string): Promise<boolean> => {
+  return safeInvoke<boolean>("toggle_favorite", { path });
+};
+
+export const clearFavorites = (): Promise<void> => {
+  return safeInvoke("clear_favorites");
+};
+
 export const playTrackFromPlaylist = (index: number): Promise<void> => {
   return safeInvoke("play_track_from_playlist", { index });
 };

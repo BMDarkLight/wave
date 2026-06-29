@@ -601,10 +601,34 @@ img.track-thumb {
   justify-self: end;
 }
 
+/* Favorite heart toggle: always visible (not just on hover) so favorited
+   tracks stay discoverable, and turns red when active. */
+.favorite-btn {
+  opacity: 0.55 !important;
+  font-size: 16px;
+  line-height: 1;
+}
+
+.track-item:hover .favorite-btn {
+  opacity: 1 !important;
+}
+
+.favorite-btn:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+.favorite-btn.active {
+  opacity: 1 !important;
+  color: #e8405a;
+}
+
+.favorite-btn.active:hover {
+  color: #ff5c73;
+}
+
 .track-context-menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
+  position: fixed;
   z-index: 40;
   display: grid;
   gap: 2px;
