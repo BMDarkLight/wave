@@ -366,13 +366,21 @@ function App() {
     const setup = async () => {
       unlisten = await listenToMediaControls({
         onPlay: () => {
-          handlePlayPause().catch(console.error);
+          if (!playbackState.is_playing) {
+            handlePlayPause().catch(console.error);
+          }
         },
         onPause: () => {
           if (playbackState.is_playing) pauseTrack().catch(console.error);
         },
+        onToggle: () => {
+          handlePlayPause().catch(console.error);
+        },
         onNext: () => handleNext(),
         onPrevious: () => handlePrevious(),
+        onStop: () => {
+          handleStop().catch(console.error);
+        },
         onSetPosition: (seconds) => {
           if (playbackState.current_path) seekTrack(seconds).catch(console.error);
         },

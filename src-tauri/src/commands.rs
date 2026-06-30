@@ -154,14 +154,24 @@ pub async fn play_track(
     app: tauri::AppHandle,
     bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
-    let app = app.clone();
+    let p = path.clone();
+    let app_clone = app.clone();
     blocking(move || {
-        let player = app.state::<PlayerState>();
+        let player = app_clone.state::<PlayerState>();
         let mut guard = player.0.lock().map_err(|e| e.to_string())?;
         guard.play(&path).map_err(|e| e.to_string())
     })
     .await?;
-    sync_bridge_playing(&bridge, 0.0);
+
+    let app_clone = app.clone();
+    let track = blocking(move || {
+        let lib = app_clone.state::<LibraryState>();
+        let lib = lib.0.lock().map_err(|e| e.to_string())?;
+        Ok::<_, String>(resolve_track(&lib, &p))
+    })
+    .await?;
+    sync_bridge_now_playing(&bridge, &track);
+
     Ok(())
 }
 

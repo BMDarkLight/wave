@@ -3,7 +3,6 @@ use souvlaki::{
 };
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
-use tauri::Manager;
 
 // ── Public metadata struct (mirrors what the frontend sends) ─────────────────
 
@@ -34,6 +33,7 @@ impl MediaBridge {
         #[cfg(target_os = "windows")]
         let hwnd = {
             use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            use tauri::Manager;
             let window = app
                 .get_webview_window("main")
                 .ok_or("Main window not found")?;
