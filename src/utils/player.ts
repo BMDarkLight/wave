@@ -178,6 +178,23 @@ export const selectAudioFile = async (multiple: boolean = false): Promise<string
   return null;
 };
 
+export const selectAudioFolder = async (): Promise<string | null> => {
+  await tauriInitialized;
+
+  if (!openFn) {
+    throw new Error("Tauri API is not available. Use the Tauri desktop window launched by 'npm run dev' or 'npm run tauri dev', not the browser Vite URL.");
+  }
+
+  const selected = await openFn({
+    directory: true,
+    title: "Select Music Folder",
+  });
+
+  if (selected === null) return null;
+  if (typeof selected === "string") return selected;
+  return null;
+};
+
 export const getFileName = (path: string | null): string => {
   if (!path) return "No track selected";
   const parts = path.split(/[/\\]/);
@@ -235,6 +252,10 @@ export const clearFavorites = (): Promise<void> => {
 
 export const playTrackFromPlaylist = (index: number): Promise<void> => {
   return safeInvoke("play_track_from_playlist", { index });
+};
+
+export const scanDirectory = (directory: string): Promise<string[]> => {
+  return safeInvoke<string[]>("scan_directory", { directory });
 };
 
 export const indexMusicLibrary = (

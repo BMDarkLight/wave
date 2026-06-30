@@ -317,6 +317,31 @@ impl Library {
 
     pub fn get_playlist_tracks(&self, playlist_id: &str) -> Result<Vec<Track>, String> {
         let connection = self.lock_connection()?;
+
+        // "All Local Files" is an aggregate of every track across all playlists
+        if self.default_playlist_id_cache.get().map_or(false, |id| id == playlist_id) {
+            let mut statement = connection
+                .prepare(
+                    &format!(
+                        "SELECT {TRACK_SELECT_COLUMNS}
+                     FROM tracks t
+                     WHERE t.id IN (
+                         SELECT DISTINCT pt.track_id
+                         FROM playlist_tracks pt
+                     )
+                     ORDER BY t.name"
+                    ),
+                )
+                .map_err(|error| format!("Failed to prepare all-local-files query: {error}"))?;
+
+            let tracks = statement
+                .query_map([], row_to_track)
+                .map_err(|error| format!("Failed to query all-local-files: {error}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| format!("Failed to read all-local-files track: {error}"))?;
+            return Ok(tracks);
+        }
+
         let mut statement = connection
             .prepare(
                 &format!(

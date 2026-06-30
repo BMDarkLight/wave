@@ -61,6 +61,7 @@ pub fn run() {
             commands::toggle_favorite,
             commands::clear_favorites,
             commands::play_track_from_playlist,
+            commands::scan_directory,
             commands::index_music_library,
             commands::list_playlists,
             commands::get_library_database_path,

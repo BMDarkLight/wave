@@ -56,7 +56,11 @@ input:disabled {
 
 .sidebar {
   grid-row: 1 / 2;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   padding: 12px;
+  overflow: hidden;
   background: #000;
 }
 
@@ -131,7 +135,8 @@ input:disabled {
   flex-direction: column;
   gap: 8px;
   margin-top: 8px;
-  min-height: 210px;
+  flex: 1;
+  min-height: 0;
   padding: 14px;
   border-radius: 10px;
   background: var(--panel);
@@ -182,7 +187,7 @@ input:disabled {
   flex: 1;
   flex-direction: column;
   gap: 4px;
-  max-height: 220px;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -461,6 +466,22 @@ img.track-thumb {
   to { transform: rotate(360deg); }
 }
 
+.import-spinner {
+  display: inline-block;
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--green);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+.import-subtitle {
+  margin-top: 8px;
+  color: var(--quiet);
+  font-size: 14px;
+}
+
 .empty-state {
   display: grid;
   place-items: center;
@@ -635,6 +656,48 @@ img.track-thumb {
 
 .favorite-btn.active:hover {
   color: #ff5c73;
+}
+
+.add-track-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.add-track-menu {
+  z-index: 200;
+  display: grid;
+  gap: 2px;
+  min-width: 160px;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #282828;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.add-track-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+  transition: background 0.16s ease;
+}
+
+.add-track-menu button svg {
+  font-size: 16px;
+  opacity: 0.8;
+}
+
+.add-track-menu button:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .track-context-menu {

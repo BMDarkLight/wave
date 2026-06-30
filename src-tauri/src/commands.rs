@@ -8,8 +8,9 @@ use crate::dto::{
 };
 use crate::library::{Library, PlaylistInfo};
 use crate::media_controls::{MediaBridge, TrackMetadata};
-use crate::metadata::{supported_audio_extensions, Track};
+use crate::metadata::{is_supported_audio_file, supported_audio_extensions, Track};
 use tauri::Manager;
+use walkdir::WalkDir;
 
 pub struct PlayerState(pub Mutex<AudioPlayer>);
 pub struct LibraryState(pub Mutex<Library>);
@@ -391,6 +392,25 @@ pub async fn play_track_from_playlist(
         });
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn scan_directory(directory: String) -> Result<Vec<String>, String> {
+    let dir_path = Path::new(&directory);
+    if !dir_path.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+
+    let paths: Vec<String> = WalkDir::new(dir_path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| is_supported_audio_file(e.path()))
+        .filter_map(|e| e.path().to_str().map(str::to_string))
+        .collect();
+
+    Ok(paths)
 }
 
 #[tauri::command]

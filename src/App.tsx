@@ -25,6 +25,7 @@ import {
   BiMusic,
   BiListPlus,
   BiListUl,
+  BiFolderOpen,
 } from "react-icons/bi";
 import {
   addTrackToPlaylistById,
@@ -42,6 +43,7 @@ import {
   getQueueTracks,
   importPlaylist,
   isTrackInPlaylist,
+  scanDirectory,
   listPlaylists,
   listenToMediaControls,
   openPlaylistDialog,
@@ -59,6 +61,7 @@ import {
   savePlaylistDialog,
   seekTrack,
   selectAudioFile,
+  selectAudioFolder,
   setPlayerVolume,
   setRepeat,
   setShuffle,
@@ -134,6 +137,11 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isAddingTracks, setIsAddingTracks] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
+  const [isLoadingPlaylist, setIsLoadingPlaylist] = useState(false);
+  const [importedCount, setImportedCount] = useState(0);
+  const [showAddTrackMenu, setShowAddTrackMenu] = useState(false);
+  const [addTrackMenuAnchor, setAddTrackMenuAnchor] = useState<{ top: number; left: number } | null>(null);
   const [seekValue, setSeekValue] = useState(0);
   const [volumeValue, setVolumeValue] = useState(0.8);
 
@@ -170,6 +178,8 @@ function App() {
   const [playlistNameInput, setPlaylistNameInput] = useState("");
   const [playlistDialogError, setPlaylistDialogError] = useState<string | null>(null);
   const playlistNameInputRef = useRef<HTMLInputElement>(null);
+  const addTrackBtnRef = useRef<HTMLButtonElement>(null);
+  const selectedPlaylistIdRef = useRef<string | null>(null);
 
   const wasPlayingRef = useRef(false);
 
@@ -192,6 +202,15 @@ function App() {
   const displayPosition = Math.min(seekValue, displayDuration || seekValue);
 
   const selectedPlaylist = playlists.find((p) => p.id === selectedPlaylistId) ?? null;
+
+  const sortedPlaylists = useMemo(() => {
+    const priority = ["All Local Files", "Favorites"];
+    return [...playlists].sort((a, b) => {
+      const ai = priority.indexOf(a.name);
+      const bi = priority.indexOf(b.name);
+      return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+    });
+  }, [playlists]);
 
   const updatePlaybackState = async () => {
     const state = await getPlaybackState();
@@ -394,6 +413,77 @@ function App() {
     } finally {
       setIsAddingTracks(false);
     }
+  };
+
+  const handleAddFolder = async () => {
+    try {
+      setError(null);
+      setIsAddingTracks(true);
+      setShowAddTrackMenu(false);
+      const directory = await selectAudioFolder();
+      if (!directory) { setIsAddingTracks(false); return; }
+      const paths = await scanDirectory(directory);
+      if (!paths.length) { setError("No audio files found in the selected folder."); setIsAddingTracks(false); return; }
+      const playlistId = selectedPlaylistId ?? getDefaultPlaylistId(playlists);
+      if (!playlistId) { setError("No playlist selected."); setIsAddingTracks(false); return; }
+      setIsAddingTracks(false);
+      runFolderImport(paths, playlistId).catch(() => {});
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to add folder"));
+      setIsAddingTracks(false);
+    }
+  };
+
+  const handleAddFolderAsPlaylist = async () => {
+    try {
+      setError(null);
+      setIsAddingTracks(true);
+      setShowAddTrackMenu(false);
+      const directory = await selectAudioFolder();
+      if (!directory) { setIsAddingTracks(false); return; }
+      const folderName = getFileName(directory);
+      const info = await createPlaylist(folderName);
+      setSelectedPlaylistId(info.id);
+      await loadPlaylists();
+      await loadPlaylistTracks(info.id);
+      const paths = await scanDirectory(directory);
+      if (!paths.length) {
+        setError(`No audio files found in "${folderName}".`);
+        setIsAddingTracks(false);
+        return;
+      }
+      setIsAddingTracks(false);
+      runFolderImport(paths, info.id).catch(() => {});
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to add folder as playlist"));
+      setIsAddingTracks(false);
+    }
+  };
+
+  const runFolderImport = async (paths: string[], playlistId: string) => {
+    setIsImporting(true);
+    setImportedCount(0);
+    let failCount = 0;
+    for (const [i, path] of paths.entries()) {
+      try {
+        await addTrackToPlaylistById(playlistId, path);
+        setImportedCount(i + 1);
+        if ((i + 1) % 5 === 0) {
+          loadPlaylists().catch(() => {});
+        }
+      } catch {
+        failCount++;
+      }
+    }
+    setIsImporting(false);
+    if (failCount > 0) {
+      setError(`Finished importing folder with ${failCount} failure(s).`);
+    }
+    // Only refresh track list if the user is still viewing that playlist
+    if (selectedPlaylistIdRef.current === playlistId) {
+      await loadPlaylistTracks(playlistId);
+    }
+    await loadPlaylists();
   };
 
   const handleRemoveTrack = async (path: string) => {
@@ -662,12 +752,18 @@ function App() {
   };
 
   const handleSelectPlaylist = async (id: string) => {
+    selectedPlaylistIdRef.current = id;
     setSelectedPlaylistId(id);
+    setPlaylist([]);
     setMenuTrackPath(null);
+    setIsImporting(false);
+    setIsLoadingPlaylist(true);
     try {
       await loadPlaylistTracks(id);
     } catch (err) {
       setError(formatInvokeError(err, "Failed to load playlist"));
+    } finally {
+      setIsLoadingPlaylist(false);
     }
   };
 
@@ -856,14 +952,14 @@ function App() {
                 </button>
               </div>
             ) : (
-              playlists.map((pl) => (
+              sortedPlaylists.map((pl) => (
                 <div
                   key={pl.id}
                   className={`playlist-item ${selectedPlaylistId === pl.id ? "active" : ""}`}
                   onClick={() => handleSelectPlaylist(pl.id)}
                 >
                   <span className="playlist-item-name" title={pl.name}>{pl.name}</span>
-                  <span className="playlist-item-count">{pl.track_count}</span>
+                  {pl.name !== "All Local Files" && <span className="playlist-item-count">{pl.track_count}</span>}
                   <div className="playlist-item-actions">
                     <button
                       className="playlist-export-btn"
@@ -905,8 +1001,24 @@ function App() {
               <button className="big-play" onClick={handlePlayPause} disabled={isLoading} type="button" title="Play or pause">
                 {playbackState.is_playing ? <BiPause /> : <BiPlay />}
               </button>
-              <button className="btn-secondary" onClick={() => handleAddTrack(true)} disabled={isAddingTracks} type="button"><BiPlus /></button>
-              {playlist.length > 0 && <button className="btn-ghost" onClick={handleClearPlaylist} type="button">Clear</button>}
+              {selectedPlaylist?.name !== "Favorites" && (
+                <div className="add-track-wrap">
+                  <button
+                    ref={addTrackBtnRef}
+                    className="btn-secondary"
+                    onClick={() => {
+                      if (addTrackBtnRef.current) {
+                        const rect = addTrackBtnRef.current.getBoundingClientRect();
+                        setAddTrackMenuAnchor({ top: rect.bottom + 6, left: rect.left });
+                      }
+                      setShowAddTrackMenu((v) => !v);
+                    }}
+                    disabled={isAddingTracks}
+                    type="button"
+                  ><BiPlus /></button>
+                </div>
+              )}
+              {playlist.length > 0 && selectedPlaylist?.name !== "All Local Files" && selectedPlaylist?.name !== "Favorites" && <button className="btn-ghost" onClick={handleClearPlaylist} type="button">Clear</button>}
             </div>
           </div>
         </section>
@@ -914,11 +1026,24 @@ function App() {
         {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError(null)} type="button"><BiX /></button></div>}
 
         <section className="playlist-container">
-          {playlist.length === 0 ? (
+          {playlist.length === 0 && isLoadingPlaylist ? (
+            <div className="empty-state">
+              <div className="empty-icon"><span className="import-spinner" /></div>
+              <h2>Loading…</h2>
+            </div>
+          ) : playlist.length === 0 && isImporting ? (
+            <div className="empty-state">
+              <div className="empty-icon"><span className="import-spinner" /></div>
+              <h2>Importing songs{importedCount > 0 ? ` (${importedCount} added)` : ""}…</h2>
+              <p className="import-subtitle">Your songs will appear here as they are added.</p>
+            </div>
+          ) : playlist.length === 0 ? (
             <div className="empty-state">
               <div className="empty-icon"><BiMusic /></div>
               <h2>Your playlist is empty</h2>
-              <button className="btn-primary" onClick={() => handleAddTrack(false)} disabled={isAddingTracks} type="button">Add your first track</button>
+              {selectedPlaylist?.name !== "All Local Files" && selectedPlaylist?.name !== "Favorites" && (
+                <button className="btn-primary" onClick={() => handleAddTrack(false)} disabled={isAddingTracks} type="button">Add your first track</button>
+              )}
             </div>
           ) : (
             <div className="track-list">
@@ -981,6 +1106,22 @@ function App() {
           </section>
         )}
       </main>
+
+      {showAddTrackMenu && addTrackMenuAnchor && createPortal(
+        <>
+          <div className="context-menu-backdrop" onClick={() => { setShowAddTrackMenu(false); setAddTrackMenuAnchor(null); }} />
+          <div
+            className="add-track-menu"
+            style={{ position: "fixed", top: `${addTrackMenuAnchor.top}px`, left: `${addTrackMenuAnchor.left}px` }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button type="button" onClick={() => { setShowAddTrackMenu(false); setAddTrackMenuAnchor(null); handleAddTrack(true); }}><BiPlus /> Add files</button>
+            <button type="button" onClick={handleAddFolder}><BiFolderOpen /> Add folder</button>
+            <button type="button" onClick={handleAddFolderAsPlaylist}><BiFolderOpen /> Add folder as playlist</button>
+          </div>
+        </>,
+        document.body
+      )}
 
       {menuTrackPath && menuAnchor && (() => {
         const menuTrack = playlist.find((t) => t.path === menuTrackPath);
