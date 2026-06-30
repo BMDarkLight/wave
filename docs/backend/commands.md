@@ -115,7 +115,7 @@ Set output volume.
 
 ## Library & playlists
 
-The default profile is `"default"` and the default playlist is `"Local Sessions"`. Most library commands operate on that playlist unless noted.
+The default profile is `"default"` and the default playlist is `"All Local Files"`. Most library commands operate on that playlist unless noted.
 
 ### `add_track_to_playlist`
 
@@ -201,7 +201,7 @@ Recursively scan a directory for supported audio files, extract metadata, and im
 |------|------|----------|---------|-------------|
 | `directory` | `string` | yes | — | Folder to scan |
 | `profileId` | `string` | no | `"default"` | Profile id |
-| `playlistName` | `string` | no | `"Local Sessions"` | Target playlist name |
+| `playlistName` | `string` | no | `"All Local Files"` | Target playlist name |
 
 **Returns:** `Track[]` — only tracks **newly added** to the playlist during this scan (skipped/duplicate files are omitted)
 
@@ -239,6 +239,233 @@ Recursively scan a directory for supported audio files, extract metadata, and im
 aac, aiff, alac, caf, flac, m4a, m4b, m4p, mka, mkv, mp1, mp2,
 mp3, mp4, oga, ogg, opus, wav, wave, weba
 ```
+
+---
+
+## Favorites
+
+**Favorites** is a special seeded playlist — just like "All Local Files" — that is created automatically on startup, shows up in `list_playlists`, and **cannot be deleted or renamed**. Use these commands to manage it; it also works with the generic by-id playlist commands (`get_playlist_tracks_by_id`, `play_track_from_specific_playlist`, etc.) using the playlist id from `list_playlists`.
+
+### `add_track_to_favorites`
+
+Read metadata from disk, upsert into SQLite, and append to the Favorites playlist. The track is added to the library if not already present.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Absolute path to an audio file |
+
+**Returns:** [`Track`](./types.md#track)
+
+**Errors:** file missing, unsupported extension, `"Track is already in the playlist"`.
+
+---
+
+### `remove_track_from_favorites`
+
+Remove a track from the Favorites playlist by file path. Does not delete the file or the track record from the library.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Absolute file path |
+
+**Returns:** `void`
+
+**Errors:** `"Track is not in the playlist"`.
+
+---
+
+### `get_favorites`
+
+List every track in the Favorites playlist, ordered by position.
+
+**Arguments:** none
+
+**Returns:** `Track[]`
+
+---
+
+### `is_track_in_favorites`
+
+Whether a track (by file path) is in the Favorites playlist. Use this to render the heart toggle state in the UI.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Absolute file path |
+
+**Returns:** `boolean`
+
+---
+
+### `toggle_favorite`
+
+Toggle the favorite state of a track. Returns the **new** state.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Absolute file path |
+
+**Returns:** `boolean` — `true` if now favorited, `false` if unfavorited
+
+**Example**
+
+```typescript
+const nowFavorited = await invoke<boolean>("toggle_favorite", { path: track.path });
+// update heart icon accordingly
+```
+
+**Errors:** when favoriting: file missing, unsupported extension. When unfavoriting: `"Track is not in the playlist"`.
+
+---
+
+### `clear_favorites`
+
+Remove every track from the Favorites playlist. Does not delete files or track records from the library database.
+
+**Arguments:** none
+
+**Returns:** `void`
+
+---
+
+## Albums & artists
+
+These commands let the frontend build Spotify-style browse views and “go to
+album” / “go to artist” flows straight from file metadata — no playlists
+required.
+
+Albums are grouped by `(album, album_artist)` (falling back to the track
+`artist` when the `album_artist` tag is missing), so same-named albums by
+different artists stay separate. Artists are grouped by the track `artist`
+tag.
+
+### `list_albums`
+
+List every distinct album in the library with aggregate info. Use this to
+render an album grid.
+
+**Arguments:** none
+
+**Returns:** [`AlbumSummary[]`](./types.md#albumsummary)
+
+```typescript
+const albums = await invoke<AlbumSummary[]>("list_albums");
+// albums[0] => { name: "Abbey Road", album_artist: "The Beatles",
+//                track_count: 3, year: 1969, cover_art_data_url: "data:..." }
+```
+
+---
+
+### `list_artists`
+
+List every distinct artist with track and album counts. Use this to render an
+artist list / discography index.
+
+**Arguments:** none
+
+**Returns:** [`ArtistSummary[]`](./types.md#artistsummary)
+
+```typescript
+const artists = await invoke<ArtistSummary[]>("list_artists");
+// artists[0] => { name: "The Beatles", track_count: 12, album_count: 3 }
+```
+
+---
+
+### `get_album_tracks`
+
+Return every track belonging to an album — the backend of the “right-click a
+song → go to album” flow.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `album` | `string` | yes | Album name (matches the track `album` tag) |
+| `albumArtist` | `string` \| null | no | Resolved album artist. Pass `Track.album_artist ?? Track.artist` (or the `AlbumSummary.album_artist` value) to keep same-named albums apart. Omit to match the album name only |
+
+**Returns:** `Track[]` — ordered by disc number then track number.
+
+**Errors:** `"Album name cannot be empty"`.
+
+```typescript
+// From a clicked track:
+const tracks = await invoke<Track[]>("get_album_tracks", {
+  album: track.album,
+  albumArtist: track.album_artist ?? track.artist,
+});
+```
+
+When `albumArtist` is omitted, every track whose `album` tag matches is
+returned, even across different artists.
+
+---
+
+### `get_artist_tracks`
+
+Return every track by an artist (a discography) — the backend of the
+“right-click a song → go to artist” flow. Matches the track `artist` tag.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `artist` | `string` | yes | Artist name (matches the track `artist` tag) |
+
+**Returns:** `Track[]` — ordered by album, then disc number, then track number.
+
+**Errors:** `"Artist name cannot be empty"`.
+
+```typescript
+const tracks = await invoke<Track[]>("get_artist_tracks", { artist: "The Beatles" });
+```
+
+---
+
+### `create_album_playlist`
+
+Create a new persisted playlist from every track matching an album name. Useful
+when you want the album as a real playlist (e.g. to export, reorder, or keep).
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `album` | `string` | yes | Album name |
+| `name` | `string` \| null | no | Playlist name; defaults to the album name. Auto-suffixed on collision |
+
+**Returns:** [`PlaylistInfo`](./types.md#playlistinfo)
+
+**Errors:** `"Album name cannot be empty"`, `"No tracks found for album \"{album}\""`.
+
+---
+
+### `create_artist_playlist`
+
+Create a new persisted playlist from every track matching an artist name (a
+discography playlist).
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `artist` | `string` | yes | Artist name |
+| `name` | `string` \| null | no | Playlist name; defaults to the artist name. Auto-suffixed on collision |
+
+**Returns:** [`PlaylistInfo`](./types.md#playlistinfo)
+
+**Errors:** `"Artist name cannot be empty"`, `"No tracks found for artist \"{artist}\""`.
+
+> `get_album_tracks` / `get_artist_tracks` are the read-only queries you’ll
+> usually want for browse views. The `create_*_playlist` commands persist the
+> same result into a playlist you can save/export.
 
 ---
 

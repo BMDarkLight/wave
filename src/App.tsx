@@ -1,6 +1,31 @@
 // The Code for Frontend of Wave is currently completely AI Generated and may contain bugs or rough edges. Please report any issues you encounter at
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import {
+  BiShuffle,
+  BiPlay,
+  BiPause,
+  BiStop,
+  BiSkipPrevious,
+  BiSkipNext,
+  BiRepeat,
+  BiVolumeLow,
+  BiVolumeFull,
+  BiVolumeMute,
+  BiHeart,
+  BiSolidHeart,
+  BiDotsHorizontalRounded,
+  BiX,
+  BiPlus,
+  BiImport,
+  BiExport,
+  BiEditAlt,
+  BiTrash,
+  BiMusic,
+  BiListPlus,
+  BiListUl,
+} from "react-icons/bi";
 import {
   addTrackToPlaylistById,
   addToQueue,
@@ -10,11 +35,13 @@ import {
   deletePlaylist,
   exportPlaylist,
   getFileName,
+  getFavorites,
   getPlaybackMode,
   getPlaybackState,
   getPlaylistTracksById,
   getQueueTracks,
   importPlaylist,
+  isTrackInPlaylist,
   listPlaylists,
   listenToMediaControls,
   openPlaylistDialog,
@@ -36,6 +63,7 @@ import {
   setRepeat,
   setShuffle,
   stopTrack,
+  toggleFavorite,
   updateMediaMetadata,
   updateMediaPosition,
   listOutputDevices,
@@ -105,12 +133,19 @@ function App() {
   const [playlist, setPlaylist] = useState<Track[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isAddingTracks, setIsAddingTracks] = useState(false);
   const [seekValue, setSeekValue] = useState(0);
   const [volumeValue, setVolumeValue] = useState(0.8);
 
   // Playlist management
   const [playlists, setPlaylists] = useState<PlaylistInfo[]>([]);
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
+
+  // Favorited track paths (for heart toggle state in the track list)
+  const [favoritePaths, setFavoritePaths] = useState<Set<string>>(new Set());
+
+  // Clear-playlist confirmation modal
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   // Playback mode
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>({ repeat: "off", shuffle: false });
@@ -125,6 +160,7 @@ function App() {
 
   // Track context menu
   const [menuTrackPath, setMenuTrackPath] = useState<string | null>(null);
+  const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
   const [showAddToPlaylist, setShowAddToPlaylist] = useState(false);
 
   // Create / rename playlist dialog
@@ -179,6 +215,7 @@ function App() {
   const loadPlaylistTracks = async (playlistId: string) => {
     const tracks = await getPlaylistTracksById(playlistId);
     setPlaylist(tracks);
+    await loadFavoritePaths();
   };
 
   const loadPlaybackMode = async () => {
@@ -193,9 +230,20 @@ function App() {
     setQueueData(data);
   };
 
+  // Refresh the set of favorited track paths (drives heart toggle state).
+  const loadFavoritePaths = async () => {
+    try {
+      const favorites = await getFavorites();
+      setFavoritePaths(new Set(favorites.map((t) => t.path)));
+    } catch (err) {
+      // Loading favorites is best-effort; don't surface hard errors for the heart UI.
+      console.warn("Failed to load favorites:", err);
+    }
+  };
+
   // Resolve the default playlist ID from the playlists list.
   const getDefaultPlaylistId = (list: PlaylistInfo[]): string | null => {
-    return (list.find((p) => p.name === "Local Sessions") ?? list[0])?.id ?? null;
+    return (list.find((p) => p.name === "All Local Files") ?? list[0])?.id ?? null;
   };
 
   useEffect(() => {
@@ -211,6 +259,7 @@ function App() {
         await updatePlaybackState();
         await loadQueueTracks();
         await loadPlaybackMode();
+        await loadFavoritePaths();
         listOutputDevices().then(setOutputDevices).catch(console.error);
       } catch (err: any) {
         if (err?.message?.includes("not available") || err?.message?.includes("undefined")) {
@@ -298,7 +347,7 @@ function App() {
     const setup = async () => {
       unlisten = await listenToMediaControls({
         onPlay: () => {
-          if (!playbackState.is_playing) resumeTrack().catch(console.error);
+          handlePlayPause().catch(console.error);
         },
         onPause: () => {
           if (playbackState.is_playing) pauseTrack().catch(console.error);
@@ -319,7 +368,7 @@ function App() {
   const handleAddTrack = async (multiple = false) => {
     try {
       setError(null);
-      setIsLoading(true);
+      setIsAddingTracks(true);
       const paths = await selectAudioFile(multiple);
       if (paths?.length) {
         const playlistId = selectedPlaylistId ?? getDefaultPlaylistId(playlists);
@@ -343,7 +392,7 @@ function App() {
     } catch (err) {
       setError(formatInvokeError(err, "Failed to add track"));
     } finally {
-      setIsLoading(false);
+      setIsAddingTracks(false);
     }
   };
 
@@ -352,8 +401,13 @@ function App() {
       setError(null);
       if (!selectedPlaylistId) return;
       await removeTrackFromPlaylistById(selectedPlaylistId, path);
+      if (playbackState.current_path === path) {
+        await stopTrack();
+        setSeekValue(0);
+      }
       await loadPlaylistTracks(selectedPlaylistId);
       await loadPlaylists();
+      await updatePlaybackState();
     } catch (err) {
       setError(formatInvokeError(err, "Failed to remove track"));
     }
@@ -374,6 +428,23 @@ function App() {
     }
   };
 
+  const isTrackPlayable = async (path: string | null | undefined): Promise<boolean> => {
+    if (!path) return false;
+    try {
+      return await isTrackInPlaylist(path);
+    } catch {
+      return false;
+    }
+  };
+
+  const ensureTrackPlayableOrPick = async (path: string | null | undefined): Promise<boolean> => {
+    if (await isTrackPlayable(path)) return true;
+    await stopTrack();
+    setSeekValue(0);
+    await handleAddTrack(false);
+    return false;
+  };
+
   const handlePlayPause = async () => {
     try {
       setError(null);
@@ -381,25 +452,45 @@ function App() {
       if (playbackState.is_playing) {
         await pauseTrack();
       } else if (playbackState.is_paused) {
+        if (!(await ensureTrackPlayableOrPick(playbackState.current_path))) return;
         await resumeTrack();
       } else if (
         playbackState.current_path &&
         playbackState.duration_seconds != null &&
         playbackState.position_seconds < playbackState.duration_seconds - 1
       ) {
+        if (!(await ensureTrackPlayableOrPick(playbackState.current_path))) return;
         await playTrack(playbackState.current_path);
+      } else if (
+        !playbackState.current_path &&
+        playlist.length > 0 &&
+        selectedPlaylistId
+      ) {
+        await playTrackFromSpecificPlaylist(selectedPlaylistId, 0);
       } else if (hasActiveQueue && queueData.current_index != null) {
         const nextIdx = queueData.current_index + 1;
-        if (nextIdx < queueData.tracks.length) {
+        if (nextIdx < queueData.tracks.length && (await isTrackPlayable(queueData.tracks[nextIdx]?.path))) {
           await playTrackFromQueue(nextIdx);
         } else if (selectedPlaylistId && playlist.length > 0) {
-          const nextIndex = (currentPlaylistIndex + 1) % playlist.length;
+          const nextIndex = currentPlaylistIndex >= 0
+            ? (currentPlaylistIndex + 1) % playlist.length
+            : 0;
           await playTrackFromSpecificPlaylist(selectedPlaylistId, nextIndex);
-        } else {
+        } else if (await isTrackPlayable(queueData.tracks[queueData.current_index]?.path)) {
           await playTrackFromQueue(queueData.current_index);
+        } else {
+          await handleAddTrack(false);
+          return;
         }
       } else if (hasActiveQueue) {
-        await playTrackFromQueue(0);
+        if (await isTrackPlayable(queueData.tracks[0]?.path)) {
+          await playTrackFromQueue(0);
+        } else if (playlist.length > 0 && selectedPlaylistId) {
+          await playTrackFromSpecificPlaylist(selectedPlaylistId, 0);
+        } else {
+          await handleAddTrack(false);
+          return;
+        }
       } else if (playlist.length > 0 && selectedPlaylistId) {
         await playTrackFromSpecificPlaylist(selectedPlaylistId, 0);
       } else {
@@ -484,10 +575,14 @@ function App() {
   };
 
   const handleClearPlaylist = async () => {
-    if (!confirm("Clear the entire playlist?")) return;
+    setShowClearConfirm(true);
+  };
+
+  const confirmClearPlaylist = async () => {
     try {
       setError(null);
       setIsLoading(true);
+      setShowClearConfirm(false);
       if (!selectedPlaylistId) return;
       await clearPlaylistById(selectedPlaylistId);
       await loadPlaylistTracks(selectedPlaylistId);
@@ -577,6 +672,43 @@ function App() {
   };
 
   // ── Queue operations ───────────────────────────────────────────────────────
+
+  const handleToggleFavorite = async (path: string) => {
+    // Optimistic update: flip the heart immediately so the UI feels instant.
+    const wasFavorited = favoritePaths.has(path);
+    setFavoritePaths((prev) => {
+      const next = new Set(prev);
+      if (wasFavorited) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+    try {
+      setError(null);
+      await toggleFavorite(path);
+      // Refresh playlist counts in the background (don't block the heart UI).
+      loadPlaylists().catch(() => {});
+      // If viewing the Favorites playlist, refresh its tracks so it stays accurate.
+      const favPlaylist = playlists.find((p) => p.name === "Favorites");
+      if (favPlaylist && selectedPlaylistId === favPlaylist.id) {
+        await loadPlaylistTracks(favPlaylist.id);
+      }
+    } catch (err) {
+      // Revert on failure.
+      setFavoritePaths((prev) => {
+        const next = new Set(prev);
+        if (wasFavorited) {
+          next.add(path);
+        } else {
+          next.delete(path);
+        }
+        return next;
+      });
+      setError(formatInvokeError(err, "Failed to toggle favorite"));
+    }
+  };
 
   const handlePlayNext = async (path: string) => {
     try {
@@ -688,11 +820,6 @@ function App() {
     }
   };
 
-  const handleExportSelectedPlaylist = async () => {
-    if (!selectedPlaylistId || !selectedPlaylist) return;
-    await handleExportPlaylistById(selectedPlaylistId, selectedPlaylist.name);
-  };
-
   const handleImportPlaylist = async () => {
     try {
       setError(null);
@@ -713,22 +840,13 @@ function App() {
   return (
     <div className="app-container">
       <aside className="sidebar">
-        <div className="brand-mark"><span>W</span> Wave</div>
-        <nav className="sidebar-nav">
-          <button className="nav-item active" type="button"><span>Home</span></button>
-          <button
-            className={`nav-item ${showQueue ? "active" : ""}`}
-            type="button"
-            onClick={() => setShowQueue((v) => !v)}
-          >
-            <span>Queue{queueData.tracks.length > 0 ? ` (${queueData.tracks.length})` : ""}</span>
-          </button>
-        </nav>
-        <div className="playlist-section">
-          <div className="playlist-section-header">
-            <p>Playlists</p>
-            <button className="playlist-add-btn" onClick={openCreatePlaylistDialog} type="button" title="Create playlist">+</button>
-          </div>
+          <div className="brand-mark" style={{ textAlign: "center" }}>Wave</div>
+          <div className="playlist-section">
+            <div className="playlist-section-header">
+              <p>Playlists</p>
+              <button className="playlist-add-btn" onClick={handleImportPlaylist} type="button" title="Import playlist"><BiImport /></button>
+              <button className="playlist-add-btn" onClick={openCreatePlaylistDialog} type="button" title="Create playlist"><BiPlus /></button>
+            </div>
           <div className="playlist-list">
             {playlists.length === 0 ? (
               <div className="playlist-empty">
@@ -752,42 +870,27 @@ function App() {
                       onClick={(e) => { e.stopPropagation(); handleExportPlaylistById(pl.id, pl.name); }}
                       title={`Export`}
                       type="button"
-                    >↓</button>
-                    {pl.name !== "Local Sessions" && (
+                    ><BiExport /></button>
+                    {pl.name !== "All Local Files" && pl.name !== "Favorites" && (
                       <>
                         <button
                           className="playlist-rename-btn"
                           onClick={(e) => { e.stopPropagation(); openRenamePlaylistDialog(pl.id, pl.name); }}
                           title="Rename playlist"
                           type="button"
-                        >···</button>
+                        ><BiEditAlt /></button>
                         <button
                           className="playlist-delete-btn"
                           onClick={(e) => { e.stopPropagation(); handleDeletePlaylist(pl.id); }}
                           title="Delete playlist"
                           type="button"
-                        >x</button>
+                        ><BiTrash /></button>
                       </>
                     )}
                   </div>
                 </div>
               ))
             )}
-          </div>
-          <div className="playlist-actions">
-            <button className="btn-pill" onClick={() => handleAddTrack(true)} disabled={isLoading} type="button">Add music</button>
-            <div className="playlist-io">
-              <button
-                className="btn-ghost btn-sm"
-                onClick={handleExportSelectedPlaylist}
-                disabled={!selectedPlaylistId}
-                type="button"
-                title="Export"
-              >
-                Export
-              </button>
-              <button className="btn-ghost btn-sm" onClick={handleImportPlaylist} type="button">Import</button>
-            </div>
           </div>
         </div>
       </aside>
@@ -796,29 +899,26 @@ function App() {
         <section className="hero-panel">
           <Artwork track={currentTrack} fallback={coverLetters} className="hero-art" />
           <div className="hero-copy">
-            <p className="eyebrow">Playlist</p>
-            <h1>{selectedPlaylist?.name ?? "Local Sessions"}</h1>
-            <p>{playlist.length ? `${playlist.length} tracks in this playlist` : "Add songs to start listening"}</p>
+            <h1>{selectedPlaylist?.name ?? "All Local Files"}</h1>
+            <p>{playlist.length ? `${playlist.length} tracks in this playlist` : "No tracks in this playlist"}</p>
             <div className="hero-actions">
               <button className="big-play" onClick={handlePlayPause} disabled={isLoading} type="button" title="Play or pause">
-                {playbackState.is_playing ? "Pause" : "Play"}
+                {playbackState.is_playing ? <BiPause /> : <BiPlay />}
               </button>
-              <button className="btn-secondary" onClick={() => handleAddTrack(true)} disabled={isLoading} type="button">Add tracks</button>
+              <button className="btn-secondary" onClick={() => handleAddTrack(true)} disabled={isAddingTracks} type="button"><BiPlus /></button>
               {playlist.length > 0 && <button className="btn-ghost" onClick={handleClearPlaylist} type="button">Clear</button>}
             </div>
           </div>
         </section>
 
-        {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError(null)} type="button">x</button></div>}
-        {isLoading && <div className="loading-indicator"><div className="spinner" /> Loading...</div>}
+        {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError(null)} type="button"><BiX /></button></div>}
 
         <section className="playlist-container">
           {playlist.length === 0 ? (
             <div className="empty-state">
-              <div className="empty-icon">music</div>
+              <div className="empty-icon"><BiMusic /></div>
               <h2>Your playlist is empty</h2>
-              <p>Drop in MP3, WAV, FLAC, AAC, OGG, M4A, OPUS, or MKA files.</p>
-              <button className="btn-primary" onClick={() => handleAddTrack(false)} disabled={isLoading} type="button">Add your first track</button>
+              <button className="btn-primary" onClick={() => handleAddTrack(false)} disabled={isAddingTracks} type="button">Add your first track</button>
             </div>
           ) : (
             <div className="track-list">
@@ -843,24 +943,26 @@ function App() {
                   <div className="track-format">{track.format}</div>
                   <div className="track-duration">{formatTime(track.duration_seconds)}</div>
                   <div className="track-actions-cell">
-                    <button className="track-action-btn" onClick={(event) => { event.stopPropagation(); setMenuTrackPath(menuTrackPath === track.path ? null : track.path); }} title="More" type="button">...</button>
-                    <button className="track-action-btn" onClick={(event) => { event.stopPropagation(); handleRemoveTrack(track.path); }} title="Remove" type="button">x</button>
-                    {menuTrackPath === track.path && (
-                      <div className="track-context-menu" onClick={(e) => e.stopPropagation()}>
-                        <button type="button" onClick={() => handlePlayNext(track.path)}>Play Next</button>
-                        <button type="button" onClick={() => handleAddToQueue(track.path)}>Add to Queue</button>
-                        <button type="button" onClick={() => setShowAddToPlaylist(true)}>Add to Playlist...</button>
-                        {showAddToPlaylist && (
-                          <div className="add-to-playlist-submenu">
-                            {playlists.filter((p) => p.id !== selectedPlaylistId).map((p) => (
-                              <button key={p.id} type="button" onClick={() => handleAddTrackToPlaylist(p.id, track.path)}>
-                                {p.name}
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
+                    <button
+                      className={`track-action-btn favorite-btn ${favoritePaths.has(track.path) ? "active" : ""}`}
+                      onClick={(event) => { event.stopPropagation(); handleToggleFavorite(track.path); }}
+                      title={favoritePaths.has(track.path) ? "Remove from Favorites" : "Add to Favorites"}
+                      type="button"
+                    >{favoritePaths.has(track.path) ? <BiSolidHeart /> : <BiHeart />}</button>
+                    <button className="track-action-btn" onClick={(event) => {
+                      event.stopPropagation();
+                      if (menuTrackPath === track.path) {
+                        setMenuTrackPath(null);
+                        setMenuAnchor(null);
+                        setShowAddToPlaylist(false);
+                      } else {
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setMenuTrackPath(track.path);
+                        setMenuAnchor({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                        setShowAddToPlaylist(false);
+                      }
+                    }} title="More" type="button"><BiDotsHorizontalRounded /></button>
+                    <button className="track-action-btn" onClick={(event) => { event.stopPropagation(); handleRemoveTrack(track.path); }} title="Remove" type="button"><BiX /></button>
                   </div>
                 </div>
               ))}
@@ -880,8 +982,39 @@ function App() {
         )}
       </main>
 
+      {menuTrackPath && menuAnchor && (() => {
+        const menuTrack = playlist.find((t) => t.path === menuTrackPath);
+        if (!menuTrack) return null;
+        const addToPlaylistOptions = playlists.filter((p) => p.id !== selectedPlaylistId && p.name !== "Favorites");
+        return createPortal(
+          <div
+            className="track-context-menu"
+            style={{ position: "fixed", top: `${menuAnchor.top}px`, right: `${menuAnchor.right}px` }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button type="button" onClick={() => handlePlayNext(menuTrack.path)}><BiListPlus /> Play Next</button>
+            <button type="button" onClick={() => handleAddToQueue(menuTrack.path)}><BiListPlus /> Add to Queue</button>
+            {addToPlaylistOptions.length > 0 && (
+              <>
+                <button type="button" onClick={() => setShowAddToPlaylist(true)}><BiListUl /> Add to Playlist...</button>
+                {showAddToPlaylist && (
+                  <div className="add-to-playlist-submenu">
+                    {addToPlaylistOptions.map((p) => (
+                      <button key={p.id} type="button" onClick={() => handleAddTrackToPlaylist(p.id, menuTrack.path)}>
+                        {p.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>,
+          document.body
+        );
+      })()}
+
       {menuTrackPath && (
-        <div className="context-menu-backdrop" onClick={() => { setMenuTrackPath(null); setShowAddToPlaylist(false); }} />
+        <div className="context-menu-backdrop" onClick={() => { setMenuTrackPath(null); setMenuAnchor(null); setShowAddToPlaylist(false); }} />
       )}
 
       {playlistDialog && (
@@ -895,7 +1028,7 @@ function App() {
           >
             <div className="modal-header">
               <h2>{playlistDialog.mode === "create" ? "Create playlist" : "Rename playlist"}</h2>
-              <button className="modal-close-btn" onClick={closePlaylistDialog} type="button" title="Close">x</button>
+              <button className="modal-close-btn" onClick={closePlaylistDialog} type="button" title="Close"><BiX /></button>
             </div>
             <form
               onSubmit={(event) => {
@@ -928,6 +1061,27 @@ function App() {
         </div>
       )}
 
+      {showClearConfirm && (
+        <div className="modal-backdrop" onClick={() => setShowClearConfirm(false)}>
+          <div
+            className="modal-dialog confirm-dialog"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setShowClearConfirm(false);
+            }}
+          >
+            <div className="modal-header">
+              <h2>Clear playlist?</h2>
+            </div>
+            <p className="confirm-text">This will remove all tracks from this playlist. The files on disk won't be affected.</p>
+            <div className="modal-actions">
+              <button className="btn-ghost" onClick={() => setShowClearConfirm(false)} type="button">Cancel</button>
+              <button className="btn-primary" onClick={confirmClearPlaylist} type="button">Clear</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showQueue && (
         <div className="queue-panel">
           <div className="queue-header">
@@ -936,7 +1090,7 @@ function App() {
               {queueData.tracks.length > 0 && (
                 <button className="btn-ghost btn-sm" onClick={handleClearQueue} type="button">Clear</button>
               )}
-              <button className="queue-close-btn" onClick={() => setShowQueue(false)} type="button" title="Close">x</button>
+              <button className="queue-close-btn" onClick={() => setShowQueue(false)} type="button" title="Close"><BiX /></button>
             </div>
           </div>
           <div className="queue-list">
@@ -963,7 +1117,7 @@ function App() {
                     onClick={(e) => { e.stopPropagation(); handleRemoveFromQueue(index); }}
                     title="Remove from queue"
                     type="button"
-                  >x</button>
+                  ><BiX /></button>
                 </div>
               ))
             )}
@@ -988,17 +1142,17 @@ function App() {
               onClick={handleToggleShuffle}
               type="button"
               title={playbackMode.shuffle ? "Disable shuffle" : "Enable shuffle"}
-            >Shuf</button>
-            <button className="control-btn" onClick={handlePrevious} disabled={!canSkip} type="button" title="Previous">Prev</button>
-            <button className="control-btn" onClick={handleStop} disabled={!playbackState.current_path} type="button" title="Stop">Stop</button>
-            <button className="control-btn play-pause-btn" onClick={handlePlayPause} disabled={isLoading} type="button" title="Play/Pause">{playbackState.is_playing ? "||" : ">"}</button>
-            <button className="control-btn" onClick={handleNext} disabled={!canSkip} type="button" title="Next">Next</button>
+            ><BiShuffle /></button>
+            <button className="control-btn" onClick={handlePrevious} disabled={!canSkip} type="button" title="Previous"><BiSkipPrevious /></button>
+            <button className="control-btn" onClick={handleStop} disabled={!playbackState.current_path} type="button" title="Stop"><BiStop /></button>
+            <button className="control-btn play-pause-btn" onClick={handlePlayPause} disabled={isLoading} type="button" title="Play/Pause">{playbackState.is_playing ? <BiPause /> : <BiPlay />}</button>
+            <button className="control-btn" onClick={handleNext} disabled={!canSkip} type="button" title="Next"><BiSkipNext /></button>
             <button
               className={`control-btn repeat-btn ${playbackMode.repeat !== "off" ? "active" : ""} ${playbackMode.repeat === "one" ? "repeat-one" : ""}`}
               onClick={handleCycleRepeat}
               type="button"
               title={playbackMode.repeat === "off" ? "Repeat off" : playbackMode.repeat === "all" ? "Repeat all" : "Repeat one"}
-            >{playbackMode.repeat === "one" ? "R1" : "Rpt"}</button>
+            ><BiRepeat /></button>
           </div>
           <div className="seek-row">
             <span>{formatTime(displayPosition)}</span>
@@ -1019,16 +1173,18 @@ function App() {
         </div>
 
         <div className="player-right">
-          <button
-            className={`control-btn queue-toggle ${showQueue ? "active" : ""}`}
-            onClick={() => setShowQueue((v) => !v)}
-            type="button"
-            title="Toggle queue"
-          >Queue</button>
-          <span className={`status-dot ${playbackState.is_playing ? "playing" : playbackState.is_paused ? "paused" : ""}`} />
-          <span className="volume-icon">Vol</span>
-          <input className="range-slider volume" type="range" min="0" max="1" step="0.01" value={volumeValue} onChange={(event) => handleVolume(Number(event.target.value))} />
-          <span className="volume-percent">{Math.round(volumeValue * 100)}%</span>
+          <div className="player-right-row">
+            <button
+              className={`control-btn queue-toggle ${showQueue ? "active" : ""}`}
+              onClick={() => setShowQueue((v) => !v)}
+              type="button"
+              title="Toggle queue"
+            ><BiListUl /></button>
+            <span className={`status-dot ${playbackState.is_playing ? "playing" : playbackState.is_paused ? "paused" : ""}`} />
+            <span className="volume-icon">{volumeValue === 0 ? <BiVolumeMute /> : volumeValue < 0.5 ? <BiVolumeLow /> : <BiVolumeFull />}</span>
+            <input className="range-slider volume" type="range" min="0" max="1" step="0.01" value={volumeValue} onChange={(event) => handleVolume(Number(event.target.value))} />
+            <span className="volume-percent">{Math.round(volumeValue * 100)}%</span>
+          </div>
           <div className="device-selector">
             <button
               className="output-device-name"
@@ -1070,6 +1226,12 @@ function App() {
           </div>
         </div>
       </footer>
+
+      {isLoading && (
+        <div className="loading-indicator" role="status" aria-live="polite">
+          <div className="spinner" /> Loading...
+        </div>
+      )}
     </div>
   );
 }

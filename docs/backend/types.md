@@ -131,6 +131,50 @@ interface PlaylistInfo {
 
 ---
 
+## `AlbumSummary`
+
+Returned by `list_albums`. One entry per distinct album, grouped by
+`(album, album_artist)` — so two unrelated albums that happen to share a name
+(e.g. several “Greatest Hits”) appear as separate entries.
+
+```typescript
+interface AlbumSummary {
+  name: string;
+  album_artist: string | null;  // resolved: tag album_artist, else track artist
+  artist: string;               // representative track artist
+  track_count: number;
+  year: number | null;
+  cover_art_data_url: string | null; // representative cover (data: URL or https URL)
+  cover_art_mime: string | null;
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `name` | Album title (from tags) |
+| `album_artist` | The tag `album_artist` when present, otherwise the track `artist`. Pass this back to `get_album_tracks` for a precise “go to album” lookup |
+| `artist` | A representative track artist for the album |
+| `track_count` | Number of tracks in the album |
+| `year` | Earliest year found on the album’s tracks, or `null` |
+| `cover_art_data_url` | Representative cover art (a `data:` URL or Cover Art Archive URL) |
+| `cover_art_mime` | MIME type of the representative cover, or `null` |
+
+---
+
+## `ArtistSummary`
+
+Returned by `list_artists`. One entry per distinct track `artist` tag.
+
+```typescript
+interface ArtistSummary {
+  name: string;
+  track_count: number;
+  album_count: number;  // distinct album names attributed to the artist
+}
+```
+
+---
+
 ## `MediaMetadata`
 
 Argument to `update_media_metadata`. All fields are optional.
@@ -160,6 +204,8 @@ import type {
   PlaybackMode,
   Track,
   PlaylistInfo,
+  AlbumSummary,
+  ArtistSummary,
   MediaMetadata,
 } from "../utils/player";
 ```

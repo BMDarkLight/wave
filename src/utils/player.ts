@@ -105,6 +105,24 @@ export interface ImportResult {
   track_count: number;
 }
 
+/** Summary of a distinct album in the library (grouped by album + album artist). */
+export interface AlbumSummary {
+  name: string;
+  album_artist: string | null; // resolved: tag album_artist, else track artist
+  artist: string;              // representative track artist
+  track_count: number;
+  year: number | null;
+  cover_art_data_url: string | null; // representative cover (data: or https URL)
+  cover_art_mime: string | null;
+}
+
+/** Summary of a distinct artist in the library, with aggregate counts. */
+export interface ArtistSummary {
+  name: string;
+  track_count: number;
+  album_count: number;
+}
+
 export const playTrack = (path: string): Promise<void> => {
   return safeInvoke("play_track", { path });
 };
@@ -182,6 +200,39 @@ export const clearPlaylist = (): Promise<void> => {
   return safeInvoke("clear_playlist");
 };
 
+// ── Favorites ─────────────────────────────────────────────────────────────────
+// "Favorites" is a special seeded playlist that appears in list_playlists and
+// cannot be deleted or renamed. Use these helpers to manage it.
+
+export const addTrackToFavorites = (path: string): Promise<Track> => {
+  return safeInvoke<Track>("add_track_to_favorites", { path });
+};
+
+export const removeTrackFromFavorites = (path: string): Promise<void> => {
+  return safeInvoke("remove_track_from_favorites", { path });
+};
+
+export const getFavorites = (): Promise<Track[]> => {
+  return safeInvoke<Track[]>("get_favorites");
+};
+
+export const isTrackInFavorites = (path: string): Promise<boolean> => {
+  return safeInvoke<boolean>("is_track_in_favorites", { path });
+};
+
+export const isTrackInPlaylist = (path: string): Promise<boolean> => {
+  return safeInvoke<boolean>("is_track_in_playlist", { path });
+};
+
+/** Toggle the favorite state of a track. Returns the new state (true = favorited). */
+export const toggleFavorite = (path: string): Promise<boolean> => {
+  return safeInvoke<boolean>("toggle_favorite", { path });
+};
+
+export const clearFavorites = (): Promise<void> => {
+  return safeInvoke("clear_favorites");
+};
+
 export const playTrackFromPlaylist = (index: number): Promise<void> => {
   return safeInvoke("play_track_from_playlist", { index });
 };
@@ -242,6 +293,47 @@ export const clearPlaylistById = (id: string): Promise<void> => {
 
 export const playTrackFromSpecificPlaylist = (playlistId: string, index: number): Promise<void> => {
   return safeInvoke("play_track_from_specific_playlist", { playlistId, index });
+};
+
+// ── Albums & artists (browse / query) ─────────────────────────────────────────
+
+/** Create a playlist from every track matching an album name. */
+export const createAlbumPlaylist = (album: string, name?: string): Promise<PlaylistInfo> => {
+  return safeInvoke<PlaylistInfo>("create_album_playlist", { album, name });
+};
+
+/** Create a playlist from every track matching an artist name (a discography). */
+export const createArtistPlaylist = (artist: string, name?: string): Promise<PlaylistInfo> => {
+  return safeInvoke<PlaylistInfo>("create_artist_playlist", { artist, name });
+};
+
+/**
+ * List every distinct album in the library, grouped by (album, album_artist).
+ * Use for a Spotify-like album grid. `album_artist` is the resolved value
+ * (tag `album_artist`, falling back to `artist`) — pass it back to
+ * `getAlbumTracks` for a precise "go to album" result.
+ */
+export const listAlbums = (): Promise<AlbumSummary[]> => {
+  return safeInvoke<AlbumSummary[]>("list_albums");
+};
+
+/** List every distinct artist with track and album counts. */
+export const listArtists = (): Promise<ArtistSummary[]> => {
+  return safeInvoke<ArtistSummary[]>("list_artists");
+};
+
+/**
+ * Return every track in an album. Pass `albumArtist` (from an `AlbumSummary`
+ * or a clicked `Track`'s `album_artist ?? artist`) to keep same-named albums by
+ * different artists apart; omit it to match the album name only.
+ */
+export const getAlbumTracks = (album: string, albumArtist?: string | null): Promise<Track[]> => {
+  return safeInvoke<Track[]>("get_album_tracks", { album, albumArtist });
+};
+
+/** Return every track by an artist (a discography), ordered by album/disc/track. */
+export const getArtistTracks = (artist: string): Promise<Track[]> => {
+  return safeInvoke<Track[]>("get_artist_tracks", { artist });
 };
 
 // ── Queue manipulation ──────────────────────────────────────────────────────

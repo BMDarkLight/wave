@@ -41,3 +41,30 @@ pub struct ImportResultDto {
     pub playlist_name: String,
     pub track_count: usize,
 }
+
+/// Summary of a distinct album in the library, used for browse/grid views.
+///
+/// Albums are grouped by `(album, album_artist)` — falling back to the track
+/// `artist` when `album_artist` is missing — so that unrelated albums which
+/// happen to share a name (e.g. several "Greatest Hits") are kept separate.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlbumSummaryDto {
+    pub name: String,
+    /// Resolved album artist: the tag `album_artist` when present, else `artist`.
+    pub album_artist: Option<String>,
+    /// A representative track artist for the album (first found).
+    pub artist: String,
+    pub track_count: i64,
+    pub year: Option<i32>,
+    /// Representative cover art for the album (may be a `data:` URL or HTTPS URL).
+    pub cover_art_data_url: Option<String>,
+    pub cover_art_mime: Option<String>,
+}
+
+/// Summary of a distinct artist in the library, used for browse/discography views.
+#[derive(Debug, Clone, Serialize)]
+pub struct ArtistSummaryDto {
+    pub name: String,
+    pub track_count: i64,
+    pub album_count: i64,
+}

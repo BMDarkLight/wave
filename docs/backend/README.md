@@ -31,7 +31,7 @@ Wave separates three layers:
 
 | Layer | Storage | Purpose |
 |-------|---------|---------|
-| **Library playlist** | SQLite (`wave-library.sqlite`) | Persisted track list for the default “Local Sessions” playlist |
+| **Library playlist** | SQLite (`wave-library.sqlite`) | Persisted track list for the default "All Local Files" playlist |
 | **Playback queue** | In-memory (Rust) | Order used by `play_next`, `play_previous`, shuffle, and repeat |
 | **Audio engine** | In-memory (Rodio + Symphonia) | Actual decode/play/pause/seek/volume |
 
@@ -78,6 +78,19 @@ Important behaviors:
 | `get_library_database_path` | Absolute path to the SQLite database |
 | `get_supported_audio_extensions` | Lowercase extensions the backend accepts |
 
+### Favorites
+
+The **Favorites** playlist is a special seeded playlist (like "All Local Files") that shows up in `list_playlists` and cannot be deleted or renamed. See [Commands → Favorites](./commands.md#favorites).
+
+| Command | Description |
+|---------|-------------|
+| `add_track_to_favorites` | Add a track to the Favorites playlist |
+| `remove_track_from_favorites` | Remove a track from Favorites by path |
+| `get_favorites` | List every track in Favorites |
+| `is_track_in_favorites` | Whether a track is favorited (for heart UI state) |
+| `toggle_favorite` | Toggle favorite state; returns new state |
+| `clear_favorites` | Remove all tracks from Favorites |
+
 ### Queue & playback modes
 
 | Command | Description |
@@ -88,6 +101,21 @@ Important behaviors:
 | `set_shuffle` | Enable/disable shuffle order |
 | `set_repeat` | Set repeat mode: `"off"`, `"one"`, or `"all"` |
 | `get_playback_mode` | Current repeat and shuffle settings |
+
+### Albums & artists
+
+Browse and query the library by album/artist metadata (for Spotify-like album
+grids, “go to album”, and discography views). See [Commands → Albums &
+artists](./commands.md#albums--artists).
+
+| Command | Description |
+|---------|-------------|
+| `list_albums` | List every distinct album (grouped by album + album artist) |
+| `list_artists` | List every distinct artist with track/album counts |
+| `get_album_tracks` | Every track in an album (right-click → go to album) |
+| `get_artist_tracks` | Every track by an artist (discography) |
+| `create_album_playlist` | Persist an album’s tracks as a playlist |
+| `create_artist_playlist` | Persist an artist’s tracks as a playlist |
 
 ### OS integration
 

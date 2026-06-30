@@ -1,3 +1,4 @@
+use crate::dto::{AlbumSummaryDto, ArtistSummaryDto};
 use crate::metadata::{extract_track, is_supported_audio_file, Track};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
@@ -44,12 +45,13 @@ struct TrackExportJson {
     duration_seconds: Option<f64>,
 }
 
-/// Cached ID for the "Local Sessions" playlist, so we don't need to hit the
+/// Cached ID for the "All Local Files" playlist, so we don't need to hit the
 /// database on every single read operation.
 pub struct Library {
     db_path: PathBuf,
     connection: Mutex<Connection>,
     default_playlist_id_cache: OnceLock<String>,
+    favorites_playlist_id_cache: OnceLock<String>,
 }
 
 impl Library {
@@ -68,6 +70,7 @@ impl Library {
             db_path,
             connection: Mutex::new(connection),
             default_playlist_id_cache: OnceLock::new(),
+            favorites_playlist_id_cache: OnceLock::new(),
         };
         library.initialize()?;
         Ok(library)
@@ -170,10 +173,13 @@ impl Library {
         // Seed the default profile and playlist. We do this once at startup.
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
         let playlist_id =
-            ensure_playlist_with_connection(&connection, &profile_id, "Local Sessions")?;
+            ensure_playlist_with_connection(&connection, &profile_id, "All Local Files")?;
+        let favorites_id =
+            ensure_playlist_with_connection(&connection, &profile_id, "Favorites")?;
 
-        // Warm the cache.
+        // Warm the caches.
         let _ = self.default_playlist_id_cache.set(playlist_id.clone());
+        let _ = self.favorites_playlist_id_cache.set(favorites_id);
 
         if let Err(error) = repair_all_playlist_positions(&connection) {
             tracing::warn!("Failed to repair playlist positions on startup: {error}");
@@ -190,8 +196,21 @@ impl Library {
         let connection = self.lock_connection()?;
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
         let playlist_id =
-            ensure_playlist_with_connection(&connection, &profile_id, "Local Sessions")?;
+            ensure_playlist_with_connection(&connection, &profile_id, "All Local Files")?;
         let _ = self.default_playlist_id_cache.set(playlist_id.clone());
+        Ok(playlist_id)
+    }
+
+    /// Returns the cached favorites playlist id, seeding if necessary.
+    pub fn favorites_playlist_id(&self) -> Result<String, String> {
+        if let Some(id) = self.favorites_playlist_id_cache.get() {
+            return Ok(id.clone());
+        }
+        let connection = self.lock_connection()?;
+        let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
+        let playlist_id =
+            ensure_playlist_with_connection(&connection, &profile_id, "Favorites")?;
+        let _ = self.favorites_playlist_id_cache.set(playlist_id.clone());
         Ok(playlist_id)
     }
 
@@ -201,7 +220,26 @@ impl Library {
     }
 
     pub fn add_track_to_playlist(&self, playlist_id: &str, path: String) -> Result<Track, String> {
-        let mut track = extract_track(&path)?;
+        let existing = {
+            let connection = self.lock_connection()?;
+            connection
+                .query_row(
+                    &format!(
+                        "SELECT {TRACK_SELECT_COLUMNS}
+                         FROM tracks t
+                         WHERE t.path = ?1"
+                    ),
+                    params![path],
+                    row_to_track,
+                )
+                .optional()
+                .map_err(|error| format!("Failed to look up track: {error}"))?
+        };
+
+        let mut track = match existing {
+            Some(track) => track,
+            None => extract_track(&path)?,
+        };
         let now = now_timestamp();
         let mut connection = self.lock_connection()?;
         let tx = connection
@@ -311,6 +349,90 @@ impl Library {
         Ok(())
     }
 
+    // ── Favorites ────────────────────────────────────────────────────────────
+
+    /// Add a track to the Favorites playlist. Extracts metadata and upserts the
+    /// track into the library first (so favorites work for any file, not just
+    /// already-indexed ones).
+    pub fn add_track_to_favorites(&self, path: String) -> Result<Track, String> {
+        let playlist_id = self.favorites_playlist_id()?;
+        self.add_track_to_playlist(&playlist_id, path)
+    }
+
+    /// Remove a track from the Favorites playlist by file path.
+    pub fn remove_track_from_favorites(&self, path: &str) -> Result<(), String> {
+        let playlist_id = self.favorites_playlist_id()?;
+        self.remove_track_from_playlist_by_path(&playlist_id, path)
+    }
+
+    /// List every track in the Favorites playlist, ordered by position.
+    pub fn get_favorites(&self) -> Result<Vec<Track>, String> {
+        let playlist_id = self.favorites_playlist_id()?;
+        self.get_playlist_tracks(&playlist_id)
+    }
+
+    /// Whether a track (by file path) is in the Favorites playlist.
+    pub fn is_track_in_favorites(&self, path: &str) -> Result<bool, String> {
+        let playlist_id = self.favorites_playlist_id()?;
+        let connection = self.lock_connection()?;
+        let in_favorites = connection
+            .query_row(
+                "SELECT 1 FROM playlist_tracks
+                 WHERE playlist_id = ?1
+                   AND track_id = (SELECT id FROM tracks WHERE path = ?2)",
+                params![playlist_id, path],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| format!("Failed to check favorites: {error}"))?
+            .is_some();
+        Ok(in_favorites)
+    }
+
+    /// Whether a track is registered in the library and belongs to at least one playlist.
+    pub fn is_track_in_any_playlist(&self, path: &str) -> Result<bool, String> {
+        let connection = self.lock_connection()?;
+        let in_playlist = connection
+            .query_row(
+                "SELECT 1
+                 FROM tracks t
+                 INNER JOIN playlist_tracks pt ON pt.track_id = t.id
+                 WHERE t.path = ?1
+                 LIMIT 1",
+                params![path],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| format!("Failed to check playlist membership: {error}"))?
+            .is_some();
+        Ok(in_playlist)
+    }
+
+    /// Toggle the favorite state of a track. Returns the new state
+    /// (`true` = now favorited, `false` = now unfavorited).
+    pub fn toggle_favorite(&self, path: &str) -> Result<bool, String> {
+        if self.is_track_in_favorites(path)? {
+            self.remove_track_from_favorites(path)?;
+            Ok(false)
+        } else {
+            self.add_track_to_favorites(path.to_string())?;
+            Ok(true)
+        }
+    }
+
+    /// Remove every track from the Favorites playlist.
+    pub fn clear_favorites(&self) -> Result<(), String> {
+        let playlist_id = self.favorites_playlist_id()?;
+        let connection = self.lock_connection()?;
+        connection
+            .execute(
+                "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
+                params![playlist_id],
+            )
+            .map_err(|error| format!("Failed to clear favorites: {error}"))?;
+        Ok(())
+    }
+
     pub fn index_directory(
         &self,
         profile_id: Option<String>,
@@ -319,7 +441,7 @@ impl Library {
     ) -> Result<Vec<Track>, String> {
         let profile_id_str = profile_id.unwrap_or_else(|| "default".to_string());
         let playlist_name_str =
-            playlist_name.unwrap_or_else(|| "Local Sessions".to_string());
+            playlist_name.unwrap_or_else(|| "All Local Files".to_string());
 
         // Resolve / create the profile and playlist outside the connection lock.
         let playlist_id = {
@@ -524,8 +646,11 @@ impl Library {
 
         match name {
             None => return Err("Playlist not found".to_string()),
-            Some(name) if name == "Local Sessions" => {
-                return Err("The default \"Local Sessions\" playlist cannot be deleted".to_string());
+            Some(name) if name == "All Local Files" => {
+                return Err("The default \"All Local Files\" playlist cannot be deleted".to_string());
+            }
+            Some(name) if name == "Favorites" => {
+                return Err("The \"Favorites\" playlist cannot be deleted".to_string());
             }
             Some(_) => {}
         }
@@ -559,8 +684,12 @@ impl Library {
             .map_err(|error| format!("Failed to look up playlist: {error}"))?
             .ok_or_else(|| "Playlist not found".to_string())?;
 
-        if current_name == "Local Sessions" {
-            return Err("The default \"Local Sessions\" playlist cannot be renamed".to_string());
+        if current_name == "All Local Files" {
+            return Err("The default \"All Local Files\" playlist cannot be renamed".to_string());
+        }
+
+        if current_name == "Favorites" {
+            return Err("The \"Favorites\" playlist cannot be renamed".to_string());
         }
 
         if name != current_name && self.playlist_name_exists(&connection, &profile_id, name)? {
@@ -730,6 +859,129 @@ impl Library {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| format!("Failed to read tracks by {column}: {error}"))?;
         Ok(tracks)
+    }
+
+    // ── Album / artist browsing & querying ───────────────────────────────────
+
+    /// List every distinct album in the library grouped by
+    /// `(album, COALESCE(album_artist, artist))`, ordered by album artist then
+    /// album name. Each entry carries aggregate info (track count, year,
+    /// representative cover art) suitable for a browse grid.
+    pub fn list_albums(&self) -> Result<Vec<AlbumSummaryDto>, String> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT
+                    t.album,
+                    COALESCE(NULLIF(t.album_artist, ''), t.artist) AS album_artist,
+                    MIN(t.artist) AS artist,
+                    COUNT(*) AS track_count,
+                    MIN(t.year) AS year,
+                    MIN(t.cover_art_data_url) AS cover_art_data_url,
+                    MIN(t.cover_art_mime) AS cover_art_mime
+                 FROM tracks t
+                 GROUP BY t.album, COALESCE(NULLIF(t.album_artist, ''), t.artist)
+                 ORDER BY album_artist, t.album",
+            )
+            .map_err(|error| format!("Failed to prepare albums query: {error}"))?;
+        let albums = statement
+            .query_map([], row_to_album_summary)
+            .map_err(|error| format!("Failed to query albums: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to read albums: {error}"))?;
+        Ok(albums)
+    }
+
+    /// List every distinct artist in the library (by the track `artist` tag),
+    /// with aggregate track and album counts, ordered by artist name.
+    pub fn list_artists(&self) -> Result<Vec<ArtistSummaryDto>, String> {
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT
+                    t.artist,
+                    COUNT(*) AS track_count,
+                    COUNT(DISTINCT t.album) AS album_count
+                 FROM tracks t
+                 GROUP BY t.artist
+                 ORDER BY t.artist",
+            )
+            .map_err(|error| format!("Failed to prepare artists query: {error}"))?;
+        let artists = statement
+            .query_map([], row_to_artist_summary)
+            .map_err(|error| format!("Failed to query artists: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to read artists: {error}"))?;
+        Ok(artists)
+    }
+
+    /// Return every track belonging to an album.
+    ///
+    /// When `album_artist` is provided, tracks are matched on both `album` and
+    /// the resolved album artist (`COALESCE(album_artist, artist)`). This keeps
+    /// same-named albums by different artists apart — pass the value from an
+    /// [`AlbumSummaryDto`] (or a clicked `Track`'s `album_artist` falling back to
+    /// `artist`) for a precise, Spotify-style "go to album" result.
+    ///
+    /// When `album_artist` is `None`, only the `album` name is matched (which may
+    /// merge same-named albums across artists).
+    ///
+    /// Tracks are ordered by disc number then track number.
+    pub fn get_tracks_by_album(
+        &self,
+        album: &str,
+        album_artist: Option<&str>,
+    ) -> Result<Vec<Track>, String> {
+        let album = album.trim();
+        if album.is_empty() {
+            return Err("Album name cannot be empty".to_string());
+        }
+        let album_artist = album_artist.map(str::trim).filter(|a| !a.is_empty());
+
+        let connection = self.lock_connection()?;
+        let sql = if album_artist.is_some() {
+            format!(
+                "SELECT {TRACK_SELECT_COLUMNS}
+                 FROM tracks t
+                 WHERE t.album = ?1
+                   AND COALESCE(NULLIF(t.album_artist, ''), t.artist) = ?2
+                 ORDER BY COALESCE(t.disc_number, 1), COALESCE(t.track_number, 0)"
+            )
+        } else {
+            format!(
+                "SELECT {TRACK_SELECT_COLUMNS}
+                 FROM tracks t
+                 WHERE t.album = ?1
+                 ORDER BY COALESCE(t.disc_number, 1), COALESCE(t.track_number, 0)"
+            )
+        };
+
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| format!("Failed to prepare album tracks query: {error}"))?;
+
+        let rows = match album_artist {
+            Some(album_artist) => statement
+                .query_map(params![album, album_artist], row_to_track)
+                .map_err(|error| format!("Failed to query album tracks: {error}"))?,
+            None => statement
+                .query_map(params![album], row_to_track)
+                .map_err(|error| format!("Failed to query album tracks: {error}"))?,
+        };
+
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to read album tracks: {error}"))
+    }
+
+    /// Return every track by an artist (a discography), ordered by album then
+    /// disc number then track number. Matches the track `artist` tag.
+    pub fn get_tracks_by_artist(&self, artist: &str) -> Result<Vec<Track>, String> {
+        let artist = artist.trim();
+        if artist.is_empty() {
+            return Err("Artist name cannot be empty".to_string());
+        }
+        let connection = self.lock_connection()?;
+        Self::get_tracks_by_column(&connection, "artist", artist)
     }
 
     pub fn get_playlist_info(&self, playlist_id: &str) -> Result<Option<PlaylistInfo>, String> {
@@ -943,6 +1195,26 @@ fn row_to_playlist(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaylistInfo> {
         track_count: row.get(3)?,
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
+    })
+}
+
+fn row_to_album_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<AlbumSummaryDto> {
+    Ok(AlbumSummaryDto {
+        name: row.get(0)?,
+        album_artist: row.get(1)?,
+        artist: row.get(2)?,
+        track_count: row.get(3)?,
+        year: row.get(4)?,
+        cover_art_data_url: row.get(5)?,
+        cover_art_mime: row.get(6)?,
+    })
+}
+
+fn row_to_artist_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtistSummaryDto> {
+    Ok(ArtistSummaryDto {
+        name: row.get(0)?,
+        track_count: row.get(1)?,
+        album_count: row.get(2)?,
     })
 }
 
@@ -1242,6 +1514,7 @@ mod tests {
             db_path: PathBuf::from(":memory:"),
             connection: Mutex::new(connection),
             default_playlist_id_cache: OnceLock::new(),
+            favorites_playlist_id_cache: OnceLock::new(),
         };
         library.initialize()?;
         Ok(library)
@@ -1421,5 +1694,410 @@ mod tests {
             .expect("playlist tracks");
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].path, "/music/b.mp3");
+    }
+
+    // ── Album / artist browsing & querying ──────────────────────────────────
+
+    /// Build a `Track` with customizable album/artist metadata for browse tests.
+    fn track_with(
+        id: &str,
+        path: &str,
+        artist: &str,
+        album: &str,
+        album_artist: Option<&str>,
+        track_number: Option<i32>,
+        disc_number: Option<i32>,
+        year: Option<i32>,
+        cover: Option<&str>,
+    ) -> Track {
+        let mut t = sample_track(id, path);
+        t.artist = artist.to_string();
+        t.album = album.to_string();
+        t.album_artist = album_artist.map(String::from);
+        t.track_number = track_number;
+        t.disc_number = disc_number;
+        t.year = year;
+        t.cover_art_data_url = cover.map(String::from);
+        t.cover_art_mime = cover.map(|_| "image/jpeg".to_string());
+        t
+    }
+
+    fn upsert_many(connection: &Connection, tracks: &[Track]) {
+        for track in tracks {
+            upsert_track(connection, track).expect("upsert");
+        }
+    }
+
+    fn seed_library_for_browse_tests(library: &Library) {
+        let connection = library.lock_connection().expect("connection");
+        upsert_many(
+            &connection,
+            &[
+                // "Abbey Road" by The Beatles (album_artist set, 3 tracks).
+                track_with("b1", "/m/abbey-1.flac", "The Beatles", "Abbey Road", Some("The Beatles"), Some(1), Some(1), Some(1969), Some("data:abbey")),
+                track_with("b2", "/m/abbey-2.flac", "The Beatles", "Abbey Road", Some("The Beatles"), Some(2), Some(1), Some(1969), Some("data:abbey")),
+                track_with("b3", "/m/abbey-3.flac", "The Beatles", "Abbey Road", Some("The Beatles"), Some(3), Some(1), Some(1969), Some("data:abbey")),
+                // A second Beatles album so album_count > 1.
+                track_with("b4", "/m/letitbe-1.flac", "The Beatles", "Let It Be", Some("The Beatles"), Some(1), Some(1), Some(1970), Some("data:letitbe")),
+                // "Greatest Hits" collision: Queen (2 tracks) vs ABBA (1 track, no cover).
+                track_with("q1", "/m/queen-1.flac", "Queen", "Greatest Hits", Some("Queen"), Some(1), Some(1), Some(1981), Some("data:queen")),
+                track_with("q2", "/m/queen-2.flac", "Queen", "Greatest Hits", Some("Queen"), Some(2), Some(1), Some(1981), Some("data:queen")),
+                track_with("a1", "/m/abba-1.flac", "ABBA", "Greatest Hits", Some("ABBA"), Some(1), Some(1), Some(1975), None),
+                // Album with no album_artist tag → resolved album_artist falls back to artist.
+                track_with("s1", "/m/solo-1.flac", "Solo", "No Album Artist", None, Some(1), Some(1), Some(2020), None),
+            ],
+        );
+    }
+
+    #[test]
+    fn list_albums_groups_by_album_and_resolved_album_artist() {
+        let library = open_test_library().expect("library");
+        seed_library_for_browse_tests(&library);
+
+        let albums = library.list_albums().expect("albums");
+
+        // 5 distinct (album, album_artist) groups — "Greatest Hits" appears twice
+        // and The Beatles have two separate albums.
+        assert_eq!(albums.len(), 5);
+
+        // Ordered by album_artist then album.
+        let names: Vec<(&str, &str, i64)> = albums
+            .iter()
+            .map(|a| (a.name.as_str(), a.album_artist.as_deref().unwrap_or(""), a.track_count))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("Greatest Hits", "ABBA", 1),
+                ("Greatest Hits", "Queen", 2),
+                ("No Album Artist", "Solo", 1),
+                ("Abbey Road", "The Beatles", 3),
+                ("Let It Be", "The Beatles", 1),
+            ]
+        );
+
+        let abbey = albums.iter().find(|a| a.name == "Abbey Road").unwrap();
+        assert_eq!(abbey.artist, "The Beatles");
+        assert_eq!(abbey.year, Some(1969));
+        assert_eq!(abbey.cover_art_data_url.as_deref(), Some("data:abbey"));
+        assert_eq!(abbey.cover_art_mime.as_deref(), Some("image/jpeg"));
+
+        let abba = albums.iter().find(|a| a.name == "Greatest Hits" && a.album_artist.as_deref() == Some("ABBA")).unwrap();
+        assert_eq!(abba.year, Some(1975));
+        assert!(abba.cover_art_data_url.is_none());
+
+        // An album with a NULL album_artist tag resolves to the track artist.
+        let solo = albums.iter().find(|a| a.name == "No Album Artist").unwrap();
+        assert_eq!(solo.album_artist.as_deref(), Some("Solo"));
+    }
+
+    #[test]
+    fn list_artists_aggregates_track_and_album_counts() {
+        let library = open_test_library().expect("library");
+        seed_library_for_browse_tests(&library);
+
+        let artists = library.list_artists().expect("artists");
+
+        // Ordered by artist name.
+        let by_name: Vec<(&str, i64, i64)> = artists
+            .iter()
+            .map(|a| (a.name.as_str(), a.track_count, a.album_count))
+            .collect();
+        assert_eq!(
+            by_name,
+            vec![
+                ("ABBA", 1, 1),
+                ("Queen", 2, 1),
+                ("Solo", 1, 1),
+                ("The Beatles", 4, 2), // 4 tracks across 2 albums
+            ]
+        );
+    }
+
+    #[test]
+    fn get_tracks_by_album_disambiguates_same_named_albums() {
+        let library = open_test_library().expect("library");
+        seed_library_for_browse_tests(&library);
+
+        // Precise match using album_artist keeps the two "Greatest Hits" apart.
+        let queen = library
+            .get_tracks_by_album("Greatest Hits", Some("Queen"))
+            .expect("queen");
+        assert_eq!(queen.len(), 2);
+        assert!(queen.iter().all(|t| t.artist == "Queen"));
+        // Ordered by track_number.
+        assert_eq!(queen[0].track_number, Some(1));
+        assert_eq!(queen[1].track_number, Some(2));
+
+        let abba = library
+            .get_tracks_by_album("Greatest Hits", Some("ABBA"))
+            .expect("abba");
+        assert_eq!(abba.len(), 1);
+
+        // Without album_artist, both merge into one result set.
+        let merged = library
+            .get_tracks_by_album("Greatest Hits", None)
+            .expect("merged");
+        assert_eq!(merged.len(), 3);
+    }
+
+    #[test]
+    fn get_tracks_by_album_matches_resolved_album_artist_when_tag_is_null() {
+        let library = open_test_library().expect("library");
+        seed_library_for_browse_tests(&library);
+
+        // "No Album Artist" has a NULL album_artist tag; resolved value is "Solo".
+        let tracks = library
+            .get_tracks_by_album("No Album Artist", Some("Solo"))
+            .expect("tracks");
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].artist, "Solo");
+    }
+
+    #[test]
+    fn get_tracks_by_album_orders_by_disc_then_track() {
+        let library = open_test_library().expect("library");
+        {
+            let connection = library.lock_connection().expect("connection");
+            upsert_many(
+                &connection,
+                &[
+                    track_with("d1", "/m/d1.flac", "X", "Double", Some("X"), Some(1), Some(2), None, None),
+                    track_with("d2", "/m/d2.flac", "X", "Double", Some("X"), Some(2), Some(1), None, None),
+                    track_with("d3", "/m/d3.flac", "X", "Double", Some("X"), Some(1), Some(1), None, None),
+                ],
+            );
+        }
+
+        let tracks = library
+            .get_tracks_by_album("Double", Some("X"))
+            .expect("tracks");
+        let order: Vec<(Option<i32>, Option<i32>)> = tracks
+            .iter()
+            .map(|t| (t.disc_number, t.track_number))
+            .collect();
+        assert_eq!(
+            order,
+            vec![(Some(1), Some(1)), (Some(1), Some(2)), (Some(2), Some(1))]
+        );
+    }
+
+    #[test]
+    fn get_tracks_by_artist_returns_discography_ordered_by_album_disc_track() {
+        let library = open_test_library().expect("library");
+        seed_library_for_browse_tests(&library);
+
+        let tracks = library.get_tracks_by_artist("The Beatles").expect("tracks");
+        assert_eq!(tracks.len(), 4);
+        // Ordered by album name: "Abbey Road" before "Let It Be".
+        assert_eq!(tracks[0].album, "Abbey Road");
+        assert_eq!(tracks[3].album, "Let It Be");
+        // Within Abbey Road: disc 1, tracks 1..3.
+        assert_eq!(tracks[0].track_number, Some(1));
+        assert_eq!(tracks[1].track_number, Some(2));
+        assert_eq!(tracks[2].track_number, Some(3));
+    }
+
+    #[test]
+    fn get_tracks_by_album_rejects_empty_name() {
+        let library = open_test_library().expect("library");
+        let err = library
+            .get_tracks_by_album("   ", None)
+            .expect_err("empty album should fail");
+        assert!(err.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn get_tracks_by_artist_rejects_empty_name() {
+        let library = open_test_library().expect("library");
+        let err = library
+            .get_tracks_by_artist("")
+            .expect_err("empty artist should fail");
+        assert!(err.contains("cannot be empty"));
+    }
+
+    // ── Favorites ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn favorites_playlist_is_seeded_and_listed() {
+        let library = open_test_library().expect("library");
+        let playlists = library.list_playlists(None).expect("playlists");
+        let names: Vec<&str> = playlists.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"Favorites"));
+        assert!(names.contains(&"All Local Files"));
+    }
+
+    #[test]
+    fn favorites_id_is_stable_across_calls() {
+        let library = open_test_library().expect("library");
+        let a = library.favorites_playlist_id().expect("id a");
+        let b = library.favorites_playlist_id().expect("id b");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn is_track_in_favorites_reflects_membership() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let track_path = "/music/fav.mp3";
+
+        assert!(!library.is_track_in_favorites(track_path).expect("absent"));
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let track = sample_track("fav-1", track_path);
+            let id = upsert_track(&*connection, &track).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id, 0)
+                .expect("insert");
+        }
+
+        assert!(library.is_track_in_favorites(track_path).expect("present"));
+
+        library
+            .remove_track_from_favorites(track_path)
+            .expect("remove");
+
+        assert!(!library.is_track_in_favorites(track_path).expect("removed"));
+    }
+
+    #[test]
+    fn is_track_in_any_playlist_requires_registered_membership() {
+        let library = open_test_library().expect("library");
+        let playlist_id = library.default_playlist_id().expect("playlist");
+        let track_path = "/music/registered.mp3";
+
+        assert!(!library
+            .is_track_in_any_playlist(track_path)
+            .expect("absent before insert"));
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let track = sample_track("reg-1", track_path);
+            let id = upsert_track(&*connection, &track).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &playlist_id, &id, 0)
+                .expect("insert");
+        }
+
+        assert!(library
+            .is_track_in_any_playlist(track_path)
+            .expect("present after insert"));
+
+        library
+            .remove_track_from_playlist_by_path(&playlist_id, track_path)
+            .expect("remove");
+
+        assert!(!library
+            .is_track_in_any_playlist(track_path)
+            .expect("absent after remove"));
+    }
+
+    #[test]
+    fn toggle_favorite_removes_when_present() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let track_path = "/music/toggle.mp3";
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let track = sample_track("tog-1", track_path);
+            let id = upsert_track(&*connection, &track).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id, 0)
+                .expect("insert");
+        }
+
+        let now_favorited = library.toggle_favorite(track_path).expect("toggle off");
+        assert!(!now_favorited);
+        assert!(library.get_favorites().expect("favorites").is_empty());
+    }
+
+    #[test]
+    fn get_favorites_returns_tracks_in_position_order() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let t1 = sample_track("f1", "/music/f1.mp3");
+            let t2 = sample_track("f2", "/music/f2.mp3");
+            let id1 = upsert_track(&*connection, &t1).expect("upsert 1");
+            let id2 = upsert_track(&*connection, &t2).expect("upsert 2");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id1, 0)
+                .expect("insert 1");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id2, 1)
+                .expect("insert 2");
+        }
+
+        let favorites = library.get_favorites().expect("favorites");
+        assert_eq!(favorites.len(), 2);
+        assert_eq!(favorites[0].path, "/music/f1.mp3");
+        assert_eq!(favorites[1].path, "/music/f2.mp3");
+    }
+
+    #[test]
+    fn clear_favorites_removes_all() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let t = sample_track("cf-1", "/music/cf.mp3");
+            let id = upsert_track(&*connection, &t).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id, 0)
+                .expect("insert");
+        }
+
+        assert_eq!(library.get_favorites().expect("favorites").len(), 1);
+        library.clear_favorites().expect("clear");
+        assert!(library.get_favorites().expect("favorites").is_empty());
+    }
+
+    #[test]
+    fn delete_playlist_rejects_favorites() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let err = library
+            .delete_playlist(&favorites_id)
+            .expect_err("should not delete favorites");
+        assert!(err.contains("cannot be deleted"));
+    }
+
+    #[test]
+    fn rename_playlist_rejects_favorites() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let err = library
+            .rename_playlist(&favorites_id, "My Songs")
+            .expect_err("should not rename favorites");
+        assert!(err.contains("cannot be renamed"));
+    }
+
+    #[test]
+    fn add_track_to_playlist_reuses_existing_track_without_extraction() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let default_id = library.default_playlist_id().expect("default");
+        let track_path = "/music/already-indexed.mp3";
+
+        let original_track = sample_track("seeded-id", track_path);
+        {
+            let connection = library.lock_connection().expect("connection");
+            let id = upsert_track(&*connection, &original_track).expect("upsert");
+            assert_eq!(id, "seeded-id");
+            // Add it to the default playlist first.
+            insert_playlist_track_with_connection(&connection, &default_id, &id, 0)
+                .expect("insert to default");
+        }
+
+        let added = library
+            .add_track_to_playlist(&favorites_id, track_path.to_string())
+            .expect("add existing track to favorites");
+
+        assert_eq!(added.id, "seeded-id");
+        assert_eq!(added.title, original_track.title);
+        assert_eq!(added.artist, original_track.artist);
+
+        let favorites = library.get_favorites().expect("favorites");
+        assert_eq!(favorites.len(), 1);
+        assert_eq!(favorites[0].path, track_path);
     }
 }
