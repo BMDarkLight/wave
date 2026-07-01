@@ -1,19 +1,32 @@
+mod app_paths;
+mod app_settings;
 mod audio;
 pub mod cli;
 mod commands;
 mod dto;
 mod error;
+mod gui_tray;
 mod library;
 mod media_controls;
 mod metadata;
+pub mod playback_daemon;
+pub mod single_instance;
 
+use app_settings::AppSettingsState;
 use commands::{LibraryState, MediaBridgeState, PlayerState};
+use dto::CloseAction;
 use audio::player::AudioPlayer;
 use tauri::Manager;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _instance = single_instance::try_acquire(single_instance::InstanceMode::Gui)
+        .unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        });
+
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .with(tracing_subscriber::fmt::layer())
@@ -28,6 +41,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(player_state)
         .setup(|app| {
+            let settings = app_settings::AppSettings::load(app.handle());
+            app.manage(AppSettingsState(std::sync::Mutex::new(settings)));
+
             let library = library::Library::new(app.handle())?;
             app.manage(LibraryState(std::sync::Mutex::new(library)));
 
@@ -40,7 +56,25 @@ pub fn run() {
                 }
             }
 
+            if let Err(e) = gui_tray::setup(app) {
+                tracing::warn!("System tray unavailable: {e}");
+            }
+
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                let action = app
+                    .try_state::<AppSettingsState>()
+                    .and_then(|state| state.0.lock().ok().map(|s| s.close_action))
+                    .unwrap_or(CloseAction::Quit);
+
+                if action == CloseAction::HideWindow {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::play_track,
@@ -104,6 +138,9 @@ pub fn run() {
             commands::set_eq_enabled,
             commands::export_eq_settings,
             commands::import_eq_settings,
+            commands::get_close_action,
+            commands::set_close_action,
+            commands::toggle_close_action,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

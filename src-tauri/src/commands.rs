@@ -1,10 +1,11 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::app_settings::{AppSettings, AppSettingsState};
 use crate::audio::player::AudioPlayer;
 use crate::dto::{
-    AlbumSummaryDto, ArtistSummaryDto, EqSettingsDto, ImportResultDto, PlaybackModeDto,
-    PlaybackStateDto, QueueDto, QueueStateDto,
+    AlbumSummaryDto, ArtistSummaryDto, CloseAction, EqSettingsDto, ImportResultDto,
+    PlaybackModeDto, PlaybackStateDto, QueueDto, QueueStateDto,
 };
 use crate::library::{Library, PlaylistInfo};
 use crate::media_controls::{MediaBridge, TrackMetadata};
@@ -1023,4 +1024,45 @@ pub async fn update_media_position(
 ) -> Result<(), String> {
     with_bridge(&bridge, |b| b.update_position(position_seconds, is_playing));
     Ok(())
+}
+
+// ── Window / app settings ─────────────────────────────────────────────────────
+
+fn lock_settings<'a>(
+    state: &'a tauri::State<'a, AppSettingsState>,
+) -> Result<std::sync::MutexGuard<'a, AppSettings>, String> {
+    state.0.lock().map_err(lock_poisoned)
+}
+
+/// Return what the window close button currently does.
+#[tauri::command]
+pub fn get_close_action(
+    state: tauri::State<'_, AppSettingsState>,
+) -> Result<CloseAction, String> {
+    Ok(lock_settings(&state)?.close_action)
+}
+
+/// Set what the window close button does.
+#[tauri::command]
+pub fn set_close_action(
+    action: CloseAction,
+    state: tauri::State<'_, AppSettingsState>,
+    app: tauri::AppHandle,
+) -> Result<CloseAction, String> {
+    let mut settings = lock_settings(&state)?;
+    settings.close_action = action;
+    settings.save(&app)?;
+    Ok(settings.close_action)
+}
+
+/// Toggle the window close button between quitting and hiding the window.
+#[tauri::command]
+pub fn toggle_close_action(
+    state: tauri::State<'_, AppSettingsState>,
+    app: tauri::AppHandle,
+) -> Result<CloseAction, String> {
+    let mut settings = lock_settings(&state)?;
+    settings.toggle_close_action();
+    settings.save(&app)?;
+    Ok(settings.close_action)
 }

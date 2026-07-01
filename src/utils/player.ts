@@ -545,3 +545,15 @@ export const listenToMediaControls = async (
     unlisteners.forEach((u) => u && u());
   };
 };
+
+/** What the window close button does. */
+export type CloseAction = "quit" | "hide_window";
+
+export const getCloseAction = (): Promise<CloseAction> =>
+  safeInvoke<CloseAction>("get_close_action");
+
+export const setCloseAction = (action: CloseAction): Promise<CloseAction> =>
+  safeInvoke<CloseAction>("set_close_action", { action });
+
+export const toggleCloseAction = (): Promise<CloseAction> =>
+  safeInvoke<CloseAction>("toggle_close_action");

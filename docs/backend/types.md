@@ -211,6 +211,23 @@ interface EqSettings {
 
 ---
 
+## `CloseAction`
+
+Returned by `get_close_action`, `set_close_action`, and `toggle_close_action`.
+
+```typescript
+type CloseAction = "quit" | "hide_window";
+```
+
+| Value | Close-button behavior |
+|-------|------------------------|
+| `"quit"` | Exit the application (default) |
+| `"hide_window"` | Hide the main window; playback and the tray icon keep running |
+
+The preference is persisted to `wave-settings.json` in the app data directory and survives restarts.
+
+---
+
 ## Copy-paste module
 
 You can import types from the existing frontend wrapper:
@@ -225,6 +242,7 @@ import type {
   AlbumSummary,
   ArtistSummary,
   MediaMetadata,
+  CloseAction,
 } from "../utils/player";
 ```
 
