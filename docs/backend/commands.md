@@ -547,6 +547,142 @@ When enabled, rebuilds a shuffle order with the current track kept first.
 
 ---
 
+## Equalizer
+
+### `get_eq_settings`
+
+Read the current equalizer configuration.
+
+**Arguments:** none
+
+**Returns:** [`EqSettings`](./types.md#eqsettings)
+
+```typescript
+const eq = await invoke<EqSettings>("get_eq_settings");
+// eq.bands    → [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+// eq.enabled  → false
+```
+
+---
+
+### `set_eq_bands`
+
+Set gain for each of the 10 ISO frequency bands (31 Hz – 16 kHz). The EQ
+chain must be enabled via `set_eq_enabled` for changes to be audible.
+
+Gains are in **decibels (dB)** — positive values boost, negative values cut.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `bands` | `number[]` | yes | 10 floating-point gains in dB, one per band |
+
+**Returns:** `void`
+
+**Errors:** `"Expected exactly 10 EQ band values"`.
+
+```typescript
+await invoke("set_eq_bands", {
+  bands: [2, 2, 0, -1, -1, 0, 1, 2, 2, 1],  // bass + treble smile
+});
+```
+
+**ISO band – index mapping**
+
+| Index | Frequency |
+|-------|-----------|
+| 0 | 31 Hz |
+| 1 | 62 Hz |
+| 2 | 125 Hz |
+| 3 | 250 Hz |
+| 4 | 500 Hz |
+| 5 | 1 kHz |
+| 6 | 2 kHz |
+| 7 | 4 kHz |
+| 8 | 8 kHz |
+| 9 | 16 kHz |
+
+---
+
+### `set_eq_enabled`
+
+Enable or disable the entire equalizer chain. When disabled, audio passes
+through unprocessed (zero additional CPU cost).
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `enabled` | `boolean` | yes | `true` to apply EQ, `false` to bypass |
+
+**Returns:** `void`
+
+```typescript
+await invoke("set_eq_enabled", { enabled: true });
+```
+
+---
+
+### `export_eq_settings`
+
+Export the current equalizer configuration to a JSON file on disk. The file
+includes the band gains, enabled state, and frequency labels for reference.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Output file path (e.g. `"/path/to/my-eq.json"`) |
+| `name` | `string` \| `null` | no | Optional user-facing name stored in the file |
+
+**Returns:** `void`
+
+**Errors:** file write failures, JSON serialization errors.
+
+```typescript
+await invoke("export_eq_settings", {
+  path: "bass-boost.json",
+  name: "My Bass Boost",
+});
+```
+
+**Exported JSON format:**
+
+```json
+{
+  "name": "My Bass Boost",
+  "enabled": true,
+  "bands": [4.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+  "frequencies": [31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0]
+}
+```
+
+---
+
+### `import_eq_settings`
+
+Load an EQ preset from a JSON file and apply it immediately. The file must
+match the format produced by `export_eq_settings`.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Path to a `.json` EQ preset file |
+
+**Returns:** `void`
+
+**Errors:** file read errors, JSON parse errors, invalid band data.
+
+```typescript
+await invoke("import_eq_settings", {
+  path: "bass-boost.json",
+});
+```
+
+---
+
 ## OS media controls
 
 ### `update_media_metadata`

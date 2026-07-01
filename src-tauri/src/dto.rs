@@ -68,3 +68,12 @@ pub struct ArtistSummaryDto {
     pub track_count: i64,
     pub album_count: i64,
 }
+
+/// Equalizer settings returned by `get_eq_settings`.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct EqSettingsDto {
+    /// Gain in dB for each of the 10 ISO bands.
+    pub bands: [f32; 10],
+    /// Whether the EQ is currently applied.
+    pub enabled: bool,
+}
