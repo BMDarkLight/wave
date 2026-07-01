@@ -125,6 +125,8 @@ artists](./commands.md#albums--artists).
 | `get_eq_settings` | Read current EQ band gains and enabled state |
 | `set_eq_bands` | Set 10-band EQ gains (dB) |
 | `set_eq_enabled` | Enable/disable the EQ chain |
+| `export_eq_settings` | Export EQ config to a JSON file |
+| `import_eq_settings` | Import and apply EQ from a JSON file |
 
 ### OS integration
 

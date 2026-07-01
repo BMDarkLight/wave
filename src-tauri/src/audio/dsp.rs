@@ -22,7 +22,45 @@ pub const EQ_PRESETS: &[(&str, &str, [f32; 10])] = &[
     ("headphones", "Headphones (subtle crossfeed)", [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 0.0]),
 ];
 
-#[derive(Debug, Clone)]
+/// Serializable EQ preset file format.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EqPresetFile {
+    /// Optional user-facing name for the preset.
+    pub name: Option<String>,
+    pub enabled: bool,
+    /// 10 gain values in dB.
+    pub bands: [f32; 10],
+    /// The frequency labels for reference.
+    pub frequencies: [f32; 10],
+}
+
+impl EqPresetFile {
+    pub fn from_config(config: &EqConfig, name: Option<String>) -> Self {
+        Self {
+            name,
+            enabled: config.enabled,
+            bands: config.bands,
+            frequencies: EQ_BANDS_HZ,
+        }
+    }
+
+    pub fn save_to(path: &str, config: &EqConfig, name: Option<String>) -> Result<(), String> {
+        let pf = Self::from_config(config, name);
+        let json = serde_json::to_string_pretty(&pf).map_err(|e| e.to_string())?;
+        std::fs::write(path, json).map_err(|e| e.to_string())
+    }
+
+    pub fn load_from(path: &str) -> Result<EqConfig, String> {
+        let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        let pf: Self = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        Ok(EqConfig {
+            bands: pf.bands,
+            enabled: pf.enabled,
+        })
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EqConfig {
     /// Gain per band in dB.
     pub bands: [f32; 10],

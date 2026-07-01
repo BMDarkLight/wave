@@ -624,6 +624,65 @@ await invoke("set_eq_enabled", { enabled: true });
 
 ---
 
+### `export_eq_settings`
+
+Export the current equalizer configuration to a JSON file on disk. The file
+includes the band gains, enabled state, and frequency labels for reference.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Output file path (e.g. `"/path/to/my-eq.json"`) |
+| `name` | `string` \| `null` | no | Optional user-facing name stored in the file |
+
+**Returns:** `void`
+
+**Errors:** file write failures, JSON serialization errors.
+
+```typescript
+await invoke("export_eq_settings", {
+  path: "bass-boost.json",
+  name: "My Bass Boost",
+});
+```
+
+**Exported JSON format:**
+
+```json
+{
+  "name": "My Bass Boost",
+  "enabled": true,
+  "bands": [4.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+  "frequencies": [31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0]
+}
+```
+
+---
+
+### `import_eq_settings`
+
+Load an EQ preset from a JSON file and apply it immediately. The file must
+match the format produced by `export_eq_settings`.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Path to a `.json` EQ preset file |
+
+**Returns:** `void`
+
+**Errors:** file read errors, JSON parse errors, invalid band data.
+
+```typescript
+await invoke("import_eq_settings", {
+  path: "bass-boost.json",
+});
+```
+
+---
+
 ## OS media controls
 
 ### `update_media_metadata`

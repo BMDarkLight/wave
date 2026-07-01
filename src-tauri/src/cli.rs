@@ -226,6 +226,19 @@ pub enum DspCmd {
     },
     /// List available EQ presets
     Presets,
+    /// Export current EQ settings to a JSON file
+    Export {
+        /// Output file path (e.g. my-eq.json)
+        output: String,
+        /// Optional name for the preset
+        #[arg(short, long)]
+        name: Option<String>,
+    },
+    /// Import EQ settings from a JSON file
+    Import {
+        /// Input file path (e.g. my-eq.json)
+        input: String,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -1417,6 +1430,32 @@ fn run_dsp(cmd: DspCmd) {
             for (name, desc) in EqConfig::list_presets() {
                 println!("  {name:16}  {desc}");
             }
+        }
+        DspCmd::Export { output, name } => {
+            let player = AudioPlayer::new().unwrap_or_else(|e| {
+                eprintln!("Failed to initialize audio player: {e}");
+                std::process::exit(1);
+            });
+            let eq = player.eq_settings();
+            crate::audio::dsp::EqPresetFile::save_to(&output, &eq, name).unwrap_or_else(|e| {
+                eprintln!("Failed to export EQ: {e}");
+                std::process::exit(1);
+            });
+            println!("EQ settings exported to {output}");
+        }
+        DspCmd::Import { input } => {
+            let eq = crate::audio::dsp::EqPresetFile::load_from(&input).unwrap_or_else(|e| {
+                eprintln!("Failed to import EQ: {e}");
+                std::process::exit(1);
+            });
+            let mut player = AudioPlayer::new().unwrap_or_else(|e| {
+                eprintln!("Failed to initialize audio player: {e}");
+                std::process::exit(1);
+            });
+            player.set_eq_bands(eq.bands);
+            player.set_eq_enabled(eq.enabled);
+            println!("EQ settings imported from {input} and applied.");
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
 }

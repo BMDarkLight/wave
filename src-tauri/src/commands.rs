@@ -284,6 +284,29 @@ pub async fn set_eq_enabled(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn export_eq_settings(
+    path: String,
+    name: Option<String>,
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
+    let player = lock_player(&state)?;
+    let eq = player.eq_settings();
+    crate::audio::dsp::EqPresetFile::save_to(&path, &eq, name)
+}
+
+#[tauri::command]
+pub async fn import_eq_settings(
+    path: String,
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
+    let eq = crate::audio::dsp::EqPresetFile::load_from(&path)?;
+    let mut player = lock_player(&state)?;
+    player.set_eq_bands(eq.bands);
+    player.set_eq_enabled(eq.enabled);
+    Ok(())
+}
+
 // ── Library / playlist commands ───────────────────────────────────────────────
 
 #[tauri::command]

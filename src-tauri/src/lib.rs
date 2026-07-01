@@ -102,6 +102,8 @@ pub fn run() {
             commands::get_eq_settings,
             commands::set_eq_bands,
             commands::set_eq_enabled,
+            commands::export_eq_settings,
+            commands::import_eq_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
