@@ -36,7 +36,7 @@ jobs:
       with:
         workspaces: ./src-tauri -> target
 
-    - name: Install Linux dependencies
+        - name: Install Linux dependencies
       if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
@@ -46,7 +46,10 @@ jobs:
           librsvg2-dev \
           libasound2-dev \
           patchelf \
-          xdg-utils
+          xdg-utils \
+          libxdo-dev \
+          libxdo3 \
+          xdotool
 
     - name: Install npm dependencies
       run: npm ci
