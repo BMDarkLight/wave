@@ -493,6 +493,11 @@ export const updateMediaPosition = (position_seconds: number, is_playing: boolea
   return safeInvoke("update_media_position", { position_seconds, is_playing });
 };
 
+/** Clear the OS media session when no track is loaded. */
+export const clearMediaSession = (): Promise<void> => {
+  return safeInvoke("clear_media_session");
+};
+
 /**
  * Listen for OS media control events (play, pause, next, previous, seek).
  * Returns an unlisten function — call it when your component unmounts.

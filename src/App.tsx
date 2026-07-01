@@ -67,6 +67,7 @@ import {
   setShuffle,
   stopTrack,
   toggleFavorite,
+  clearMediaSession,
   updateMediaMetadata,
   updateMediaPosition,
   listOutputDevices,
@@ -219,9 +220,11 @@ function App() {
     if (!document.body.classList.contains("is-seeking")) {
       setSeekValue(state.position_seconds ?? 0);
     }
-    // Keep the OS media controls position in sync during playback.
-    if (state.is_playing) {
-      updateMediaPosition(state.position_seconds, true).catch(console.error);
+    // Keep the OS media controls position in sync during playback and pause.
+    if (state.current_path) {
+      updateMediaPosition(state.position_seconds, state.is_playing).catch(console.error);
+    } else {
+      clearMediaSession().catch(console.error);
     }
   };
 
@@ -346,10 +349,9 @@ function App() {
   }, [playlistDialog]);
 
   // Push track metadata to OS media controls (Control Center, SMTC, MPRIS).
-  // Uses primitive dependencies only (path + play state) to avoid spurious
-  // re-fires when queue/playlist array references change during polling.
+  // Fires on track change regardless of play state so the flyout updates immediately.
   useEffect(() => {
-    if (currentTrack && playbackState.is_playing) {
+    if (currentTrack && playbackState.current_path) {
       updateMediaMetadata({
         title: currentTrack.title,
         artist: currentTrack.artist,
@@ -358,23 +360,70 @@ function App() {
         cover_url: currentTrack.cover_art_data_url,
       }).catch(console.error);
     }
-  }, [currentTrack?.path, playbackState.is_playing]);
+  }, [currentTrack?.path, playbackState.current_path]);
 
-  // Listen for OS media control events (play/pause/next/prev/seek from OS)
+  // Listen for OS media control events (play/pause/next/prev/seek from OS).
+  // Uses backend playback state directly — never opens the file picker.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
+
+    const osTogglePlayback = async () => {
+      const state = await getPlaybackState();
+      if (state.is_playing) {
+        await pauseTrack();
+      } else if (state.is_paused) {
+        await resumeTrack();
+      } else if (state.current_path) {
+        await playTrack(state.current_path);
+      } else {
+        const list = await listPlaylists();
+        const defaultId =
+          list.find((p) => p.name === "All Local Files")?.id ?? list[0]?.id ?? null;
+        if (defaultId) {
+          const tracks = await getPlaylistTracksById(defaultId);
+          if (tracks.length > 0) {
+            await playTrackFromSpecificPlaylist(defaultId, 0);
+          }
+        }
+      }
+      await updatePlaybackState();
+    };
+
     const setup = async () => {
       unlisten = await listenToMediaControls({
-        onPlay: () => {
-          handlePlayPause().catch(console.error);
+        onPlay: async () => {
+          const state = await getPlaybackState();
+          if (!state.is_playing) await osTogglePlayback();
         },
-        onPause: () => {
-          if (playbackState.is_playing) pauseTrack().catch(console.error);
+        onPause: async () => {
+          const state = await getPlaybackState();
+          if (state.is_playing) {
+            await pauseTrack();
+            await updatePlaybackState();
+          }
         },
-        onNext: () => handleNext(),
-        onPrevious: () => handlePrevious(),
-        onSetPosition: (seconds) => {
-          if (playbackState.current_path) seekTrack(seconds).catch(console.error);
+        onToggle: () => {
+          osTogglePlayback().catch(console.error);
+        },
+        onNext: async () => {
+          await playNext();
+          await updatePlaybackState();
+          await loadQueueTracks();
+        },
+        onPrevious: async () => {
+          await playPrevious();
+          await updatePlaybackState();
+          await loadQueueTracks();
+        },
+        onStop: () => {
+          handleStop().catch(console.error);
+        },
+        onSetPosition: async (seconds) => {
+          const state = await getPlaybackState();
+          if (state.current_path) {
+            await seekTrack(seconds);
+            await updatePlaybackState();
+          }
         },
       });
     };
@@ -382,7 +431,7 @@ function App() {
     return () => {
       if (unlisten) unlisten();
     };
-  }, [playbackState.is_playing, playbackState.current_path]);
+  }, []);
 
   const handleAddTrack = async (multiple = false) => {
     try {
