@@ -193,6 +193,24 @@ Use the same values you show in the in-app now-playing UI. For cover art, prefer
 
 ---
 
+## `EqSettings`
+
+Returned by `get_eq_settings`.
+
+```typescript
+interface EqSettings {
+  bands: number[];     // 10 gains in dB
+  enabled: boolean;
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `bands` | 10-element array of gains in dB, one per ISO band (31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000 Hz). Range typically –12 to +12 dB |
+| `enabled` | Whether the EQ chain is active. When `false` audio passes through unprocessed |
+
+---
+
 ## Copy-paste module
 
 You can import types from the existing frontend wrapper:

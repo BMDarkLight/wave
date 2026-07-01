@@ -99,6 +99,9 @@ pub fn run() {
             commands::import_playlist,
             commands::list_output_devices,
             commands::set_output_device,
+            commands::get_eq_settings,
+            commands::set_eq_bands,
+            commands::set_eq_enabled,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

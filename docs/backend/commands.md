@@ -547,6 +547,83 @@ When enabled, rebuilds a shuffle order with the current track kept first.
 
 ---
 
+## Equalizer
+
+### `get_eq_settings`
+
+Read the current equalizer configuration.
+
+**Arguments:** none
+
+**Returns:** [`EqSettings`](./types.md#eqsettings)
+
+```typescript
+const eq = await invoke<EqSettings>("get_eq_settings");
+// eq.bands    → [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+// eq.enabled  → false
+```
+
+---
+
+### `set_eq_bands`
+
+Set gain for each of the 10 ISO frequency bands (31 Hz – 16 kHz). The EQ
+chain must be enabled via `set_eq_enabled` for changes to be audible.
+
+Gains are in **decibels (dB)** — positive values boost, negative values cut.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `bands` | `number[]` | yes | 10 floating-point gains in dB, one per band |
+
+**Returns:** `void`
+
+**Errors:** `"Expected exactly 10 EQ band values"`.
+
+```typescript
+await invoke("set_eq_bands", {
+  bands: [2, 2, 0, -1, -1, 0, 1, 2, 2, 1],  // bass + treble smile
+});
+```
+
+**ISO band – index mapping**
+
+| Index | Frequency |
+|-------|-----------|
+| 0 | 31 Hz |
+| 1 | 62 Hz |
+| 2 | 125 Hz |
+| 3 | 250 Hz |
+| 4 | 500 Hz |
+| 5 | 1 kHz |
+| 6 | 2 kHz |
+| 7 | 4 kHz |
+| 8 | 8 kHz |
+| 9 | 16 kHz |
+
+---
+
+### `set_eq_enabled`
+
+Enable or disable the entire equalizer chain. When disabled, audio passes
+through unprocessed (zero additional CPU cost).
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `enabled` | `boolean` | yes | `true` to apply EQ, `false` to bypass |
+
+**Returns:** `void`
+
+```typescript
+await invoke("set_eq_enabled", { enabled: true });
+```
+
+---
+
 ## OS media controls
 
 ### `update_media_metadata`

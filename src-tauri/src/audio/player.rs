@@ -1,9 +1,12 @@
+use std::sync::{Arc, Mutex};
+
 use rodio::{OutputStream, OutputStreamHandle, Sink, Source};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::error::AudioError;
 
+use super::dsp::{EqConfig, Equalizer};
 use super::symphonia_source::SymphoniaSource;
 
 // ── Playback modes ────────────────────────────────────────────────────────────
@@ -328,6 +331,10 @@ pub struct AudioPlayer {
     volume: f32,
     pub queue: Queue,
     pub repeat: RepeatMode,
+    /// Shared equalizer configuration (may be referenced by a running
+    /// `Equalizer` source inside the current sink).
+    pub eq_config: Arc<Mutex<EqConfig>>,
+    pub(crate) eq_version: Arc<Mutex<u64>>,
 }
 
 impl AudioPlayer {
@@ -344,6 +351,8 @@ impl AudioPlayer {
             volume: 0.8,
             queue: Queue::default(),
             repeat: RepeatMode::default(),
+            eq_config: Arc::new(Mutex::new(EqConfig::default())),
+            eq_version: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -370,6 +379,8 @@ impl AudioPlayer {
             volume: 0.8,
             queue: Queue::default(),
             repeat: RepeatMode::default(),
+            eq_config: Arc::new(Mutex::new(EqConfig::default())),
+            eq_version: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -387,10 +398,14 @@ impl AudioPlayer {
 
     fn build_source(
         path: &str,
+        eq_config: Arc<Mutex<EqConfig>>,
+        eq_version: Arc<Mutex<u64>>,
     ) -> Result<(impl Source<Item = f32> + Send + 'static, Option<Duration>), AudioError> {
         let source = SymphoniaSource::new(path)?;
         let duration = source.total_duration();
-        Ok((source.convert_samples(), duration))
+        let converted = source.convert_samples();
+        let eq = Equalizer::new(converted, eq_config, eq_version);
+        Ok((eq, duration))
     }
 
     pub fn play(&mut self, path: &str) -> Result<(), AudioError> {
@@ -398,7 +413,8 @@ impl AudioPlayer {
             sink.stop();
         }
 
-        let (source, duration) = Self::build_source(path)?;
+        let (source, duration) =
+            Self::build_source(path, self.eq_config.clone(), self.eq_version.clone())?;
         let sink = Sink::try_new(&self.handle)
             .map_err(|error| AudioError::SinkCreation(error.to_string()))?;
         sink.set_volume(self.volume);
@@ -505,6 +521,24 @@ impl AudioPlayer {
 
     pub fn volume(&self) -> f32 {
         self.volume
+    }
+
+    // ── Equalizer ─────────────────────────────────────────────────────────────
+
+    pub fn eq_settings(&self) -> EqConfig {
+        self.eq_config.lock().unwrap().clone()
+    }
+
+    pub fn set_eq_bands(&mut self, bands: [f32; 10]) {
+        let mut cfg = self.eq_config.lock().unwrap();
+        cfg.bands = bands;
+        *self.eq_version.lock().unwrap() += 1;
+    }
+
+    pub fn set_eq_enabled(&mut self, enabled: bool) {
+        let mut cfg = self.eq_config.lock().unwrap();
+        cfg.enabled = enabled;
+        *self.eq_version.lock().unwrap() += 1;
     }
 
     /// Query the current default audio output device name (live, every call).
