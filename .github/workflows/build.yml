@@ -36,7 +36,7 @@ jobs:
       with:
         workspaces: ./src-tauri -> target
 
-        - name: Install Linux dependencies
+    - name: Install Linux dependencies
       if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
@@ -58,3 +58,10 @@ jobs:
       uses: tauri-apps/tauri-action@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: wave-${{ matrix.os }}
+        path: src-tauri/target/release/bundle/
+        if-no-files-found: error
