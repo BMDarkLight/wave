@@ -1,6 +1,17 @@
 use crate::audio::player::RepeatMode;
 use crate::metadata::Track;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+/// What happens when the user clicks the window close button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseAction {
+    /// Exit the application.
+    #[default]
+    Quit,
+    /// Hide the main window; playback and the tray icon keep running.
+    HideWindow,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlaybackStateDto {

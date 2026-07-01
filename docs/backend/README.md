@@ -134,6 +134,14 @@ artists](./commands.md#albums--artists).
 |---------|-------------|
 | `update_media_metadata` | Push now-playing info to system media UI |
 
+### Window / app settings
+
+| Command | Description |
+|---------|-------------|
+| `get_close_action` | Read close-button behavior (`quit` vs `hide_window`) |
+| `set_close_action` | Set close-button behavior |
+| `toggle_close_action` | Toggle close-button behavior and persist |
+
 ## Error handling
 
 Commands return `Promise<T>` on success. Failures reject with a **string** error message from the backend (for example `"No track is currently playing"` or `"Track is already in the playlist"`).

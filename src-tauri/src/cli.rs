@@ -5,6 +5,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use crate::audio::player::AudioPlayer;
 use crate::library::Library;
 use crate::metadata::{extract_track, Track};
+use crate::playback_daemon::{daemon_request, daemon_request_if_running, DaemonRequest, PlaybackStatus};
 
 // ── Top-level CLI ────────────────────────────────────────────────────────────
 
@@ -133,6 +134,8 @@ pub enum PlaybackCmd {
     },
     /// Show current playback status
     Status,
+    /// Shut down the background playback daemon
+    Shutdown,
 }
 
 #[derive(clap::Subcommand)]
@@ -268,54 +271,7 @@ pub enum MetadataCmd {
 
 /// Return the default database path for CLI mode.
 fn default_db_path() -> std::path::PathBuf {
-    if let Ok(path) = std::env::var("WAVE_DB_PATH") {
-        return std::path::PathBuf::from(path);
-    }
-    let base = dirs_data_dir();
-    base.join("wave-library.sqlite")
-}
-
-/// Try to find a data directory similar to what Tauri would use.
-fn dirs_data_dir() -> std::path::PathBuf {
-    // Use the same identifier as tauri.conf.json: app.bmdarklight.wave
-    if let Some(base) = dirs_data_root() {
-        base.join("app.bmdarklight.wave")
-    } else {
-        std::path::PathBuf::from(".")
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn dirs_data_root() -> Option<std::path::PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| std::path::PathBuf::from(h).join("Library/Application Support"))
-}
-
-#[cfg(target_os = "linux")]
-fn dirs_data_root() -> Option<std::path::PathBuf> {
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
-        })
-}
-
-#[cfg(target_os = "windows")]
-fn dirs_data_root() -> Option<std::path::PathBuf> {
-    std::env::var("APPDATA")
-        .ok()
-        .map(std::path::PathBuf::from)
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-fn dirs_data_root() -> Option<std::path::PathBuf> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| std::path::PathBuf::from(h).join(".local/share"))
+    crate::app_paths::library_db_path()
 }
 
 // ── Track resolution helpers ────────────────────────────────────────────────
@@ -393,6 +349,25 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 // ── Entry point ─────────────────────────────────────────────────────────────
+
+/// True when argv targets an existing playback daemon (ephemeral CLI client).
+pub fn is_daemon_ipc_client(args: &[String]) -> bool {
+    if !crate::playback_daemon::daemon_is_running() {
+        return false;
+    }
+
+    let cli = match Cli::try_parse_from(args) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    match cli.command {
+        Some(Commands::Playback(_)) => true,
+        Some(Commands::Queue(_)) => true,
+        Some(Commands::Devices(DevicesCmd::Volume { .. } | DevicesCmd::Switch { .. })) => true,
+        _ => false,
+    }
+}
 
 pub fn run() {
     // Handle --cli/--headless flags: show CLI help then exit
@@ -698,389 +673,171 @@ fn cmd_playlists_query(query: String) {
 fn run_playback(cmd: PlaybackCmd) {
     match cmd {
         PlaybackCmd::Start { id } => cmd_playback_start(id),
-        PlaybackCmd::Pause => cmd_simple("pause", |player| player.pause().map_err(|e| e.to_string())),
-        PlaybackCmd::Resume => cmd_simple("resume", |player| player.resume().map_err(|e| e.to_string())),
-        PlaybackCmd::Stop => cmd_simple("stop", |player| player.stop().map_err(|e| e.to_string())),
-        PlaybackCmd::Next => cmd_playback_next(),
-        PlaybackCmd::Previous => cmd_playback_prev(),
-        PlaybackCmd::Seek { seconds } => cmd_simple("seek", |player| player.seek(seconds).map_err(|e| e.to_string())),
+        PlaybackCmd::Pause => daemon_cmd(DaemonRequest::Pause),
+        PlaybackCmd::Resume => daemon_cmd(DaemonRequest::Resume),
+        PlaybackCmd::Stop => daemon_cmd(DaemonRequest::Stop),
+        PlaybackCmd::Next => daemon_cmd(DaemonRequest::Next),
+        PlaybackCmd::Previous => daemon_cmd(DaemonRequest::Previous),
+        PlaybackCmd::Seek { seconds } => daemon_cmd(DaemonRequest::Seek { seconds }),
         PlaybackCmd::Status => cmd_playback_status(),
+        PlaybackCmd::Shutdown => cmd_playback_shutdown(),
     }
 }
 
-fn cmd_simple<F>(name: &str, f: F)
-where
-    F: FnOnce(&mut AudioPlayer) -> Result<(), String>,
-{
-    let mut player = AudioPlayer::new().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize audio player: {e}");
-        std::process::exit(1);
-    });
-    f(&mut player).unwrap_or_else(|e| {
-        eprintln!("Failed to {name}: {e}");
-        std::process::exit(1);
-    });
-    // Keep the player alive briefly so the command takes effect.
-    std::thread::sleep(std::time::Duration::from_millis(200));
+fn daemon_cmd(request: DaemonRequest) {
+    match daemon_request_if_running(request) {
+        Ok(Some(resp)) if resp.ok => {
+            if let Some(msg) = resp.message {
+                println!("{msg}");
+            }
+        }
+        Ok(Some(resp)) => {
+            eprintln!("{}", resp.error.unwrap_or_else(|| "Unknown error".to_string()));
+            std::process::exit(1);
+        }
+        Ok(None) => {
+            eprintln!("Playback daemon is not running. Use `wave playback start` first.");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn cmd_playback_start(id: String) {
-    let library = open_library();
-
-    let mut player = AudioPlayer::new().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize audio player: {e}");
-        std::process::exit(1);
-    });
-
-    // Check if the argument is a playlist ID (UUID) or a track path
-    let is_playlist = uuid::Uuid::parse_str(&id).is_ok()
-        && library.get_playlist_info(&id).ok().flatten().is_some();
-
-    if is_playlist {
-        match library.get_playlist_tracks(&id) {
-            Ok(tracks) if tracks.is_empty() => {
-                eprintln!("Playlist is empty.");
-                std::process::exit(1);
+    match daemon_request(DaemonRequest::Start { id }) {
+        Ok(resp) if resp.ok => {
+            if let Some(msg) = resp.message {
+                println!("{msg}");
             }
-            Ok(tracks) => {
-                let paths: Vec<String> = tracks.iter().map(|t| t.path.clone()).collect();
-                player.queue.set_tracks(paths);
-                if player.queue.jump(0).is_none() {
-                    eprintln!("Failed to set queue.");
-                    std::process::exit(1);
-                }
-                let first_path = tracks[0].path.clone();
-                player.play(&first_path).unwrap_or_else(|e| {
-                    eprintln!("Failed to play: {e}");
-                    std::process::exit(1);
-                });
-                println!("Playing playlist \"{}\" — {} track(s), starting with:",
-                    tracks[0].album, tracks.len());
-                println!("  {} — {} ({})", tracks[0].artist, tracks[0].title, format_duration(tracks[0].duration_seconds.unwrap_or(0.0) as u64));
-            }
-            Err(e) => {
-                eprintln!("Error loading playlist: {e}");
-                std::process::exit(1);
-            }
+            println!("Playback running in background. Use `wave playback` subcommands to control.");
         }
-    } else {
-        let path = resolve_track_path(&library, &id).unwrap_or_else(|e| {
+        Ok(resp) => {
+            eprintln!("{}", resp.error.unwrap_or_else(|| "Failed to start playback".to_string()));
+            std::process::exit(1);
+        }
+        Err(e) => {
             eprintln!("{e}");
             std::process::exit(1);
-        });
-        player.enqueue(&path);
-        player.queue.jump(0);
-        player.play(&path).unwrap_or_else(|e| {
-            eprintln!("Failed to play: {e}");
+        }
+    }
+}
+
+fn cmd_playback_shutdown() {
+    match daemon_request_if_running(DaemonRequest::Shutdown) {
+        Ok(Some(resp)) if resp.ok => {
+            if let Some(msg) = resp.message {
+                println!("{msg}");
+            }
+        }
+        Ok(Some(resp)) => {
+            eprintln!("{}", resp.error.unwrap_or_else(|| "Failed to shut down daemon".to_string()));
             std::process::exit(1);
-        });
-        // Look up metadata for display
-        let track = library.get_tracks_by_paths(&[path.clone()]).ok()
-            .and_then(|v| v.into_iter().next().flatten())
-            .or_else(|| extract_track(&path).ok());
-        if let Some(t) = &track {
-            println!("Now playing: {} — {} ({})",
-                t.artist, t.title, format_duration(t.duration_seconds.unwrap_or(0.0) as u64));
-        } else {
-            println!("Now playing: {}", path);
+        }
+        Ok(None) => println!("Playback daemon is not running."),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
         }
     }
-
-    // Interactive playback loop with stdin reader thread
-    println!();
-    println!("Controls: [p]ause [r]esume [s]top [n]ext [v]previous");
-    println!("         [q]uit  [f]orward  [b]ackward  [?]status");
-    println!("         [e] EQ show  [E] EQ toggle");
-    println!();
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        use std::io::Read;
-        let mut single = [0u8; 1];
-        loop {
-            if std::io::stdin().read_exact(&mut single).is_ok() {
-                if tx.send(single[0]).is_err() {
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
-    });
-
-    loop {
-        if !player.is_playing() && !player.is_paused() {
-            // Try to play next track automatically
-            match player.play_next() {
-                Ok(Some(path)) => {
-                    let track = library.get_tracks_by_paths(&[path.clone()]).ok()
-                        .and_then(|v| v.into_iter().next().flatten())
-                        .or_else(|| extract_track(&path).ok());
-                    if let Some(t) = &track {
-                        println!("\rNow playing: {} — {} ({})",
-                            t.artist, t.title, format_duration(t.duration_seconds.unwrap_or(0.0) as u64));
-                    }
-                }
-                Ok(None) => {
-                    println!("\rPlayback complete.");
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("\rPlayback error: {e}");
-                    break;
-                }
-            }
-            if !player.is_playing() && !player.is_paused() {
-                break;
-            }
-        }
-
-        // Print position
-        let pos = player.position_seconds();
-        let dur = player.duration_seconds().unwrap_or(0.0);
-        if player.is_playing() {
-            print!("\r  Playing: {} / {}   ", format_duration(pos as u64), format_duration(dur as u64));
-        } else if player.is_paused() {
-            print!("\r  Paused:  {} / {}   ", format_duration(pos as u64), format_duration(dur as u64));
-        }
-
-        let mut buf = 0u8;
-        match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-            Ok(c) => buf = c,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-        }
-
-        match buf {
-            b'p' => {
-                player.pause().ok();
-                println!("\r  Paused.                          ");
-            }
-            b'r' => {
-                player.resume().ok();
-                println!("\r  Resumed.                          ");
-            }
-            b's' => {
-                player.stop().ok();
-                println!("\r  Stopped.                          ");
-                break;
-            }
-            b'n' => {
-                match player.play_next() {
-                    Ok(Some(path)) => {
-                        let track = library.get_tracks_by_paths(&[path.clone()]).ok()
-                            .and_then(|v| v.into_iter().next().flatten())
-                            .or_else(|| extract_track(&path).ok());
-                        if let Some(t) = &track {
-                            println!("\r  Now playing: {} — {} ({})",
-                                t.artist, t.title, format_duration(t.duration_seconds.unwrap_or(0.0) as u64));
-                        }
-                    }
-                    Ok(None) => {
-                        println!("\r  End of queue.                    ");
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("\r  Error: {e}");
-                    }
-                }
-            }
-            b'v' => {
-                match player.play_previous() {
-                    Ok(Some(path)) => {
-                        let track = library.get_tracks_by_paths(&[path.clone()]).ok()
-                            .and_then(|v| v.into_iter().next().flatten())
-                            .or_else(|| extract_track(&path).ok());
-                        if let Some(t) = &track {
-                            println!("\r  Now playing: {} — {} ({})",
-                                t.artist, t.title, format_duration(t.duration_seconds.unwrap_or(0.0) as u64));
-                        }
-                    }
-                    Ok(None) => {
-                        println!("\r  Start of queue.                  ");
-                    }
-                    Err(e) => {
-                        eprintln!("\r  Error: {e}");
-                    }
-                }
-            }
-            b'f' => {
-                let new_pos = (pos + 10.0).min(dur);
-                player.seek(new_pos).ok();
-                println!("\r  Seeking forward...                ");
-            }
-            b'b' => {
-                let new_pos = (pos - 10.0).max(0.0);
-                player.seek(new_pos).ok();
-                println!("\r  Seeking backward...               ");
-            }
-            b'q' => {
-                player.stop().ok();
-                println!("\r  Quit.");
-                break;
-            }
-            b'e' => {
-                let eq = player.eq_settings();
-                println!("\r  EQ: {}  bands: {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} dB",
-                    if eq.enabled { "ON " } else { "OFF" },
-                    eq.bands[0], eq.bands[1], eq.bands[2], eq.bands[3], eq.bands[4],
-                    eq.bands[5], eq.bands[6], eq.bands[7], eq.bands[8], eq.bands[9],
-                );
-            }
-            b'E' => {
-                let was = player.eq_settings().enabled;
-                player.set_eq_enabled(!was);
-                println!("\r  EQ toggled: {} -> {}",
-                    if was { "ON" } else { "OFF" },
-                    if !was { "ON" } else { "OFF" },
-                );
-            }
-            b'?' => {
-                print!("\r");
-                cmd_playback_status_inner(&player);
-            }
-            _ => {}
-        }
-    }
-}
-
-fn cmd_playback_next() {
-    let mut player = AudioPlayer::new().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize audio player: {e}");
-        std::process::exit(1);
-    });
-    match player.play_next() {
-        Ok(Some(path)) => println!("Playing: {path}"),
-        Ok(None) => println!("End of queue."),
-        Err(e) => eprintln!("Failed to play next: {e}"),
-    }
-    std::thread::sleep(std::time::Duration::from_millis(200));
-}
-
-fn cmd_playback_prev() {
-    let mut player = AudioPlayer::new().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize audio player: {e}");
-        std::process::exit(1);
-    });
-    match player.play_previous() {
-        Ok(Some(path)) => println!("Playing: {path}"),
-        Ok(None) => println!("Start of queue."),
-        Err(e) => eprintln!("Failed to play previous: {e}"),
-    }
-    std::thread::sleep(std::time::Duration::from_millis(200));
 }
 
 fn cmd_playback_status() {
-    let player = AudioPlayer::new().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize audio player: {e}");
-        std::process::exit(1);
-    });
-    cmd_playback_status_inner(&player);
+    match daemon_request_if_running(DaemonRequest::Status) {
+        Ok(Some(resp)) if resp.ok => {
+            if let Some(status) = resp.status {
+                print_playback_status(&status);
+            }
+        }
+        Ok(Some(resp)) => {
+            eprintln!("{}", resp.error.unwrap_or_else(|| "Daemon error".to_string()));
+            std::process::exit(1);
+        }
+        Ok(None) => println!("Playback daemon is not running."),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
 }
 
-fn cmd_playback_status_inner(player: &AudioPlayer) {
-    let state = if player.is_playing() {
-        "Playing"
-    } else if player.is_paused() {
-        "Paused"
-    } else {
-        "Stopped"
-    };
-    let pos = player.position_seconds();
-    let dur = player.duration_seconds().unwrap_or(0.0);
-    let vol = player.volume();
-    let device = AudioPlayer::current_output_name();
-    let repeat = &player.repeat;
-    let shuffled = player.queue.is_shuffled();
-    let current_idx = player.queue.current_index();
-    let total = player.queue.tracks().len();
-    let now_playing = player.get_current_path()
-        .and_then(|p| p.file_name())
-        .and_then(|n| n.to_str())
-        .unwrap_or("None");
-
-    println!("  State:      {state}");
-    println!("  File:       {now_playing}");
-    println!("  Position:   {} / {}", format_duration(pos as u64), format_duration(dur as u64));
-    println!("  Volume:     {:.0}%", vol * 100.0);
-    println!("  Device:     {device}");
-    println!("  Repeat:     {repeat:?}");
-    println!("  Shuffle:    {shuffled}");
-    println!("  Queue:      track {} of {}", current_idx.map_or(0, |i| i + 1), total);
+fn print_playback_status(status: &PlaybackStatus) {
+    println!("  State:      {}", status.state);
+    if let (Some(artist), Some(title)) = (&status.artist, &status.title) {
+        println!("  Track:      {artist} — {title}");
+    }
+    println!("  File:       {}", status.file);
+    println!(
+        "  Position:   {} / {}",
+        format_duration(status.position_seconds as u64),
+        format_duration(status.duration_seconds as u64)
+    );
+    println!("  Volume:     {:.0}%", status.volume * 100.0);
+    println!("  Device:     {}", status.device);
+    println!("  Repeat:     {}", status.repeat);
+    println!("  Shuffle:    {}", status.shuffle);
+    println!(
+        "  Queue:      track {} of {}",
+        status.queue_index, status.queue_total
+    );
 }
 
 // ── Queue commands ──────────────────────────────────────────────────────────
 
 fn run_queue(cmd: QueueCmd) {
-    let mut player = AudioPlayer::new().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize audio player: {e}");
-        std::process::exit(1);
-    });
     match cmd {
         QueueCmd::List => {
-            let tracks = player.queue.tracks().to_vec();
-            let current = player.queue.current_index();
-            if tracks.is_empty() {
-                println!("Queue is empty.");
-                return;
+            match daemon_request_if_running(DaemonRequest::QueueList) {
+                Ok(Some(resp)) if resp.ok => {
+                    let tracks = resp.queue.unwrap_or_default();
+                    let current = resp
+                        .status
+                        .and_then(|s| if s.queue_index > 0 { Some(s.queue_index - 1) } else { None });
+                    if tracks.is_empty() {
+                        println!("Queue is empty.");
+                        return;
+                    }
+                    println!("Queue ({} track(s)):", tracks.len());
+                    for (i, path) in tracks.iter().enumerate() {
+                        let marker = if Some(i) == current { ">" } else { " " };
+                        let name = Path::new(path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(path);
+                        println!("  {marker} {:4}. {name}", i);
+                    }
+                }
+                Ok(Some(resp)) => {
+                    eprintln!("{}", resp.error.unwrap_or_else(|| "Daemon error".to_string()));
+                    std::process::exit(1);
+                }
+                Ok(None) => println!("Playback daemon is not running."),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
             }
-            println!("Queue ({} track(s)):", tracks.len());
-            for (i, path) in tracks.iter().enumerate() {
-                let marker = if Some(i) == current { ">" } else { " " };
-                let name = Path::new(path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(path);
-                println!("  {marker} {:4}. {name}", i);
-            }
         }
-        QueueCmd::Add { track_id } => {
-            player.enqueue(&track_id);
-            println!("Added to queue: {track_id}");
-        }
-        QueueCmd::Remove { index } => {
-            match player.remove_from_queue(index) {
-                Some(path) => println!("Removed from queue: {path}"),
-                None => eprintln!("Invalid queue index: {index}"),
-            }
-        }
-        QueueCmd::Next { track_id } => {
-            player.insert_next(&track_id);
-            println!("Will play next: {track_id}");
-        }
+        QueueCmd::Add { track_id } => daemon_cmd(DaemonRequest::QueueAdd { track_id }),
+        QueueCmd::Remove { index } => daemon_cmd(DaemonRequest::QueueRemove { index }),
+        QueueCmd::Next { track_id } => daemon_cmd(DaemonRequest::QueueInsertNext { track_id }),
         QueueCmd::Shuffle { state } => {
             let enable = match state.as_deref() {
-                Some("on") => true,
-                Some("off") => false,
-                None => !player.queue.is_shuffled(),
+                Some("on") => Some(true),
+                Some("off") => Some(false),
+                None => None,
                 Some(other) => {
                     eprintln!("Invalid shuffle value: {other} (use on, off, or omit to toggle)");
                     std::process::exit(1);
                 }
             };
-            player.queue.set_shuffle(enable);
-            println!("Shuffle: {}", if enable { "ON" } else { "OFF" });
+            daemon_cmd(DaemonRequest::QueueShuffle { enable });
         }
-        QueueCmd::Repeat { mode } => {
-            use crate::audio::player::RepeatMode;
-            let repeat = match mode.as_str() {
-                "off" => RepeatMode::Off,
-                "one" => RepeatMode::One,
-                "all" => RepeatMode::All,
-                _ => {
-                    eprintln!("Invalid repeat mode: {mode} (use off, one, or all)");
-                    std::process::exit(1);
-                }
-            };
-            player.repeat = repeat;
-            println!("Repeat: {mode}");
-        }
-        QueueCmd::Clear => {
-            player.clear_upcoming();
-            println!("Queue cleared (current track kept).");
-        }
+        QueueCmd::Repeat { mode } => daemon_cmd(DaemonRequest::QueueRepeat { mode }),
+        QueueCmd::Clear => daemon_cmd(DaemonRequest::QueueClear),
     }
-    std::thread::sleep(std::time::Duration::from_millis(200));
 }
 
 // ── Devices commands ────────────────────────────────────────────────────────
@@ -1109,26 +866,11 @@ fn cmd_devices_list() {
 }
 
 fn cmd_devices_switch(name: String) {
-    let player = AudioPlayer::new_with_device(&name).unwrap_or_else(|e| {
-        eprintln!("Failed to switch device: {e}");
-        std::process::exit(1);
-    });
-    // No need to keep alive for device listing
-    drop(player);
-    println!("Switched to output device: {name}");
+    daemon_cmd(DaemonRequest::SetDevice { name });
 }
 
 fn cmd_devices_volume(level: f32) {
-    let mut player = AudioPlayer::new().unwrap_or_else(|e| {
-        eprintln!("Failed to initialize audio player: {e}");
-        std::process::exit(1);
-    });
-    player.set_volume(level).unwrap_or_else(|e| {
-        eprintln!("Failed to set volume: {e}");
-        std::process::exit(1);
-    });
-    println!("Volume set to {:.0}%", level * 100.0);
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    daemon_cmd(DaemonRequest::Volume { level });
 }
 
 // ── Favorite commands ───────────────────────────────────────────────────────

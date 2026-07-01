@@ -716,3 +716,62 @@ await invoke("update_media_metadata", {
 If OS media controls failed to initialize at startup, this command succeeds silently (no-op).
 
 See also [Events](./events.md) for inbound OS button presses.
+
+---
+
+## Window / app settings
+
+### `get_close_action`
+
+Return what the main window **close button** (title-bar ✕) does.
+
+**Arguments:** none
+
+**Returns:** [`CloseAction`](./types.md#closeaction) — `"quit"` or `"hide_window"`
+
+**Example**
+
+```typescript
+const action = await invoke<CloseAction>("get_close_action");
+// "quit" | "hide_window"
+```
+
+---
+
+### `set_close_action`
+
+Set the close-button behavior explicitly.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `action` | [`CloseAction`](./types.md#closeaction) | yes | `"quit"` or `"hide_window"` |
+
+**Returns:** [`CloseAction`](./types.md#closeaction) — the value that was saved
+
+**Example**
+
+```typescript
+await invoke("set_close_action", { action: "hide_window" });
+```
+
+When set to `"hide_window"`, clicking close hides the window to the system tray; playback continues and the app can be reopened from the tray icon or taskbar. When set to `"quit"`, close exits Wave completely.
+
+---
+
+### `toggle_close_action`
+
+Switch between `"quit"` and `"hide_window"` and persist the new preference.
+
+**Arguments:** none
+
+**Returns:** [`CloseAction`](./types.md#closeaction) — the new value after toggling
+
+**Example**
+
+```typescript
+const action = await invoke<CloseAction>("toggle_close_action");
+```
+
+Use this from a settings toggle in the UI; call `get_close_action` on startup to initialize the control.
