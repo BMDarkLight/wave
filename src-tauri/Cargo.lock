@@ -28,6 +28,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "walkdir",
+ "windows 0.44.0",
 ]
 
 [[package]]

@@ -1,10 +1,6 @@
-use souvlaki::{
-    MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
-};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
-
-// ── Public metadata struct (mirrors what the frontend sends) ─────────────────
+use tauri::AppHandle;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TrackMetadata {
@@ -15,148 +11,387 @@ pub struct TrackMetadata {
     pub cover_url: Option<String>,
 }
 
-// ── MediaBridge ───────────────────────────────────────────────────────────────
+#[cfg(target_os = "windows")]
+mod cover_art {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use std::path::PathBuf;
 
-/// Owns the `souvlaki::MediaControls` instance and keeps it in sync with the
-/// player state.  Created once during app setup and stored as Tauri state.
-pub struct MediaBridge {
-    controls: MediaControls,
+    pub struct Cache {
+        path: Option<PathBuf>,
+    }
+
+    impl Cache {
+        pub fn new() -> Self {
+            Self { path: None }
+        }
+
+        pub fn resolve_path(&mut self, cover_url: Option<&str>) -> Option<PathBuf> {
+            let url = cover_url?;
+            if url.starts_with("data:") {
+                let (header, data) = url.split_once(',')?;
+                let mime = header.strip_prefix("data:")?.split(';').next()?;
+                let ext = match mime {
+                    "image/jpeg" | "image/jpg" => "jpg",
+                    "image/png" => "png",
+                    "image/gif" => "gif",
+                    "image/webp" => "webp",
+                    "image/bmp" => "bmp",
+                    _ => return None,
+                };
+                let bytes = STANDARD.decode(data).ok()?;
+                let path = std::env::temp_dir().join(format!("wave-cover.{ext}"));
+                std::fs::write(&path, bytes).ok()?;
+                self.path = Some(path.clone());
+                return Some(path);
+            }
+            if let Some(path) = url.strip_prefix("file://") {
+                return Some(PathBuf::from(path));
+            }
+            if std::path::Path::new(url).exists() {
+                return Some(PathBuf::from(url));
+            }
+            None
+        }
+    }
 }
 
-// souvlaki's MediaControls is not Send on macOS (ObjC pointers), but we always
-// access it through a Mutex, so this is safe.
+#[cfg(not(target_os = "windows"))]
+mod cover_art {
+    pub struct Cache;
+
+    impl Cache {
+        pub fn new() -> Self {
+            Self
+        }
+
+        pub fn resolve_url(&mut self, cover_url: Option<&str>) -> Option<String> {
+            cover_url.map(str::to_string)
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct MediaBridge {
+    backend: crate::os_media::WindowsMedia,
+    cover_art_cache: cover_art::Cache,
+}
+
+#[cfg(not(target_os = "windows"))]
+struct MediaBridge {
+    controls: souvlaki::MediaControls,
+    cover_art_cache: cover_art::Cache,
+}
+
 unsafe impl Send for MediaBridge {}
 
 impl MediaBridge {
-    /// Create the bridge and attach OS event → Tauri event forwarding.
-    pub fn new(app: &AppHandle) -> Result<Self, String> {
+    fn new(app: &AppHandle) -> Result<Self, String> {
         #[cfg(target_os = "windows")]
-        let hwnd = {
-            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            use tauri::Manager;
-            let window = app
-                .get_webview_window("main")
-                .ok_or("Main window not found")?;
-            match window
-                .window_handle()
-                .map_err(|e| format!("Failed to get window handle: {e}"))?
-                .as_raw()
-            {
-                RawWindowHandle::Win32(h) => Some(h.hwnd.get() as *mut std::ffi::c_void),
-                _ => None,
-            }
-        };
+        {
+            Ok(Self {
+                backend: crate::os_media::WindowsMedia::new(app)?,
+                cover_art_cache: cover_art::Cache::new(),
+            })
+        }
 
         #[cfg(not(target_os = "windows"))]
-        let hwnd = None;
+        {
+            use souvlaki::{MediaControlEvent, MediaControls, PlatformConfig};
+            use tauri::Emitter;
 
-        let config = PlatformConfig {
-            dbus_name: "wave",
-            display_name: "Wave",
-            hwnd,
-        };
+            let config = PlatformConfig {
+                dbus_name: "wave",
+                display_name: "Wave",
+                hwnd: None,
+            };
 
-        let mut controls =
-            MediaControls::new(config).map_err(|e| format!("Failed to init media controls: {e:?}"))?;
+            let mut controls =
+                MediaControls::new(config).map_err(|e| format!("Failed to init media controls: {e:?}"))?;
 
-        // Forward OS media control events as Tauri events.
-        let app_handle = app.clone();
-        controls
-            .attach(move |event: MediaControlEvent| {
-                let event_name = match event {
-                    MediaControlEvent::Play => "media-control-play",
-                    MediaControlEvent::Pause => "media-control-pause",
-                    MediaControlEvent::Toggle => "media-control-toggle",
-                    MediaControlEvent::Next => "media-control-next",
-                    MediaControlEvent::Previous => "media-control-previous",
-                    MediaControlEvent::Stop => "media-control-stop",
-                    MediaControlEvent::Seek(dir) => {
-                        let payload = format!("{:?}", dir).to_lowercase();
-                        let _ = app_handle.emit("media-control-seek-relative", payload);
-                        return;
-                    }
-                    MediaControlEvent::SeekBy(dir, dur) => {
-                        use souvlaki::SeekDirection;
-                        let secs = match dir {
-                            SeekDirection::Forward => dur.as_secs_f64(),
-                            SeekDirection::Backward => -dur.as_secs_f64(),
-                        };
-                        let _ = app_handle.emit("media-control-seek-by", secs);
-                        return;
-                    }
-                    MediaControlEvent::SetPosition(pos) => {
-                        let _ = app_handle.emit(
-                            "media-control-set-position",
-                            pos.0.as_secs_f64(),
-                        );
-                        return;
-                    }
-                    MediaControlEvent::OpenUri(_)
-                    | MediaControlEvent::Raise
-                    | MediaControlEvent::Quit
-                    | MediaControlEvent::SetVolume(_) => return,
-                };
-                let _ = app_handle.emit(event_name, ());
+            let app_handle = app.clone();
+            controls
+                .attach(move |event: MediaControlEvent| {
+                    let event_name = match event {
+                        MediaControlEvent::Play => "media-control-play",
+                        MediaControlEvent::Pause => "media-control-pause",
+                        MediaControlEvent::Toggle => "media-control-toggle",
+                        MediaControlEvent::Next => "media-control-next",
+                        MediaControlEvent::Previous => "media-control-previous",
+                        MediaControlEvent::Stop => "media-control-stop",
+                        MediaControlEvent::Seek(dir) => {
+                            let payload = format!("{:?}", dir).to_lowercase();
+                            let _ = app_handle.emit("media-control-seek-relative", payload);
+                            return;
+                        }
+                        MediaControlEvent::SeekBy(dir, dur) => {
+                            use souvlaki::SeekDirection;
+                            let secs = match dir {
+                                SeekDirection::Forward => dur.as_secs_f64(),
+                                SeekDirection::Backward => -dur.as_secs_f64(),
+                            };
+                            let _ = app_handle.emit("media-control-seek-by", secs);
+                            return;
+                        }
+                        MediaControlEvent::SetPosition(pos) => {
+                            let _ = app_handle.emit(
+                                "media-control-set-position",
+                                pos.0.as_secs_f64(),
+                            );
+                            return;
+                        }
+                        MediaControlEvent::OpenUri(_)
+                        | MediaControlEvent::Raise
+                        | MediaControlEvent::Quit
+                        | MediaControlEvent::SetVolume(_) => return,
+                    };
+                    let _ = app_handle.emit(event_name, ());
+                })
+                .map_err(|e| format!("Failed to attach media controls handler: {e:?}"))?;
+
+            Ok(Self {
+                controls,
+                cover_art_cache: cover_art::Cache::new(),
             })
-            .map_err(|e| format!("Failed to attach media controls handler: {e:?}"))?;
-
-        Ok(Self { controls })
-    }
-
-    pub fn set_playback(&mut self, playback: MediaPlayback) {
-        if let Err(error) = self.controls.set_playback(playback) {
-            tracing::debug!("Failed to update OS media playback state: {error:?}");
         }
     }
 
-    fn set_playback_state(&mut self, position_secs: f64, playing: bool) {
-        let pos = MediaPosition(Duration::from_secs_f64(position_secs));
-        let playback = if playing {
-            MediaPlayback::Playing { progress: Some(pos) }
-        } else {
-            MediaPlayback::Paused { progress: Some(pos) }
-        };
-        self.set_playback(playback);
-    }
+    fn set_metadata(&mut self, meta: &TrackMetadata) {
+        #[cfg(target_os = "windows")]
+        {
+            let cover_path = self
+                .cover_art_cache
+                .resolve_path(meta.cover_url.as_deref());
+            let cover_ref = cover_path.as_ref().and_then(|p| p.to_str());
+            self.backend.set_metadata(meta, cover_ref);
+        }
 
-    // ── Playback state ────────────────────────────────────────────────────────
-
-    pub fn set_playing(&mut self, position_secs: f64) {
-        self.set_playback_state(position_secs, true);
-    }
-
-    pub fn set_paused(&mut self, position_secs: f64) {
-        self.set_playback_state(position_secs, false);
-    }
-
-    pub fn set_stopped(&mut self) {
-        self.set_playback(MediaPlayback::Stopped);
-    }
-
-    // ── Metadata ──────────────────────────────────────────────────────────────
-
-    pub fn set_metadata(&mut self, meta: &TrackMetadata) {
-        let duration = meta.duration_seconds.map(Duration::from_secs_f64);
-        if let Err(error) = self.controls.set_metadata(MediaMetadata {
-            title: meta.title.as_deref(),
-            artist: meta.artist.as_deref(),
-            album: meta.album.as_deref(),
-            duration,
-            cover_url: meta.cover_url.as_deref(),
-        }) {
-            tracing::debug!("Failed to update OS media metadata: {error:?}");
+        #[cfg(not(target_os = "windows"))]
+        {
+            use souvlaki::MediaMetadata;
+            let duration = meta.duration_seconds.map(Duration::from_secs_f64);
+            let cover_url = self
+                .cover_art_cache
+                .resolve_url(meta.cover_url.as_deref());
+            if let Err(error) = self.controls.set_metadata(MediaMetadata {
+                title: meta.title.as_deref(),
+                artist: meta.artist.as_deref(),
+                album: meta.album.as_deref(),
+                duration,
+                cover_url: cover_url.as_deref(),
+            }) {
+                tracing::warn!("Failed to update OS media metadata: {error:?}");
+            }
         }
     }
 
-    /// Convenience: set metadata and immediately mark as playing.
-    pub fn now_playing(&mut self, meta: &TrackMetadata) {
+    fn now_playing(&mut self, meta: &TrackMetadata) {
         self.set_metadata(meta);
         self.set_playing(0.0);
     }
 
-    // ── Position tick (call periodically while playing) ───────────────────────
+    fn set_playing(&mut self, position_secs: f64) {
+        #[cfg(target_os = "windows")]
+        {
+            self.backend.set_playback(true, position_secs, false);
+        }
 
-    pub fn update_position(&mut self, position_secs: f64, playing: bool) {
-        self.set_playback_state(position_secs, playing);
+        #[cfg(not(target_os = "windows"))]
+        {
+            use souvlaki::{MediaPlayback, MediaPosition};
+            let pos = MediaPosition(Duration::from_secs_f64(position_secs));
+            let _ = self.controls.set_playback(MediaPlayback::Playing {
+                progress: Some(pos),
+            });
+        }
+    }
+
+    fn set_paused(&mut self, position_secs: f64) {
+        #[cfg(target_os = "windows")]
+        {
+            self.backend.set_playback(false, position_secs, false);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            use souvlaki::{MediaPlayback, MediaPosition};
+            let pos = MediaPosition(Duration::from_secs_f64(position_secs));
+            let _ = self.controls.set_playback(MediaPlayback::Paused {
+                progress: Some(pos),
+            });
+        }
+    }
+
+    fn set_stopped(&mut self) {
+        #[cfg(target_os = "windows")]
+        {
+            self.backend.set_playback(false, 0.0, true);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            use souvlaki::MediaPlayback;
+            let _ = self.controls.set_playback(MediaPlayback::Stopped);
+        }
+    }
+
+    fn update_position(&mut self, position_secs: f64, playing: bool) {
+        if playing {
+            self.set_playing(position_secs);
+        } else {
+            self.set_paused(position_secs);
+        }
+    }
+}
+
+pub struct MediaBridgeState {
+    bridge: Arc<Mutex<Option<MediaBridge>>>,
+    app: AppHandle,
+}
+
+impl MediaBridgeState {
+    pub fn new(app: AppHandle) -> Self {
+        Self {
+            bridge: Arc::new(Mutex::new(None)),
+            app,
+        }
+    }
+
+    fn is_initialized(&self) -> bool {
+        self.bridge
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
+    }
+
+    fn store_bridge(&self, result: Result<MediaBridge, String>) {
+        match result {
+            Ok(bridge) => {
+                if let Ok(mut guard) = self.bridge.lock() {
+                    *guard = Some(bridge);
+                }
+                tracing::info!("OS media controls ready");
+            }
+            Err(error) => tracing::warn!("OS media controls unavailable: {error}"),
+        }
+    }
+
+    pub fn ensure_initialized_main(&self) {
+        if self.is_initialized() {
+            return;
+        }
+        self.store_bridge(MediaBridge::new(&self.app));
+    }
+
+    pub fn ensure_initialized(&self) {
+        if self.is_initialized() {
+            return;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let app = self.app.clone();
+            let (tx, rx) = mpsc::sync_channel(1);
+            let init_app = app.clone();
+            if app
+                .run_on_main_thread(move || {
+                    let _ = tx.send(MediaBridge::new(&init_app));
+                })
+                .is_err()
+            {
+                tracing::warn!("Failed to schedule OS media controls init on main thread");
+                return;
+            }
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(result) => self.store_bridge(result),
+                Err(_) => tracing::warn!("OS media controls init timed out — will retry"),
+            }
+            return;
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        self.store_bridge(MediaBridge::new(&self.app));
+    }
+
+    fn run_on_ui_thread<F>(&self, op: F)
+    where
+        F: FnOnce(&mut MediaBridge) + Send + 'static,
+    {
+        self.ensure_initialized();
+        if !self.is_initialized() {
+            tracing::warn!("OS media controls not initialized — skipping update");
+            return;
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            let app = self.app.clone();
+            let bridge = Arc::clone(&self.bridge);
+            let (tx, rx) = mpsc::sync_channel(0);
+            if app
+                .run_on_main_thread(move || {
+                    if let Ok(mut guard) = bridge.lock() {
+                        if let Some(ref mut inner) = *guard {
+                            op(inner);
+                        }
+                    }
+                    let _ = tx.send(());
+                })
+                .is_err()
+            {
+                tracing::warn!("Failed to schedule OS media controls update on main thread");
+                return;
+            }
+            let _ = rx.recv_timeout(Duration::from_secs(2));
+            return;
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            if let Ok(mut guard) = self.bridge.lock() {
+                if let Some(ref mut inner) = *guard {
+                    op(inner);
+                }
+            }
+        }
+    }
+
+    pub fn set_metadata(&self, meta: TrackMetadata) {
+        self.run_on_ui_thread(move |bridge| bridge.set_metadata(&meta));
+    }
+
+    pub fn now_playing(&self, meta: TrackMetadata) {
+        self.run_on_ui_thread(move |bridge| bridge.now_playing(&meta));
+    }
+
+    pub fn set_playing(&self, position_secs: f64) {
+        self.run_on_ui_thread(move |bridge| bridge.set_playing(position_secs));
+    }
+
+    pub fn set_paused(&self, position_secs: f64) {
+        self.run_on_ui_thread(move |bridge| bridge.set_paused(position_secs));
+    }
+
+    pub fn set_stopped(&self) {
+        self.run_on_ui_thread(|bridge| bridge.set_stopped());
+    }
+
+    pub fn update_position(&self, position_secs: f64, playing: bool) {
+        self.run_on_ui_thread(move |bridge| bridge.update_position(position_secs, playing));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "windows")]
+    use super::cover_art::Cache;
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cover_art_cache_writes_data_url_to_temp_file() {
+        use std::fs;
+        let data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+        let mut cache = Cache::new();
+        let path = cache.resolve_path(Some(data_url)).expect("should resolve");
+        assert!(fs::metadata(&path).is_ok());
     }
 }

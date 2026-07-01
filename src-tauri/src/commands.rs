@@ -7,14 +7,14 @@ use crate::dto::{
     QueueDto, QueueStateDto,
 };
 use crate::library::{Library, PlaylistInfo};
-use crate::media_controls::{MediaBridge, TrackMetadata};
+use crate::media_controls::TrackMetadata;
 use crate::metadata::{is_supported_audio_file, supported_audio_extensions, Track};
 use tauri::Manager;
 use walkdir::WalkDir;
 
 pub struct PlayerState(pub Mutex<AudioPlayer>);
 pub struct LibraryState(pub Mutex<Library>);
-pub struct MediaBridgeState(pub Mutex<MediaBridge>);
+pub struct MediaBridgeState(pub crate::media_controls::MediaBridgeState);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -34,18 +34,8 @@ fn lock_library<'a>(
     state.0.lock().map_err(lock_poisoned)
 }
 
-/// Lock the bridge if it was successfully initialized; silently skip otherwise.
-fn with_bridge<F>(bridge: &tauri::State<'_, MediaBridgeState>, f: F)
-where
-    F: FnOnce(&mut MediaBridge),
-{
-    if let Ok(mut bridge) = bridge.0.lock() {
-        f(&mut bridge);
-    }
-}
-
 fn sync_bridge_playing(bridge: &tauri::State<MediaBridgeState>, position_secs: f64) {
-    with_bridge(bridge, |b| b.set_playing(position_secs));
+    bridge.0.set_playing(position_secs);
 }
 
 /// Run a blocking operation on a background thread pool so the UI stays
@@ -135,14 +125,12 @@ fn resolve_track(library: &Library, path: &str) -> Track {
 
 /// Push track metadata to the OS media bridge.
 fn sync_bridge_now_playing(bridge: &tauri::State<MediaBridgeState>, track: &Track) {
-    with_bridge(bridge, |b| {
-        b.now_playing(&TrackMetadata {
-            title: Some(track.title.clone()),
-            artist: Some(track.artist.clone()),
-            album: Some(track.album.clone()),
-            duration_seconds: track.duration_seconds,
-            cover_url: track.cover_art_data_url.clone(),
-        });
+    bridge.0.now_playing(TrackMetadata {
+        title: Some(track.title.clone()),
+        artist: Some(track.artist.clone()),
+        album: Some(track.album.clone()),
+        duration_seconds: track.duration_seconds,
+        cover_url: track.cover_art_data_url.clone(),
     });
 }
 
@@ -186,7 +174,7 @@ pub async fn pause_track(
         player.pause()?;
         position
     };
-    with_bridge(&bridge, |b| b.set_paused(position));
+    bridge.0.set_paused(position);
     Ok(())
 }
 
@@ -210,7 +198,7 @@ pub async fn stop_track(
     bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
     lock_player(&state)?.stop()?;
-    with_bridge(&bridge, |b| b.set_stopped());
+    bridge.0.set_stopped();
     Ok(())
 }
 
@@ -244,7 +232,7 @@ pub async fn seek_track(
         player.seek(seconds)?;
         player.is_playing()
     };
-    with_bridge(&bridge, |b| b.update_position(seconds, playing));
+    bridge.0.update_position(seconds, playing);
     Ok(())
 }
 
@@ -392,15 +380,13 @@ pub async fn play_track_from_playlist(
     .await?;
 
     let bridge = app.state::<MediaBridgeState>();
-    if let Ok(mut bridge) = bridge.0.lock() {
-        bridge.now_playing(&TrackMetadata {
-            title: Some(track.title),
-            artist: Some(track.artist),
-            album: Some(track.album),
-            duration_seconds: track.duration_seconds,
-            cover_url: track.cover_art_data_url,
-        });
-    }
+    bridge.0.now_playing(TrackMetadata {
+        title: Some(track.title),
+        artist: Some(track.artist),
+        album: Some(track.album),
+        duration_seconds: track.duration_seconds,
+        cover_url: track.cover_art_data_url,
+    });
     Ok(())
 }
 
@@ -957,7 +943,7 @@ pub async fn update_media_metadata(
     metadata: TrackMetadata,
     bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
-    with_bridge(&bridge, |b| b.set_metadata(&metadata));
+    bridge.0.set_metadata(metadata);
     Ok(())
 }
 
@@ -969,6 +955,15 @@ pub async fn update_media_position(
     is_playing: bool,
     bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
-    with_bridge(&bridge, |b| b.update_position(position_seconds, is_playing));
+    bridge.0.update_position(position_seconds, is_playing);
+    Ok(())
+}
+
+/// Clear the OS media session when nothing is loaded (Stopped, no metadata).
+#[tauri::command]
+pub async fn clear_media_session(
+    bridge: tauri::State<'_, MediaBridgeState>,
+) -> Result<(), String> {
+    bridge.0.set_stopped();
     Ok(())
 }

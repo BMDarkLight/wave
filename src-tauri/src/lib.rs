@@ -5,10 +5,11 @@ mod error;
 mod library;
 mod media_controls;
 mod metadata;
+mod os_media;
 
 use commands::{LibraryState, MediaBridgeState, PlayerState};
 use audio::player::AudioPlayer;
-use tauri::Manager;
+use tauri::{Manager, WindowEvent};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -17,6 +18,8 @@ pub fn run() {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .with(tracing_subscriber::fmt::layer())
         .init();
+
+    os_media::set_app_user_model_id("app.bmdarklight.wave");
 
     let player = AudioPlayer::new().expect("Failed to initialize audio player");
 
@@ -30,13 +33,36 @@ pub fn run() {
             let library = library::Library::new(app.handle())?;
             app.manage(LibraryState(std::sync::Mutex::new(library)));
 
-            match media_controls::MediaBridge::new(app.handle()) {
-                Ok(bridge) => {
-                    app.manage(MediaBridgeState(std::sync::Mutex::new(bridge)));
-                }
-                Err(e) => {
-                    tracing::warn!("OS media controls unavailable: {e}");
-                }
+            let app_handle = app.handle().clone();
+            app.manage(MediaBridgeState(media_controls::MediaBridgeState::new(
+                app_handle.clone(),
+            )));
+
+            // SMTC requires a valid HWND — initialize on the UI thread once the window exists.
+            if let Some(window) = app.get_webview_window("main") {
+                let init_handle = app_handle.clone();
+                window.on_window_event(move |event| {
+                    if matches!(
+                        event,
+                        WindowEvent::Focused(true)
+                            | WindowEvent::Resized(_)
+                            | WindowEvent::ScaleFactorChanged { .. }
+                    ) {
+                        if let Some(state) = init_handle.try_state::<MediaBridgeState>() {
+                            state.0.ensure_initialized_main();
+                        }
+                    }
+                });
+
+                // Schedule init without blocking setup (blocking here deadlocks the UI thread).
+                let init_handle = app_handle.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Some(state) = init_handle.try_state::<MediaBridgeState>() {
+                        state.0.ensure_initialized_main();
+                    }
+                });
+            } else {
+                tracing::warn!("Main window not found — OS media controls will init on first use");
             }
 
             Ok(())
@@ -74,6 +100,7 @@ pub fn run() {
             commands::get_playback_mode,
             commands::update_media_metadata,
             commands::update_media_position,
+            commands::clear_media_session,
             commands::create_playlist,
             commands::delete_playlist,
             commands::rename_playlist,
