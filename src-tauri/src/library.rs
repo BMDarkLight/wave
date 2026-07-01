@@ -10,7 +10,7 @@ use tauri::Manager;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-const TRACK_SELECT_COLUMNS: &str = "t.id, t.path, t.name, t.title, t.artist, t.album, t.album_artist, t.genre,
+pub(crate) const TRACK_SELECT_COLUMNS: &str = "t.id, t.path, t.name, t.title, t.artist, t.album, t.album_artist, t.genre,
                         t.year, t.track_number, t.disc_number, t.format, t.duration_seconds,
                         t.sample_rate, t.channels, t.bit_depth, t.lyrics, t.lyrics_source,
                         t.cover_art_data_url, t.cover_art_mime, t.cover_art_source,
@@ -76,11 +76,29 @@ impl Library {
         Ok(library)
     }
 
+    /// Create a library from a direct database path (for CLI, no Tauri dependency).
+    pub fn new_with_path(db_path: &std::path::Path) -> Result<Self, String> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create database directory: {e}"))?;
+        }
+        let connection = Connection::open(db_path)
+            .map_err(|e| format!("Failed to open library database: {e}"))?;
+        let library = Self {
+            db_path: db_path.to_path_buf(),
+            connection: std::sync::Mutex::new(connection),
+            default_playlist_id_cache: OnceLock::new(),
+            favorites_playlist_id_cache: OnceLock::new(),
+        };
+        library.initialize()?;
+        Ok(library)
+    }
+
     pub fn db_path(&self) -> String {
         self.db_path.to_string_lossy().to_string()
     }
 
-    fn lock_connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
+    pub(crate) fn lock_connection(&self) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
         self.connection
             .lock()
             .map_err(|_| "Failed to lock database connection".to_string())
@@ -1036,6 +1054,81 @@ impl Library {
     /// Look up full `Track` records for a list of file paths (used by the queue).
     /// Returns `Some(track)` for found tracks and `None` for paths not in the
     /// library, preserving the input order.
+    /// Look up a single track by its UUID.
+    pub fn get_track_by_id(&self, track_id: &str) -> Result<Option<Track>, String> {
+        let connection = self.lock_connection()?;
+        connection
+            .query_row(
+                &format!("SELECT {TRACK_SELECT_COLUMNS} FROM tracks t WHERE t.id = ?1"),
+                params![track_id],
+                row_to_track,
+            )
+            .optional()
+            .map_err(|e| format!("Failed to query track by id: {e}"))
+    }
+
+    /// Search tracks by a query string matching title, artist, or album.
+    pub fn search_tracks(&self, query: &str) -> Result<Vec<Track>, String> {
+        let pattern = format!("%{}%", query);
+        let connection = self.lock_connection()?;
+        let mut stmt = connection
+            .prepare(&format!(
+                "SELECT {TRACK_SELECT_COLUMNS} FROM tracks t
+                 WHERE t.title LIKE ?1 OR t.artist LIKE ?1 OR t.album LIKE ?1
+                 ORDER BY t.artist, t.album, t.track_number"
+            ))
+            .map_err(|e| format!("Failed to prepare search query: {e}"))?;
+        let rows = stmt
+            .query_map(params![pattern], row_to_track)
+            .map_err(|e| format!("Failed to execute search query: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read search results: {e}"))
+    }
+
+    /// Search playlists by name.
+    pub fn search_playlists(&self, query: &str) -> Result<Vec<PlaylistInfo>, String> {
+        let pattern = format!("%{}%", query);
+        let connection = self.lock_connection()?;
+        let mut stmt = connection
+            .prepare(
+                "SELECT p.id, p.profile_id, p.name, COUNT(pt.track_id), p.created_at, p.updated_at
+                 FROM playlists p
+                 LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
+                 WHERE p.name LIKE ?1
+                 GROUP BY p.id ORDER BY p.updated_at DESC",
+            )
+            .map_err(|e| format!("Failed to prepare playlist search query: {e}"))?;
+        let rows = stmt
+            .query_map(params![pattern], row_to_playlist)
+            .map_err(|e| format!("Failed to execute playlist search: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read search results: {e}"))
+    }
+
+    /// Update a track's cover art from raw image bytes.
+    pub fn set_track_cover(
+        &self,
+        track_id: &str,
+        image_data: &[u8],
+        mime_type: &str,
+    ) -> Result<(), String> {
+        use base64::Engine;
+        let data_url = format!(
+            "data:{};base64,{}",
+            mime_type,
+            base64::engine::general_purpose::STANDARD.encode(image_data)
+        );
+        let connection = self.lock_connection()?;
+        connection
+            .execute(
+                "UPDATE tracks SET cover_art_data_url = ?1, cover_art_mime = ?2, cover_art_source = 'user'
+                 WHERE id = ?3",
+                params![data_url, mime_type, track_id],
+            )
+            .map_err(|e| format!("Failed to update track cover: {e}"))?;
+        Ok(())
+    }
+
     pub fn get_tracks_by_paths(&self, paths: &[String]) -> Result<Vec<Option<Track>>, String> {
         if paths.is_empty() {
             return Ok(Vec::new());
@@ -1180,7 +1273,7 @@ impl Library {
     }
 }
 
-fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
+pub(crate) fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     Ok(Track {
         id: row.get(0)?,
         path: row.get(1)?,

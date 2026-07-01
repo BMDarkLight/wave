@@ -3,8 +3,8 @@ use std::sync::Mutex;
 
 use crate::audio::player::AudioPlayer;
 use crate::dto::{
-    AlbumSummaryDto, ArtistSummaryDto, ImportResultDto, PlaybackModeDto, PlaybackStateDto,
-    QueueDto, QueueStateDto,
+    AlbumSummaryDto, ArtistSummaryDto, EqSettingsDto, ImportResultDto, PlaybackModeDto,
+    PlaybackStateDto, QueueDto, QueueStateDto,
 };
 use crate::library::{Library, PlaylistInfo};
 use crate::media_controls::TrackMetadata;
@@ -242,6 +242,66 @@ pub async fn set_volume(
     state: tauri::State<'_, PlayerState>,
 ) -> Result<(), String> {
     lock_player(&state)?.set_volume(volume)?;
+    Ok(())
+}
+
+// ── Equalizer ─────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_eq_settings(
+    state: tauri::State<'_, PlayerState>,
+) -> Result<EqSettingsDto, String> {
+    let player = lock_player(&state)?;
+    let eq = player.eq_settings();
+    Ok(EqSettingsDto {
+        bands: eq.bands,
+        enabled: eq.enabled,
+    })
+}
+
+#[tauri::command]
+pub async fn set_eq_bands(
+    bands: Vec<f32>,
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
+    if bands.len() != 10 {
+        return Err("Expected exactly 10 EQ band values".to_string());
+    }
+    let mut arr = [0.0f32; 10];
+    arr.copy_from_slice(&bands);
+    lock_player(&state)?.set_eq_bands(arr);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_eq_enabled(
+    enabled: bool,
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
+    lock_player(&state)?.set_eq_enabled(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn export_eq_settings(
+    path: String,
+    name: Option<String>,
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
+    let player = lock_player(&state)?;
+    let eq = player.eq_settings();
+    crate::audio::dsp::EqPresetFile::save_to(&path, &eq, name)
+}
+
+#[tauri::command]
+pub async fn import_eq_settings(
+    path: String,
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
+    let eq = crate::audio::dsp::EqPresetFile::load_from(&path)?;
+    let mut player = lock_player(&state)?;
+    player.set_eq_bands(eq.bands);
+    player.set_eq_enabled(eq.enabled);
     Ok(())
 }
 
@@ -915,6 +975,8 @@ pub async fn set_output_device(
     new_player.queue = queue;
     new_player.repeat = repeat;
     new_player.set_volume(volume)?;
+    *new_player.eq_config.lock().unwrap() = guard.eq_config.lock().unwrap().clone();
+    *new_player.eq_version.lock().unwrap() = *guard.eq_version.lock().unwrap();
 
     // Resume playback if something was playing.
     if let Some(ref path) = current_path {

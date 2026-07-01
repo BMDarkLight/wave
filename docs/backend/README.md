@@ -49,6 +49,7 @@ Important behaviors:
 | [Commands](./commands.md) | Full reference for every `invoke` command |
 | [Types](./types.md) | Shared request/response shapes (TypeScript-friendly) |
 | [Events](./events.md) | OS media control events emitted by the backend |
+| [DSP](./dsp.md) | Digital Signal Processing (equalizer, biquad filters) |
 
 ## Command summary
 
@@ -116,6 +117,16 @@ artists](./commands.md#albums--artists).
 | `get_artist_tracks` | Every track by an artist (discography) |
 | `create_album_playlist` | Persist an album’s tracks as a playlist |
 | `create_artist_playlist` | Persist an artist’s tracks as a playlist |
+
+### Equalizer
+
+| Command | Description |
+|---------|-------------|
+| `get_eq_settings` | Read current EQ band gains and enabled state |
+| `set_eq_bands` | Set 10-band EQ gains (dB) |
+| `set_eq_enabled` | Enable/disable the EQ chain |
+| `export_eq_settings` | Export EQ config to a JSON file |
+| `import_eq_settings` | Import and apply EQ from a JSON file |
 
 ### OS integration
 
