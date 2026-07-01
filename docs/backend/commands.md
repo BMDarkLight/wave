@@ -580,3 +580,155 @@ await invoke("update_media_metadata", {
 If OS media controls failed to initialize at startup, this command succeeds silently (no-op).
 
 See also [Events](./events.md) for inbound OS button presses.
+
+---
+
+## EQ (Equalizer)
+
+The equalizer is an **in-memory** settings object managed alongside the audio player. Ten pre-defined bands are provided by default (ISO 1/3-octave centre frequencies). Custom bands can be added at runtime. The actual DSP filtering is applied asynchronously during playback when the EQ is enabled.
+
+### `get_eq_state`
+
+Return the full EQ state: all bands and the master enable flag.
+
+**Arguments:** none
+
+**Returns:** [`EqState`](./types.md#eqstate)
+
+```typescript
+const state = await invoke<EqState>("get_eq_state");
+// state.bands[0] => { frequency: 31, gain_db: 0, active: true }
+// state.enabled => false
+```
+
+---
+
+### `set_eq_band`
+
+Set the gain on an **existing** band identified by its centre frequency.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `frequency` | `number` | yes | Centre frequency in Hz of the target band |
+| `gainDb` | `number` | yes | Gain in dB (e.g. `-12.0` to `12.0`) |
+
+**Returns:** `void`
+
+**Errors:** `"No EQ band found at {frequency} Hz"` when the band does not exist.
+
+```typescript
+await invoke("set_eq_band", { frequency: 125, gainDb: -3.5 });
+```
+
+---
+
+### `define_eq_band`
+
+Create a new band, or update gain/active for an existing one at the same frequency. Unlike `set_eq_band`, this does **not** error if the band is new — it appends it.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `frequency` | `number` | yes | Centre frequency in Hz |
+| `gainDb` | `number` | yes | Gain in dB |
+
+**Returns:** `void`
+
+```typescript
+// Add a custom 75 Hz band at +2 dB
+await invoke("define_eq_band", { frequency: 75, gainDb: 2.0 });
+```
+
+---
+
+### `remove_eq_band`
+
+Remove a band by frequency. The last remaining band cannot be removed (at least one band is always kept).
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `frequency` | `number` | yes | Centre frequency in Hz of the band to remove |
+
+**Returns:** `void`
+
+```typescript
+await invoke("remove_eq_band", { frequency: 75 });
+```
+
+---
+
+### `reset_eq`
+
+Zero all band gains and re-activate every band.
+
+**Arguments:** none
+
+**Returns:** `void`
+
+```typescript
+await invoke("reset_eq");
+```
+
+---
+
+### `set_eq_enabled`
+
+Globally enable or disable the EQ filter chain. When disabled the audio stream passes through unmodified.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `enabled` | `boolean` | yes | `true` to engage EQ processing |
+
+**Returns:** `void`
+
+```typescript
+await invoke("set_eq_enabled", { enabled: true });
+```
+
+---
+
+## Audio device / file info
+
+### `get_output_sample_rate`
+
+Query the current default audio output device's native sample rate.
+
+**Arguments:** none
+
+**Returns:** `number` — sample rate in Hz (e.g. `44100`, `48000`)
+
+**Errors:** `"No default output device available"` if no audio output is present.
+
+```typescript
+const rate = await invoke<number>("get_output_sample_rate");
+// rate => 48000
+```
+
+---
+
+### `get_audio_file_info`
+
+Read metadata for any audio file on disk: sample rate, channel count, bit depth, and approximate bitrate.
+
+**Arguments**
+
+| Name | Type | Required | Description |
+|------|------|----------|-------------|
+| `path` | `string` | yes | Absolute path to an audio file |
+
+**Returns:** [`AudioFileInfo`](./types.md#audiofileinfo)
+
+```typescript
+const info = await invoke<AudioFileInfo>("get_audio_file_info", {
+  path: "/Music/track.flac",
+});
+// info => { path: "...", sample_rate: 44100, channels: 2,
+//           bit_depth: 16, bitrate_bps: 1411200, format: "FLAC" }
+```

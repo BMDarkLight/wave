@@ -6,7 +6,8 @@ mod library;
 mod media_controls;
 mod metadata;
 
-use commands::{LibraryState, MediaBridgeState, PlayerState};
+use commands::{EqState, LibraryState, MediaBridgeState, PlayerState};
+use audio::eq::EqualizerSettings;
 use audio::player::AudioPlayer;
 use tauri::Manager;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -21,11 +22,13 @@ pub fn run() {
     let player = AudioPlayer::new().expect("Failed to initialize audio player");
 
     let player_state = PlayerState(std::sync::Mutex::new(player));
+    let eq_state = EqState(std::sync::Mutex::new(EqualizerSettings::default()));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(player_state)
+        .manage(eq_state)
         .setup(|app| {
             let library = library::Library::new(app.handle())?;
             app.manage(LibraryState(std::sync::Mutex::new(library)));
@@ -98,6 +101,14 @@ pub fn run() {
             commands::import_playlist,
             commands::list_output_devices,
             commands::set_output_device,
+            commands::get_eq_state,
+            commands::set_eq_band,
+            commands::define_eq_band,
+            commands::remove_eq_band,
+            commands::reset_eq,
+            commands::set_eq_enabled,
+            commands::get_output_sample_rate,
+            commands::get_audio_file_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

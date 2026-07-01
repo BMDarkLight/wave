@@ -493,6 +493,76 @@ export const updateMediaPosition = (position_seconds: number, is_playing: boolea
   return safeInvoke("update_media_position", { position_seconds, is_playing });
 };
 
+// ── EQ (Equalizer) ─────────────────────────────────────────────────────────────
+
+export interface EqBand {
+  frequency: number;
+  gain_db: number;
+  active: boolean;
+}
+
+export interface EqState {
+  bands: EqBand[];
+  enabled: boolean;
+}
+
+/** Get the full EQ state (bands + master toggle). */
+export const getEqState = (): Promise<EqState> => {
+  return safeInvoke<EqState>("get_eq_state");
+};
+
+/**
+ * Set the gain for an existing EQ band by centre frequency.
+ * Returns an error if no band exists at that frequency.
+ */
+export const setEqBand = (frequency: number, gainDb: number): Promise<void> => {
+  return safeInvoke("set_eq_band", { frequency, gainDb });
+};
+
+/**
+ * Define a new EQ band (or update if one already exists at that frequency).
+ * Bands defined this way persist alongside the pre-defined defaults.
+ */
+export const defineEqBand = (frequency: number, gainDb: number): Promise<void> => {
+  return safeInvoke("define_eq_band", { frequency, gainDb });
+};
+
+/** Remove a user-defined EQ band by frequency. Pre-defined defaults cannot be removed. */
+export const removeEqBand = (frequency: number): Promise<void> => {
+  return safeInvoke("remove_eq_band", { frequency });
+};
+
+/** Reset all EQ bands to 0 dB and re-activate them. */
+export const resetEq = (): Promise<void> => {
+  return safeInvoke("reset_eq");
+};
+
+/** Enable or disable the EQ filter chain as a whole. */
+export const setEqEnabled = (enabled: boolean): Promise<void> => {
+  return safeInvoke("set_eq_enabled", { enabled });
+};
+
+// ── Audio Device / File Info ───────────────────────────────────────────────────
+
+export interface AudioFileInfo {
+  path: string;
+  sample_rate: number | null;
+  channels: number | null;
+  bit_depth: number | null;
+  bitrate_bps: number | null;
+  format: string;
+}
+
+/** Get the current audio output device's sample rate. */
+export const getOutputSampleRate = (): Promise<number> => {
+  return safeInvoke<number>("get_output_sample_rate");
+};
+
+/** Read an audio file's sample rate, bit depth, channels, and approximate bitrate. */
+export const getAudioFileInfo = (path: string): Promise<AudioFileInfo> => {
+  return safeInvoke<AudioFileInfo>("get_audio_file_info", { path });
+};
+
 /**
  * Listen for OS media control events (play, pause, next, previous, seek).
  * Returns an unlisten function — call it when your component unmounts.

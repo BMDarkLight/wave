@@ -2,8 +2,8 @@ use souvlaki::{
     MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
 };
 use std::time::Duration;
-use tauri::{AppHandle, Emitter};
 use tauri::Manager;
+use tauri::{AppHandle, Emitter};
 
 // ── Public metadata struct (mirrors what the frontend sends) ─────────────────
 
@@ -56,8 +56,8 @@ impl MediaBridge {
             hwnd,
         };
 
-        let mut controls =
-            MediaControls::new(config).map_err(|e| format!("Failed to init media controls: {e:?}"))?;
+        let mut controls = MediaControls::new(config)
+            .map_err(|e| format!("Failed to init media controls: {e:?}"))?;
 
         // Forward OS media control events as Tauri events.
         let app_handle = app.clone();
@@ -85,10 +85,7 @@ impl MediaBridge {
                         return;
                     }
                     MediaControlEvent::SetPosition(pos) => {
-                        let _ = app_handle.emit(
-                            "media-control-set-position",
-                            pos.0.as_secs_f64(),
-                        );
+                        let _ = app_handle.emit("media-control-set-position", pos.0.as_secs_f64());
                         return;
                     }
                     MediaControlEvent::OpenUri(_)
@@ -112,9 +109,13 @@ impl MediaBridge {
     fn set_playback_state(&mut self, position_secs: f64, playing: bool) {
         let pos = MediaPosition(Duration::from_secs_f64(position_secs));
         let playback = if playing {
-            MediaPlayback::Playing { progress: Some(pos) }
+            MediaPlayback::Playing {
+                progress: Some(pos),
+            }
         } else {
-            MediaPlayback::Paused { progress: Some(pos) }
+            MediaPlayback::Paused {
+                progress: Some(pos),
+            }
         };
         self.set_playback(playback);
     }

@@ -1,20 +1,22 @@
 use std::path::Path;
 use std::sync::Mutex;
 
+use crate::audio::eq::EqualizerSettings;
 use crate::audio::player::AudioPlayer;
 use crate::dto::{
-    AlbumSummaryDto, ArtistSummaryDto, ImportResultDto, PlaybackModeDto, PlaybackStateDto,
-    QueueDto, QueueStateDto,
+    AlbumSummaryDto, ArtistSummaryDto, AudioFileInfoDto, EqBandDto, EqStateDto, ImportResultDto,
+    PlaybackModeDto, PlaybackStateDto, QueueDto, QueueStateDto,
 };
 use crate::library::{Library, PlaylistInfo};
 use crate::media_controls::{MediaBridge, TrackMetadata};
-use crate::metadata::{is_supported_audio_file, supported_audio_extensions, Track};
+use crate::metadata::{extract_track, is_supported_audio_file, supported_audio_extensions, Track};
 use tauri::Manager;
 use walkdir::WalkDir;
 
 pub struct PlayerState(pub Mutex<AudioPlayer>);
 pub struct LibraryState(pub Mutex<Library>);
 pub struct MediaBridgeState(pub Mutex<MediaBridge>);
+pub struct EqState(pub Mutex<EqualizerSettings>);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -25,6 +27,12 @@ fn lock_poisoned<T>(_: std::sync::PoisonError<T>) -> String {
 fn lock_player<'a>(
     state: &'a tauri::State<'a, PlayerState>,
 ) -> Result<std::sync::MutexGuard<'a, AudioPlayer>, String> {
+    state.0.lock().map_err(lock_poisoned)
+}
+
+fn lock_eq<'a>(
+    state: &'a tauri::State<'a, EqState>,
+) -> Result<std::sync::MutexGuard<'a, EqualizerSettings>, String> {
     state.0.lock().map_err(lock_poisoned)
 }
 
@@ -961,4 +969,113 @@ pub async fn update_media_position(
 ) -> Result<(), String> {
     with_bridge(&bridge, |b| b.update_position(position_seconds, is_playing));
     Ok(())
+}
+
+// ── EQ commands ────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_eq_state(
+    eq: tauri::State<'_, EqState>,
+) -> Result<EqStateDto, String> {
+    let settings = lock_eq(&eq)?;
+    let bands: Vec<EqBandDto> = settings.bands.iter().map(Into::into).collect();
+    Ok(EqStateDto {
+        bands,
+        enabled: settings.enabled,
+    })
+}
+
+#[tauri::command]
+pub async fn set_eq_band(
+    frequency: f64,
+    gain_db: f32,
+    eq: tauri::State<'_, EqState>,
+) -> Result<(), String> {
+    let mut settings = lock_eq(&eq)?;
+    let band = settings
+        .find_band_mut(frequency)
+        .ok_or_else(|| format!("No EQ band found at {frequency} Hz"))?;
+    band.gain_db = gain_db;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn define_eq_band(
+    frequency: f64,
+    gain_db: f32,
+    eq: tauri::State<'_, EqState>,
+) -> Result<(), String> {
+    let mut settings = lock_eq(&eq)?;
+    settings.set_band(frequency, gain_db, true);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_eq_band(
+    frequency: f64,
+    eq: tauri::State<'_, EqState>,
+) -> Result<(), String> {
+    let mut settings = lock_eq(&eq)?;
+    settings.remove_band(frequency);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn reset_eq(
+    eq: tauri::State<'_, EqState>,
+) -> Result<(), String> {
+    let mut settings = lock_eq(&eq)?;
+    settings.reset();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_eq_enabled(
+    enabled: bool,
+    eq: tauri::State<'_, EqState>,
+) -> Result<(), String> {
+    let mut settings = lock_eq(&eq)?;
+    settings.enabled = enabled;
+    Ok(())
+}
+
+// ── Audio device / file info commands ──────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_output_sample_rate() -> Result<u32, String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+
+    let host = cpal::default_host();
+    let device = host
+        .default_output_device()
+        .ok_or_else(|| "No default output device available".to_string())?;
+
+    let config = device
+        .default_output_config()
+        .map_err(|e| format!("Failed to get output config: {e}"))?;
+
+    Ok(config.sample_rate().0)
+}
+
+#[tauri::command]
+pub async fn get_audio_file_info(path: String) -> Result<AudioFileInfoDto, String> {
+    let track = extract_track(&path)?;
+
+    // Compute approximate bitrate: (file_size * 8) / duration_seconds
+    let bitrate_bps = track.duration_seconds.and_then(|duration| {
+        if duration > 0.0 {
+            Some(((track.file_size as f64 * 8.0) / duration) as u32)
+        } else {
+            None
+        }
+    });
+
+    Ok(AudioFileInfoDto {
+        path: track.path,
+        sample_rate: track.sample_rate,
+        channels: track.channels,
+        bit_depth: track.bit_depth,
+        bitrate_bps,
+        format: track.format,
+    })
 }

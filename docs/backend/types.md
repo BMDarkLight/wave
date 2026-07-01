@@ -193,6 +193,78 @@ Use the same values you show in the in-app now-playing UI. For cover art, prefer
 
 ---
 
+---
+
+## `EqState`
+
+Returned by `get_eq_state`. Represents the entire equalizer configuration.
+
+```typescript
+interface EqState {
+  bands: EqBand[];
+  enabled: boolean;
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `bands` | Ordered list of EQ bands (ascending by frequency) |
+| `enabled` | Master EQ toggle — when `false` the audio stream passes unchanged |
+
+---
+
+## `EqBand`
+
+A single filter band within the equalizer.
+
+```typescript
+interface EqBand {
+  frequency: number;   // Centre frequency in Hz
+  gain_db: number;     // Gain in dB (0 = flat)
+  active: boolean;     // Whether this band participates in filtering
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `frequency` | Centre frequency in Hz (e.g. `31`, `125`, `1000`, `16000`) |
+| `gain_db` | Gain adjustment in decibels. Typical range `-12.0` to `+12.0` |
+| `active` | Band-level bypass; `false` to exclude this band from the filter |
+
+**Pre-defined default bands (ISO 1/3-octave):**
+
+```
+31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000 Hz
+```
+
+---
+
+## `AudioFileInfo`
+
+Returned by `get_audio_file_info`.
+
+```typescript
+interface AudioFileInfo {
+  path: string;
+  sample_rate: number | null;
+  channels: number | null;
+  bit_depth: number | null;
+  bitrate_bps: number | null;
+  format: string;
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `path` | Absolute file path |
+| `sample_rate` | Sample rate in Hz (e.g. `44100`, `48000`) |
+| `channels` | Number of audio channels (e.g. `1`, `2`, `6`) |
+| `bit_depth` | Bits per sample (e.g. `16`, `24`) |
+| `bitrate_bps` | Approximate bitrate in bits per second, computed from file size and duration. May be `null` for unknown‑length streams |
+| `format` | File format extension in uppercase (e.g. `"FLAC"`, `"MP3"`, `"WAV"`) |
+
+---
+
 ## Copy-paste module
 
 You can import types from the existing frontend wrapper:
@@ -207,6 +279,9 @@ import type {
   AlbumSummary,
   ArtistSummary,
   MediaMetadata,
+  EqState,
+  EqBand,
+  AudioFileInfo,
 } from "../utils/player";
 ```
 
