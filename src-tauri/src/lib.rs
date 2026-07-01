@@ -1,4 +1,5 @@
 mod audio;
+pub mod cli;
 mod commands;
 mod dto;
 mod error;
