@@ -541,6 +541,17 @@ impl AudioPlayer {
         *self.eq_version.lock().unwrap() += 1;
     }
 
+    pub fn apply_eq_preset(&mut self, name: &str) -> Result<(), String> {
+        let mut cfg = self.eq_config.lock().unwrap();
+        cfg.apply_preset(name)
+            .ok_or_else(|| {
+                let names: Vec<&str> = EqConfig::list_presets().map(|(n, _)| n).collect();
+                format!("Unknown EQ preset \"{name}\". Available: {}", names.join(", "))
+            })?;
+        *self.eq_version.lock().unwrap() += 1;
+        Ok(())
+    }
+
     /// Query the current default audio output device name (live, every call).
     pub fn current_output_name() -> String {
         use cpal::traits::{DeviceTrait, HostTrait};

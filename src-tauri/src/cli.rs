@@ -46,6 +46,9 @@ pub enum Commands {
     /// Inspect and manipulate track metadata
     #[command(subcommand)]
     Metadata(MetadataCmd),
+    /// DSP / equalizer controls
+    #[command(subcommand)]
+    Dsp(DspCmd),
 }
 
 // ── Subcommand structs ───────────────────────────────────────────────────────
@@ -197,6 +200,32 @@ pub enum FavoriteCmd {
     List,
     /// Clear all favorites
     Clear,
+}
+
+#[derive(clap::Subcommand)]
+pub enum DspCmd {
+    /// Show current EQ settings (band gains and enabled state)
+    EqShow,
+    /// Set EQ band gains (10 values in dB, one per ISO band)
+    EqSet {
+        /// 10 gain values in dB for bands 31, 62, 125, 250, 500,
+        /// 1000, 2000, 4000, 8000, 16000 Hz
+        bands: Vec<f32>,
+    },
+    /// Enable the equalizer
+    EqEnable,
+    /// Disable the equalizer
+    EqDisable,
+    /// Reset all bands to 0 dB and enable EQ
+    EqReset,
+    /// Apply a named EQ preset
+    Preset {
+        /// Preset name
+        #[arg(value_hint = clap::ValueHint::Other)]
+        name: String,
+    },
+    /// List available EQ presets
+    Presets,
 }
 
 #[derive(clap::Subcommand)]
@@ -373,6 +402,7 @@ pub fn run() {
         Some(Commands::Devices(cmd)) => run_devices(cmd),
         Some(Commands::Favorite(cmd)) => run_favorite(cmd),
         Some(Commands::Metadata(cmd)) => run_metadata(cmd),
+        Some(Commands::Dsp(cmd)) => run_dsp(cmd),
         None => {
             // No subcommand — shouldn't reach here since main.rs checks args > 1.
         }
@@ -747,6 +777,7 @@ fn cmd_playback_start(id: String) {
     println!();
     println!("Controls: [p]ause [r]esume [s]top [n]ext [v]previous");
     println!("         [q]uit  [f]orward  [b]ackward  [?]status");
+    println!("         [e] EQ show  [E] EQ toggle");
     println!();
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -874,6 +905,22 @@ fn cmd_playback_start(id: String) {
                 player.stop().ok();
                 println!("\r  Quit.");
                 break;
+            }
+            b'e' => {
+                let eq = player.eq_settings();
+                println!("\r  EQ: {}  bands: {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} {:+.1} dB",
+                    if eq.enabled { "ON " } else { "OFF" },
+                    eq.bands[0], eq.bands[1], eq.bands[2], eq.bands[3], eq.bands[4],
+                    eq.bands[5], eq.bands[6], eq.bands[7], eq.bands[8], eq.bands[9],
+                );
+            }
+            b'E' => {
+                let was = player.eq_settings().enabled;
+                player.set_eq_enabled(!was);
+                println!("\r  EQ toggled: {} -> {}",
+                    if was { "ON" } else { "OFF" },
+                    if !was { "ON" } else { "OFF" },
+                );
             }
             b'?' => {
                 print!("\r");
@@ -1255,6 +1302,123 @@ fn cmd_metadata_cover_set(track_id: String, image: String) {
     });
 
     println!("Cover art set for track {track_id_uuid}");
+}
+
+// ── DSP commands ────────────────────────────────────────────────────────────
+
+fn run_dsp(cmd: DspCmd) {
+    use crate::audio::dsp::EqConfig;
+
+    match cmd {
+        DspCmd::EqShow => {
+            let player = AudioPlayer::new().unwrap_or_else(|e| {
+                eprintln!("Failed to initialize audio player: {e}");
+                std::process::exit(1);
+            });
+            let eq = player.eq_settings();
+            println!("Equalizer: {}", if eq.enabled { "ON" } else { "OFF" });
+            println!();
+            println!("  Band   Frequency      Gain (dB)");
+            println!("  ----   ---------      ---------");
+            for (i, (freq, gain)) in
+                crate::audio::dsp::EQ_BANDS_HZ.iter().zip(eq.bands.iter()).enumerate()
+            {
+                let bar = if eq.enabled {
+                    let steps = (*gain as i32).clamp(-12, 12);
+                    let ch = if steps >= 0 { '+' } else { '-' };
+                    let bar_str: String = (0..steps.unsigned_abs()).map(|_| ch).collect();
+                    format!(" {:>12}", bar_str)
+                } else {
+                    String::new()
+                };
+                println!(
+                    "  {i:>4}   {:>9} Hz    {:>+6.1} dB{}",
+                    freq, gain, bar
+                );
+            }
+            println!();
+            if eq.enabled {
+                print!("  Curve: ");
+                for gain in &eq.bands {
+                    let c = if *gain > 1.0 {
+                        '▁'
+                    } else if *gain > 0.0 {
+                        '▂'
+                    } else if *gain == 0.0 {
+                        '▄'
+                    } else if *gain > -1.0 {
+                        '▆'
+                    } else {
+                        '█'
+                    };
+                    print!("{c} ");
+                }
+                println!();
+            }
+        }
+        DspCmd::EqSet { bands } => {
+            if bands.len() != 10 {
+                eprintln!("Error: expected exactly 10 EQ band values, got {}", bands.len());
+                std::process::exit(1);
+            }
+            let mut arr = [0.0f32; 10];
+            arr.copy_from_slice(&bands);
+            let mut player = AudioPlayer::new().unwrap_or_else(|e| {
+                eprintln!("Failed to initialize audio player: {e}");
+                std::process::exit(1);
+            });
+            player.set_eq_bands(arr);
+            player.set_eq_enabled(true);
+            println!("EQ bands set and enabled.");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        DspCmd::EqEnable => {
+            let mut player = AudioPlayer::new().unwrap_or_else(|e| {
+                eprintln!("Failed to initialize audio player: {e}");
+                std::process::exit(1);
+            });
+            player.set_eq_enabled(true);
+            println!("Equalizer enabled.");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        DspCmd::EqDisable => {
+            let mut player = AudioPlayer::new().unwrap_or_else(|e| {
+                eprintln!("Failed to initialize audio player: {e}");
+                std::process::exit(1);
+            });
+            player.set_eq_enabled(false);
+            println!("Equalizer disabled.");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        DspCmd::EqReset => {
+            let mut player = AudioPlayer::new().unwrap_or_else(|e| {
+                eprintln!("Failed to initialize audio player: {e}");
+                std::process::exit(1);
+            });
+            player.set_eq_bands([0.0; 10]);
+            player.set_eq_enabled(true);
+            println!("Equalizer reset to flat and enabled.");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        DspCmd::Preset { name } => {
+            let mut player = AudioPlayer::new().unwrap_or_else(|e| {
+                eprintln!("Failed to initialize audio player: {e}");
+                std::process::exit(1);
+            });
+            player.apply_eq_preset(&name).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Applied EQ preset: {name}");
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        DspCmd::Presets => {
+            println!("Available EQ presets:");
+            for (name, desc) in EqConfig::list_presets() {
+                println!("  {name:16}  {desc}");
+            }
+        }
+    }
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

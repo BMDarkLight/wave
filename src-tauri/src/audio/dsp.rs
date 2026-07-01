@@ -8,6 +8,20 @@ pub const EQ_BANDS_HZ: [f32; 10] = [
     31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0,
 ];
 
+/// Named EQ presets indexed by the band labels below.
+pub const EQ_PRESETS: &[(&str, &str, [f32; 10])] = &[
+    ("flat",       "Flat (all 0 dB)",             [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    ("bass-boost", "Bass boost",                  [4.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    ("bass-cut",   "Bass cut",                    [-4.0, -4.0, -2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+    ("rock",       "Rock (smile curve)",          [3.0, 2.0, 0.0, -1.0, -1.0, 0.0, 1.0, 2.0, 3.0, 2.0]),
+    ("pop",        "Pop (boosted mids)",           [1.0, 1.0, 2.0, 3.0, 3.0, 2.0, 1.0, 1.0, 1.0, 1.0]),
+    ("jazz",       "Jazz (warm, gentle highs)",    [2.0, 2.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0]),
+    ("classical",  "Classical (flat, slight air)", [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 2.0]),
+    ("vocal",      "Vocal (cut lows, boost mids)", [-2.0, -2.0, -1.0, 1.0, 3.0, 4.0, 3.0, 1.0, -1.0, -2.0]),
+    ("loudness",   "Loudness (low-volume curve)", [5.0, 4.0, 2.0, 0.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0]),
+    ("headphones", "Headphones (subtle crossfeed)", [0.0, 0.0, 0.0, 1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 0.0]),
+];
+
 #[derive(Debug, Clone)]
 pub struct EqConfig {
     /// Gain per band in dB.
@@ -22,6 +36,21 @@ impl Default for EqConfig {
             bands: [0.0; 10],
             enabled: false,
         }
+    }
+}
+
+impl EqConfig {
+    /// Apply a named preset, returning `true` on success.
+    pub fn apply_preset(&mut self, name: &str) -> Option<()> {
+        let (_key, _desc, bands) = EQ_PRESETS.iter().find(|(key, _, _)| *key == name)?;
+        self.bands = *bands;
+        self.enabled = true;
+        Some(())
+    }
+
+    /// Iterate available preset names and descriptions.
+    pub fn list_presets() -> impl Iterator<Item = (&'static str, &'static str)> {
+        EQ_PRESETS.iter().map(|(key, desc, _)| (*key, *desc))
     }
 }
 
