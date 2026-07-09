@@ -103,7 +103,7 @@ fn build_playlists_submenu(app: &mut tauri::App) -> Result<Submenu<tauri::Wry>, 
 
 #[cfg(target_os = "macos")]
 fn load_tray_image() -> tauri::Result<Image<'static>> {
-    let bytes = include_bytes!("../icons/tray-template.png");
+    let bytes = include_bytes!("../../icons/tray-template.png");
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder
         .read_info()

@@ -39,19 +39,44 @@ It focuses on **performance**, **simplicity**, and **offline-first usage**, whil
 
 ## Project Structure
 
-```
+```text
 Wave/
-├── src/              # React frontend
-│   ├── utils/
-│   ├── App.tsx
-│   ├── App.css
-│   └── main.tsx
-│
-├── src-tauri/        # Rust backend
-│
-├── README.md
-└── tauri.conf.json
+├── src/                         # React + TypeScript frontend
+│   ├── components/             # UI building blocks
+│   ├── pages/                  # Route-level screens
+│   ├── hooks/                  # Frontend behavior hooks
+│   ├── lib/                    # Shared frontend utilities
+│   └── utils/player.ts         # Typed wrapper around Tauri backend commands
+├── src-tauri/                  # Rust/Tauri desktop backend
+│   ├── Cargo.toml              # Rust crate manifest
+│   ├── tauri.conf.json         # Tauri app configuration
+│   └── src/
+│       ├── app/                # App paths, settings, and single-instance runtime logic
+│       ├── audio/              # Playback engine and DSP
+│       ├── integrations/       # Tray and OS media-control integration
+│       ├── os_media/           # Windows-specific media integration
+│       ├── cli.rs              # Headless/CLI entry surface
+│       ├── commands.rs         # Tauri invoke command handlers
+│       ├── dto.rs              # Shared DTOs between backend and frontend
+│       ├── error.rs            # Backend error definitions
+│       ├── library.rs          # SQLite-backed library and playlist logic
+│       ├── metadata.rs         # Track metadata extraction and enrichment
+│       ├── path_validation.rs  # Safe path validation helpers
+│       ├── playback_daemon.rs  # Background playback daemon and IPC
+│       ├── lib.rs              # Tauri backend composition root
+│       └── main.rs             # Native process entry point
+├── docs/
+│   └── backend/                # Backend API and architecture documentation
+└── README.md
 ```
+
+### Backend Layout Notes
+
+- The backend lives in `src-tauri/`; `tauri.conf.json` is inside that directory, not at the repository root.
+- `src-tauri/src/lib.rs` is the GUI/backend composition root where state and Tauri commands are registered.
+- `src-tauri/src/main.rs` selects between GUI mode, CLI mode, and the playback daemon at startup.
+- `src/utils/player.ts` is the frontend-facing wrapper around the backend command surface.
+- Detailed backend API docs live in `docs/backend/README.md`.
 
 ---
 

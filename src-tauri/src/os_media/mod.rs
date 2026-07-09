@@ -2,7 +2,7 @@
 //!
 //! Platform code lives in one place per OS:
 //! - Windows → `os_media/windows.rs` (everything: AppUserModelID, SMTC, taskbar)
-//! - Linux/macOS → souvlaki via `media_controls.rs`
+//! - Linux/macOS → souvlaki via `integrations/media_controls.rs`
 
 #[cfg(target_os = "windows")]
 mod windows;

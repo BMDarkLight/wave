@@ -1,18 +1,21 @@
-mod app_paths;
-mod app_settings;
+mod app;
 mod audio;
 pub mod cli;
 mod commands;
 mod dto;
 mod error;
-mod gui_tray;
+mod integrations;
 mod library;
-mod media_controls;
 mod metadata;
 mod path_validation;
 pub mod playback_daemon;
-pub mod single_instance;
 mod os_media;
+
+pub use app::paths as app_paths;
+pub use app::settings as app_settings;
+pub use app::single_instance;
+pub use integrations::gui_tray;
+pub use integrations::media_controls;
 
 use app_settings::AppSettingsState;
 use commands::{LibraryState, MediaBridgeState, PlayerState};
