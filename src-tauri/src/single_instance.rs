@@ -1,5 +1,3 @@
-//! Ensures only one primary Wave process (GUI or CLI daemon) runs at a time.
-
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -63,6 +61,20 @@ pub fn try_acquire(mode: InstanceMode) -> Result<InstanceGuard, String> {
 pub fn primary_is_running() -> bool {
     read_lock_info()
         .map(|(pid, _)| is_process_alive(pid))
+        .unwrap_or(false)
+}
+
+/// Whether the Tauri GUI instance holds the primary lock.
+pub fn gui_is_running() -> bool {
+    read_lock_info()
+        .map(|(pid, mode)| mode == InstanceMode::Gui && is_process_alive(pid))
+        .unwrap_or(false)
+}
+
+/// Whether only the CLI playback daemon holds the primary lock.
+pub fn daemon_is_running() -> bool {
+    read_lock_info()
+        .map(|(pid, mode)| mode == InstanceMode::Daemon && is_process_alive(pid))
         .unwrap_or(false)
 }
 

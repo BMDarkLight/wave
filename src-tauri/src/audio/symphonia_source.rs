@@ -36,6 +36,8 @@ pub struct SymphoniaSource {
 
 impl SymphoniaSource {
     pub fn new(path: &str) -> Result<Self, AudioError> {
+        crate::path_validation::validate_audio_path(path)
+            .map_err(|e| AudioError::FileOpen(e))?;
         let file = File::open(path).map_err(|error| AudioError::FileOpen(error.to_string()))?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
 

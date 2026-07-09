@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; connect-src 'self' https://musicbrainz.org https://lrclib.net https://coverartarchive.org; font-src 'self' data:"
     }
   },
   "bundle": {

@@ -6,7 +6,6 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,9 +16,18 @@ use tray_icon::{TrayIconBuilder, TrayIconEvent};
 use crate::app_paths::{daemon_state_path, library_db_path};
 use crate::audio::player::{AudioPlayer, RepeatMode};
 use crate::library::Library;
+use crate::media_controls::TrackMetadata;
 use crate::metadata::{extract_track, Track};
+use crate::path_validation::validate_audio_path;
 
 // ── IPC types ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DaemonEnvelope {
+    token: String,
+    #[serde(flatten)]
+    request: DaemonRequest,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -100,45 +108,101 @@ impl DaemonResponse {
 struct DaemonState {
     player: AudioPlayer,
     library: Library,
+    media: DaemonMedia,
     shutdown: bool,
 }
 
 struct SharedState(Arc<Mutex<DaemonState>>);
 
+#[cfg(not(target_os = "windows"))]
+struct DaemonMedia {
+    controls: Option<souvlaki::MediaControls>,
+}
+
+#[cfg(target_os = "windows")]
+struct DaemonMedia;
+
+#[cfg(not(target_os = "windows"))]
+impl DaemonMedia {
+    fn new() -> Self {
+        use souvlaki::{MediaControls, PlatformConfig};
+        let config = PlatformConfig {
+            dbus_name: "app.bmdarklight.wave.daemon",
+            display_name: "Wave",
+            hwnd: None,
+        };
+        let controls = MediaControls::new(config).ok();
+        Self { controls }
+    }
+
+    fn set_metadata(&mut self, meta: &TrackMetadata) {
+        use souvlaki::MediaMetadata;
+        let duration = meta.duration_seconds.map(Duration::from_secs_f64);
+        if let Some(controls) = &mut self.controls {
+            let _ = controls.set_metadata(MediaMetadata {
+                title: meta.title.as_deref(),
+                artist: meta.artist.as_deref(),
+                album: meta.album.as_deref(),
+                duration,
+                cover_url: meta.cover_url.as_deref(),
+            });
+        }
+    }
+
+    fn set_playback(&mut self, playing: bool, position_secs: f64, stopped: bool) {
+        use souvlaki::{MediaPlayback, MediaPosition};
+        if let Some(controls) = &mut self.controls {
+            let playback = if stopped {
+                MediaPlayback::Stopped
+            } else if playing {
+                MediaPlayback::Playing {
+                    progress: Some(MediaPosition(Duration::from_secs_f64(position_secs))),
+                }
+            } else {
+                MediaPlayback::Paused {
+                    progress: Some(MediaPosition(Duration::from_secs_f64(position_secs))),
+                }
+            };
+            let _ = controls.set_playback(playback);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.set_playback(false, 0.0, true);
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl DaemonMedia {
+    fn new() -> Self {
+        Self
+    }
+
+    fn set_metadata(&mut self, _meta: &TrackMetadata) {}
+
+    fn set_playback(&mut self, _playing: bool, _position_secs: f64, _stopped: bool) {}
+
+    fn clear(&mut self) {}
+}
+
 // ── Client API ────────────────────────────────────────────────────────────────
 
 /// Send a request only if the daemon is already running (does not spawn).
 pub fn daemon_request_if_running(request: DaemonRequest) -> Result<Option<DaemonResponse>, String> {
-    let Some(port) = read_daemon_port() else {
+    let Some(conn) = read_daemon_connection() else {
         return Ok(None);
     };
-    let addr = format!("127.0.0.1:{port}");
-    let mut stream =
-        TcpStream::connect(&addr).map_err(|e| format!("Failed to connect to playback daemon: {e}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
-        .map_err(|e| e.to_string())?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(30)))
-        .map_err(|e| e.to_string())?;
-
-    let line = serde_json::to_string(&request).map_err(|e| e.to_string())?;
-    writeln!(stream, "{line}").map_err(|e| e.to_string())?;
-
-    let mut reader = BufReader::new(stream);
-    let mut response_line = String::new();
-    reader
-        .read_line(&mut response_line)
-        .map_err(|e| e.to_string())?;
-    Ok(Some(
-        serde_json::from_str(response_line.trim()).map_err(|e| e.to_string())?,
-    ))
+    send_daemon_request(&conn, request).map(Some)
 }
 
 /// Send a request to the running playback daemon, starting it if needed.
 pub fn daemon_request(request: DaemonRequest) -> Result<DaemonResponse, String> {
-    let port = ensure_daemon_running()?;
-    let addr = format!("127.0.0.1:{port}");
+    let conn = ensure_daemon_connection()?;
+    send_daemon_request(&conn, request)
+}
+
+fn send_daemon_request(conn: &DaemonConnection, request: DaemonRequest) -> Result<DaemonResponse, String> {
+    let addr = format!("127.0.0.1:{}", conn.port);
     let mut stream =
         TcpStream::connect(&addr).map_err(|e| format!("Failed to connect to playback daemon: {e}"))?;
     stream
@@ -148,7 +212,11 @@ pub fn daemon_request(request: DaemonRequest) -> Result<DaemonResponse, String> 
         .set_write_timeout(Some(Duration::from_secs(30)))
         .map_err(|e| e.to_string())?;
 
-    let line = serde_json::to_string(&request).map_err(|e| e.to_string())?;
+    let envelope = DaemonEnvelope {
+        token: conn.token.clone(),
+        request,
+    };
+    let line = serde_json::to_string(&envelope).map_err(|e| e.to_string())?;
     writeln!(stream, "{line}").map_err(|e| e.to_string())?;
 
     let mut reader = BufReader::new(stream);
@@ -159,25 +227,55 @@ pub fn daemon_request(request: DaemonRequest) -> Result<DaemonResponse, String> 
     serde_json::from_str(response_line.trim()).map_err(|e| e.to_string())
 }
 
-/// Ensure the background daemon is running; returns its TCP port.
-pub fn ensure_daemon_running() -> Result<u16, String> {
-    if let Some(port) = read_daemon_port() {
-        return Ok(port);
+/// Ensure the background daemon is running; returns connection details.
+fn ensure_daemon_connection() -> Result<DaemonConnection, String> {
+    if let Some(conn) = read_daemon_connection() {
+        return Ok(conn);
     }
-    if crate::single_instance::primary_is_running() {
+    if crate::single_instance::gui_is_running() {
         return Err(crate::single_instance::already_running_message());
     }
-    spawn_daemon()
+    if crate::single_instance::daemon_is_running() {
+        return Err(
+            "Playback daemon is starting but not yet accepting connections. Try again.".to_string(),
+        );
+    }
+    spawn_daemon()?;
+    read_daemon_connection()
+        .ok_or_else(|| "Playback daemon failed to publish connection details.".to_string())
+}
+
+/// Ensure the background daemon is running; returns its TCP port.
+pub fn ensure_daemon_running() -> Result<u16, String> {
+    Ok(ensure_daemon_connection()?.port)
 }
 
 /// Whether the CLI playback daemon is running and accepting IPC.
 pub fn daemon_is_running() -> bool {
-    read_daemon_port().is_some()
+    read_daemon_connection().is_some()
 }
 
 // ── Daemon entry point ────────────────────────────────────────────────────────
 
+#[cfg(target_os = "macos")]
+fn init_macos_app() {
+    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+    use objc2_foundation::MainThreadMarker;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    app.finishLaunching();
+}
+
+#[cfg(not(target_os = "macos"))]
+fn init_macos_app() {}
+
 pub fn run_daemon() {
+    init_macos_app();
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -195,6 +293,7 @@ pub fn run_daemon() {
     let state = Arc::new(Mutex::new(DaemonState {
         player,
         library,
+        media: DaemonMedia::new(),
         shutdown: false,
     }));
 
@@ -207,13 +306,15 @@ pub fn run_daemon() {
         .expect("daemon listener address")
         .port();
 
-    write_daemon_state(port).unwrap_or_else(|e| {
+    let auth_token = uuid::Uuid::new_v4().to_string();
+    write_daemon_state(port, &auth_token).unwrap_or_else(|e| {
         eprintln!("Failed to write daemon state: {e}");
         std::process::exit(1);
     });
 
     let ipc_state = Arc::clone(&state);
-    std::thread::spawn(move || ipc_server_loop(listener, ipc_state));
+    let token_for_ipc = auth_token.clone();
+    std::thread::spawn(move || ipc_server_loop(listener, ipc_state, token_for_ipc));
 
     let tick_state = Arc::clone(&state);
     let tooltip: Arc<Mutex<String>> = Arc::new(Mutex::new("Wave".to_string()));
@@ -234,44 +335,60 @@ fn request_shutdown(state: &Arc<Mutex<DaemonState>>) {
 
 // ── IPC server ────────────────────────────────────────────────────────────────
 
-fn ipc_server_loop(listener: TcpListener, state: Arc<Mutex<DaemonState>>) {
+fn ipc_server_loop(listener: TcpListener, state: Arc<Mutex<DaemonState>>, auth_token: String) {
     for stream in listener.incoming() {
-        let Ok(mut stream) = stream else {
+        let Ok(stream) = stream else {
             continue;
         };
+        let state = Arc::clone(&state);
+        let auth_token = auth_token.clone();
+        std::thread::spawn(move || handle_ipc_connection(stream, state, auth_token));
+    }
+}
 
-        let mut line = String::new();
-        {
-            let mut reader = BufReader::new(&stream);
-            if reader.read_line(&mut line).is_err() {
-                continue;
-            }
+fn handle_ipc_connection(
+    mut stream: TcpStream,
+    state: Arc<Mutex<DaemonState>>,
+    auth_token: String,
+) {
+    let mut line = String::new();
+    {
+        let mut reader = BufReader::new(&stream);
+        if reader.read_line(&mut line).is_err() {
+            return;
         }
+    }
 
-        let request: DaemonRequest = match serde_json::from_str(line.trim()) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = DaemonResponse::err(format!("Invalid request: {e}"));
-                let _ = write_response(&mut stream, &resp);
-                continue;
-            }
-        };
-
-        let should_shutdown = matches!(request, DaemonRequest::Shutdown | DaemonRequest::Stop);
-        let response = {
-            let mut guard = state.lock().expect("daemon state lock");
-            handle_request(&mut guard, request)
-        };
-
-        let _ = write_response(&mut stream, &response);
-
-        if should_shutdown {
-            if let Ok(mut guard) = state.lock() {
-                guard.shutdown = true;
-            }
-            remove_daemon_state();
-            std::process::exit(0);
+    let envelope: DaemonEnvelope = match serde_json::from_str(line.trim()) {
+        Ok(r) => r,
+        Err(e) => {
+            let resp = DaemonResponse::err(format!("Invalid request: {e}"));
+            let _ = write_response(&mut stream, &resp);
+            return;
         }
+    };
+
+    if envelope.token != auth_token {
+        let resp = DaemonResponse::err("Unauthorized daemon request");
+        let _ = write_response(&mut stream, &resp);
+        return;
+    }
+
+    let request = envelope.request;
+    let should_shutdown = matches!(request, DaemonRequest::Shutdown | DaemonRequest::Stop);
+    let response = {
+        let mut guard = state.lock().expect("daemon state lock");
+        handle_request(&mut guard, request)
+    };
+
+    let _ = write_response(&mut stream, &response);
+
+    if should_shutdown {
+        if let Ok(mut guard) = state.lock() {
+            guard.shutdown = true;
+        }
+        remove_daemon_state();
+        std::process::exit(0);
     }
 }
 
@@ -286,11 +403,17 @@ fn handle_request(state: &mut DaemonState, request: DaemonRequest) -> DaemonResp
     match request {
         DaemonRequest::Start { id } => daemon_start(state, &id),
         DaemonRequest::Pause => match state.player.pause() {
-            Ok(()) => DaemonResponse::ok_msg("Paused."),
+            Ok(()) => {
+                sync_media_playback_state(state);
+                DaemonResponse::ok_msg("Paused.")
+            }
             Err(e) => DaemonResponse::err(e.to_string()),
         },
         DaemonRequest::Resume => match state.player.resume() {
-            Ok(()) => DaemonResponse::ok_msg("Resumed."),
+            Ok(()) => {
+                sync_media_playback_state(state);
+                DaemonResponse::ok_msg("Resumed.")
+            }
             Err(e) => DaemonResponse::err(e.to_string()),
         },
         DaemonRequest::Stop => {
@@ -298,10 +421,12 @@ fn handle_request(state: &mut DaemonState, request: DaemonRequest) -> DaemonResp
                 return DaemonResponse::err(e.to_string());
             }
             state.shutdown = true;
+            state.media.clear();
             DaemonResponse::ok_msg("Playback stopped and daemon shut down.")
         }
         DaemonRequest::Next => match state.player.play_next() {
             Ok(Some(path)) => {
+                sync_media_for_path(state, &path);
                 let msg = format_now_playing(&state.library, &path);
                 DaemonResponse::ok_msg(msg)
             }
@@ -310,6 +435,7 @@ fn handle_request(state: &mut DaemonState, request: DaemonRequest) -> DaemonResp
         },
         DaemonRequest::Previous => match state.player.play_previous() {
             Ok(Some(path)) => {
+                sync_media_for_path(state, &path);
                 let msg = format_now_playing(&state.library, &path);
                 DaemonResponse::ok_msg(msg)
             }
@@ -317,7 +443,10 @@ fn handle_request(state: &mut DaemonState, request: DaemonRequest) -> DaemonResp
             Err(e) => DaemonResponse::err(e.to_string()),
         },
         DaemonRequest::Seek { seconds } => match state.player.seek(seconds) {
-            Ok(()) => DaemonResponse::ok_msg(format!("Seeked to {seconds:.1}s.")),
+            Ok(()) => {
+                sync_media_playback_state(state);
+                DaemonResponse::ok_msg(format!("Seeked to {seconds:.1}s."))
+            }
             Err(e) => DaemonResponse::err(e.to_string()),
         },
         DaemonRequest::Status => DaemonResponse {
@@ -343,6 +472,9 @@ fn handle_request(state: &mut DaemonState, request: DaemonRequest) -> DaemonResp
                 Ok(p) => p,
                 Err(e) => return DaemonResponse::err(e),
             };
+            if let Err(e) = validate_audio_path(&path) {
+                return DaemonResponse::err(e);
+            }
             state.player.enqueue(&path);
             DaemonResponse::ok_msg(format!("Added to queue: {path}"))
         }
@@ -355,6 +487,9 @@ fn handle_request(state: &mut DaemonState, request: DaemonRequest) -> DaemonResp
                 Ok(p) => p,
                 Err(e) => return DaemonResponse::err(e),
             };
+            if let Err(e) = validate_audio_path(&path) {
+                return DaemonResponse::err(e);
+            }
             state.player.insert_next(&path);
             DaemonResponse::ok_msg(format!("Will play next: {path}"))
         }
@@ -385,7 +520,10 @@ fn handle_request(state: &mut DaemonState, request: DaemonRequest) -> DaemonResp
             Err(e) => DaemonResponse::err(e.to_string()),
         },
         DaemonRequest::SetDevice { name } => match rebuild_player_on_device(state, &name) {
-            Ok(()) => DaemonResponse::ok_msg(format!("Switched to output device: {name}")),
+            Ok(()) => {
+                sync_media_current_track(state);
+                DaemonResponse::ok_msg(format!("Switched to output device: {name}"))
+            }
             Err(e) => DaemonResponse::err(e),
         },
     }
@@ -413,6 +551,7 @@ fn daemon_start(state: &mut DaemonState, id: &str) -> DaemonResponse {
                 if let Err(e) = state.player.play(&first_path) {
                     return DaemonResponse::err(e.to_string());
                 }
+                sync_media_for_track(state, &tracks[0]);
                 let msg = format!(
                     "Playing playlist \"{}\" — {} track(s), starting with: {} — {}",
                     tracks[0].album, tracks.len(), tracks[0].artist, tracks[0].title
@@ -426,11 +565,15 @@ fn daemon_start(state: &mut DaemonState, id: &str) -> DaemonResponse {
             Ok(p) => p,
             Err(e) => return DaemonResponse::err(e),
         };
+        if let Err(e) = validate_audio_path(&path) {
+            return DaemonResponse::err(e);
+        }
         state.player.enqueue(&path);
         state.player.queue.jump(0);
         if let Err(e) = state.player.play(&path) {
             return DaemonResponse::err(e.to_string());
         }
+        sync_media_for_path(state, &path);
         DaemonResponse::ok_msg(format_now_playing(&state.library, &path))
     }
 }
@@ -472,8 +615,14 @@ fn playback_tick_loop(state: Arc<Mutex<DaemonState>>, tooltip: Arc<Mutex<String>
 
         let mut guard = state.lock().expect("daemon state lock");
         if !guard.player.is_playing() && !guard.player.is_paused() {
-            let _ = guard.player.play_next();
+            if let Ok(Some(path)) = guard.player.play_next() {
+                sync_media_for_path(&mut guard, &path);
+            } else {
+                guard.media.clear();
+            }
         }
+
+        sync_media_playback_state(&mut guard);
 
         if let Ok(mut tip) = tooltip.lock() {
             *tip = current_tooltip(&guard.player, &guard.library);
@@ -494,6 +643,7 @@ fn run_tray_loop(state: Arc<Mutex<DaemonState>>, tooltip: Arc<Mutex<String>>) {
         .with_menu(Box::new(menu))
         .with_tooltip("Wave")
         .with_icon(icon)
+        .with_icon_as_template(cfg!(target_os = "macos"))
         .build()
         .unwrap_or_else(|e| {
             eprintln!("Failed to create tray icon: {e}");
@@ -524,6 +674,10 @@ fn run_tray_loop(state: Arc<Mutex<DaemonState>>, tooltip: Arc<Mutex<String>>) {
             if let TrayIconEvent::Click {
                 button: tray_icon::MouseButton::Left,
                 button_state: tray_icon::MouseButtonState::Up,
+                ..
+            }
+            | TrayIconEvent::DoubleClick {
+                button: tray_icon::MouseButton::Left,
                 ..
             } = event
             {
@@ -563,7 +717,7 @@ fn run_tray_loop(state: Arc<Mutex<DaemonState>>, tooltip: Arc<Mutex<String>>) {
     remove_daemon_state();
 }
 
-/// Dispatch OS events required for tray context menus (especially on Windows).
+/// Dispatch OS events required for tray context menus (especially on Windows/macOS).
 fn pump_tray_events() {
     #[cfg(windows)]
     {
@@ -576,6 +730,14 @@ fn pump_tray_events() {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoopRunInMode};
+        unsafe {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 1);
         }
     }
 }
@@ -668,6 +830,9 @@ fn build_tray_menu(state: &Arc<Mutex<DaemonState>>) -> Menu {
 }
 
 fn load_tray_icon() -> Result<tray_icon::Icon, String> {
+    #[cfg(target_os = "macos")]
+    let bytes = include_bytes!("../icons/tray-template.png");
+    #[cfg(not(target_os = "macos"))]
     let bytes = include_bytes!("../icons/32x32.png");
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder
@@ -700,14 +865,7 @@ fn resolve_track_path(library: &Library, id_or_path: &str) -> Result<String, Str
             return Ok(track.path);
         }
     }
-    let path = Path::new(id_or_path);
-    if path.exists() {
-        Ok(id_or_path.to_string())
-    } else {
-        Err(format!(
-            "Track not found: {id_or_path} (not a valid UUID or existing file path)"
-        ))
-    }
+    validate_audio_path(id_or_path).map(|p| p.to_string_lossy().into_owned())
 }
 
 fn track_for_path(library: &Library, path: &str) -> Option<Track> {
@@ -716,6 +874,49 @@ fn track_for_path(library: &Library, path: &str) -> Option<Track> {
         .ok()
         .and_then(|v| v.into_iter().next().flatten())
         .or_else(|| extract_track(path).ok())
+}
+
+fn track_to_metadata(track: &Track) -> TrackMetadata {
+    TrackMetadata {
+        title: Some(track.title.clone()),
+        artist: Some(track.artist.clone()),
+        album: Some(track.album.clone()),
+        duration_seconds: track.duration_seconds,
+        cover_url: track.cover_art_data_url.clone(),
+    }
+}
+
+fn sync_media_for_track(state: &mut DaemonState, track: &Track) {
+    state.media.set_metadata(&track_to_metadata(track));
+    sync_media_playback_state(state);
+}
+
+fn sync_media_for_path(state: &mut DaemonState, path: &str) {
+    if let Some(track) = track_for_path(&state.library, path) {
+        sync_media_for_track(state, &track);
+    } else {
+        sync_media_playback_state(state);
+    }
+}
+
+fn sync_media_current_track(state: &mut DaemonState) {
+    let current = state
+        .player
+        .get_current_path()
+        .map(|p| p.to_string_lossy().into_owned());
+    if let Some(path) = current {
+        sync_media_for_path(state, &path);
+    } else {
+        state.media.clear();
+    }
+}
+
+fn sync_media_playback_state(state: &mut DaemonState) {
+    state.media.set_playback(
+        state.player.is_playing(),
+        state.player.position_seconds(),
+        !state.player.is_playing() && !state.player.is_paused(),
+    );
 }
 
 fn format_now_playing(library: &Library, path: &str) -> String {
@@ -786,14 +987,22 @@ fn current_tooltip(player: &AudioPlayer, library: &Library) -> String {
 
 // ── Daemon lifecycle files ────────────────────────────────────────────────────
 
+#[derive(Clone)]
+struct DaemonConnection {
+    port: u16,
+    token: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct DaemonStateFile {
     pid: u32,
     port: u16,
+    token: String,
 }
 
-fn write_daemon_state(port: u16) -> Result<(), String> {
-    let dir = daemon_state_path()
+fn write_daemon_state(port: u16, token: &str) -> Result<(), String> {
+    let path = daemon_state_path();
+    let dir = path
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(crate::app_paths::data_dir);
@@ -802,30 +1011,47 @@ fn write_daemon_state(port: u16) -> Result<(), String> {
     let state = DaemonStateFile {
         pid: std::process::id(),
         port,
+        token: token.to_string(),
     };
     let json = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
-    std::fs::write(daemon_state_path(), json).map_err(|e| e.to_string())
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
 }
 
 fn remove_daemon_state() {
     let _ = std::fs::remove_file(daemon_state_path());
 }
 
-fn read_daemon_port() -> Option<u16> {
-    let contents = std::fs::read_to_string(daemon_state_path()).ok()?;
+fn read_daemon_connection() -> Option<DaemonConnection> {
+    let path = daemon_state_path();
+    let contents = std::fs::read_to_string(&path).ok()?;
     let state: DaemonStateFile = serde_json::from_str(&contents).ok()?;
     if !crate::single_instance::is_process_alive(state.pid) {
-        let _ = std::fs::remove_file(daemon_state_path());
+        let _ = std::fs::remove_file(&path);
         return None;
     }
     let addr = format!("127.0.0.1:{}", state.port);
     TcpStream::connect_timeout(&addr.parse().ok()?, Duration::from_millis(300)).ok()?;
-    Some(state.port)
+    Some(DaemonConnection {
+        port: state.port,
+        token: state.token,
+    })
 }
 
-fn spawn_daemon() -> Result<u16, String> {
-    if crate::single_instance::primary_is_running() {
+fn spawn_daemon() -> Result<(), String> {
+    if crate::single_instance::gui_is_running() {
         return Err(crate::single_instance::already_running_message());
+    }
+    if read_daemon_connection().is_some() {
+        return Ok(());
     }
 
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -845,15 +1071,16 @@ fn spawn_daemon() -> Result<u16, String> {
         use std::os::unix::process::CommandExt;
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::null())
+            .process_group(0);
     }
 
     cmd.spawn()
         .map_err(|e| format!("Failed to spawn playback daemon: {e}"))?;
 
     for _ in 0..100 {
-        if let Some(port) = read_daemon_port() {
-            return Ok(port);
+        if read_daemon_connection().is_some() {
+            return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
     }

@@ -9,6 +9,7 @@ mod gui_tray;
 mod library;
 mod media_controls;
 mod metadata;
+mod path_validation;
 pub mod playback_daemon;
 pub mod single_instance;
 mod os_media;
@@ -40,7 +41,6 @@ pub fn run() {
     let player_state = PlayerState(std::sync::Mutex::new(player));
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(player_state)
         .setup(|app| {

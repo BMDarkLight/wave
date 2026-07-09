@@ -1,12 +1,19 @@
-//! System tray for the Tauri GUI (taskbar on Windows/Linux, menu bar on macOS).
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
 
 use crate::commands::{LibraryState, PlayerState};
+
+static TRAY_CLICK_STATE: Mutex<Option<Instant>> = Mutex::new(None);
+static TRAY_CLICK_GENERATION: AtomicU64 = AtomicU64::new(0);
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
 
 pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let playlists_sub = build_playlists_submenu(app)?;
@@ -32,6 +39,9 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         ],
     )?;
 
+    #[cfg(target_os = "macos")]
+    let icon = load_tray_image()?;
+    #[cfg(not(target_os = "macos"))]
     let icon = app
         .default_window_icon()
         .cloned()
@@ -39,19 +49,28 @@ pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let tray = TrayIconBuilder::with_id("wave-tray")
         .icon(icon)
+        .icon_as_template(cfg!(target_os = "macos"))
         .menu(&menu)
         .tooltip("Wave")
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| handle_menu_event(app, event.id.as_ref()))
         .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+                return;
+            }
+
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
             } = event
             {
-                let app = tray.app_handle();
-                toggle_play_pause(app);
+                handle_tray_left_click(tray.app_handle());
             }
         })
         .build(app)?;
@@ -82,17 +101,56 @@ fn build_playlists_submenu(app: &mut tauri::App) -> Result<Submenu<tauri::Wry>, 
     Ok(sub)
 }
 
+#[cfg(target_os = "macos")]
+fn load_tray_image() -> tauri::Result<Image<'static>> {
+    let bytes = include_bytes!("../icons/tray-template.png");
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| std::io::Error::other(format!("PNG decode: {e}")))?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| std::io::Error::other(format!("PNG frame: {e}")))?;
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::Rgb => {
+            let mut rgba = Vec::with_capacity((buf.len() / 3) * 4);
+            for chunk in buf.chunks_exact(3) {
+                rgba.extend_from_slice(chunk);
+                rgba.push(255);
+            }
+            rgba
+        }
+        other => {
+            return Err(std::io::Error::other(format!(
+                "Unsupported tray PNG color type: {other:?}"
+            ))
+            .into());
+        }
+    };
+    Ok(Image::new_owned(rgba, info.width, info.height))
+}
+
 fn handle_menu_event(app: &AppHandle, id: &str) {
     if id == "tray_play_pause" {
         toggle_play_pause(app);
         return;
     }
     if id == "tray_prev" {
-        let _ = app.state::<PlayerState>().0.lock().map(|mut p| p.play_previous());
+        let _ = app
+            .state::<PlayerState>()
+            .0
+            .lock()
+            .map(|mut p| p.play_previous());
         return;
     }
     if id == "tray_next" {
-        let _ = app.state::<PlayerState>().0.lock().map(|mut p| p.play_next());
+        let _ = app
+            .state::<PlayerState>()
+            .0
+            .lock()
+            .map(|mut p| p.play_next());
         return;
     }
     if id == "tray_stop" {
@@ -100,10 +158,7 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         return;
     }
     if id == "tray_show" {
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.show();
-            let _ = window.set_focus();
-        }
+        show_main_window(app);
         return;
     }
     if id == "tray_quit" {
@@ -112,6 +167,38 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
     }
     if let Some(playlist_id) = id.strip_prefix("tray_playlist:") {
         play_playlist(app, playlist_id);
+    }
+}
+
+fn handle_tray_left_click(app: &AppHandle) {
+    let now = Instant::now();
+    let mut state = TRAY_CLICK_STATE.lock().unwrap_or_else(|e| e.into_inner());
+
+    if let Some(prev) = *state {
+        if now.duration_since(prev) <= DOUBLE_CLICK_WINDOW {
+            *state = None;
+            TRAY_CLICK_GENERATION.fetch_add(1, Ordering::SeqCst);
+            show_main_window(app);
+            return;
+        }
+    }
+
+    *state = Some(now);
+    let generation = TRAY_CLICK_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(DOUBLE_CLICK_WINDOW);
+        if TRAY_CLICK_GENERATION.load(Ordering::SeqCst) == generation {
+            toggle_play_pause(&app);
+        }
+    });
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
     }
 }
 

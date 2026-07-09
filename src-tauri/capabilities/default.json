@@ -13,7 +13,6 @@
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
     "core:window:allow-toggle-maximize",
-    "opener:default",
     "dialog:allow-open",
     "dialog:allow-save"
   ]

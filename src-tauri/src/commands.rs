@@ -10,6 +10,7 @@ use crate::dto::{
 use crate::library::{Library, PlaylistInfo};
 use crate::media_controls::TrackMetadata;
 use crate::metadata::{is_supported_audio_file, supported_audio_extensions, Track};
+use crate::path_validation::{validate_audio_path, validate_safe_output_path};
 use tauri::Manager;
 use walkdir::WalkDir;
 
@@ -143,6 +144,7 @@ pub async fn play_track(
     app: tauri::AppHandle,
     bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
+    validate_audio_path(&path)?;
     let p = path.clone();
     let app_clone = app.clone();
     blocking(move || {
@@ -268,6 +270,14 @@ pub async fn set_eq_bands(
     if bands.len() != 10 {
         return Err("Expected exactly 10 EQ band values".to_string());
     }
+    for (index, gain) in bands.iter().enumerate() {
+        if !gain.is_finite() {
+            return Err(format!("EQ band {index} must be a finite number"));
+        }
+        if gain.abs() > 24.0 {
+            return Err(format!("EQ band {index} gain must be between -24 and +24 dB"));
+        }
+    }
     let mut arr = [0.0f32; 10];
     arr.copy_from_slice(&bands);
     lock_player(&state)?.set_eq_bands(arr);
@@ -289,6 +299,7 @@ pub async fn export_eq_settings(
     name: Option<String>,
     state: tauri::State<'_, PlayerState>,
 ) -> Result<(), String> {
+    validate_safe_output_path(&path, "json")?;
     let player = lock_player(&state)?;
     let eq = player.eq_settings();
     crate::audio::dsp::EqPresetFile::save_to(&path, &eq, name)
@@ -785,6 +796,7 @@ pub async fn add_to_queue(
     path: String,
     state: tauri::State<'_, PlayerState>,
 ) -> Result<(), String> {
+    validate_audio_path(&path)?;
     lock_player(&state)?.enqueue(&path);
     Ok(())
 }
@@ -794,6 +806,7 @@ pub async fn queue_insert_next(
     path: String,
     state: tauri::State<'_, PlayerState>,
 ) -> Result<(), String> {
+    validate_audio_path(&path)?;
     lock_player(&state)?.insert_next(&path);
     Ok(())
 }
@@ -886,10 +899,16 @@ pub async fn export_playlist(
     blocking(move || {
         let library = app.state::<LibraryState>();
         let lib = library.0.lock().map_err(|e| e.to_string())?;
+        let expected_ext = match export_format.as_str() {
+            "m3u" => "m3u",
+            "json" => "json",
+            _ => return Err(format!("Unknown export format: {export_format}")),
+        };
+        validate_safe_output_path(&path, expected_ext)?;
         match export_format.as_str() {
             "m3u" => lib.export_playlist_m3u(&playlist_id, &path),
             "json" => lib.export_playlist_json(&playlist_id, &path),
-            _ => Err(format!("Unknown export format: {export_format}")),
+            _ => unreachable!(),
         }
     })
     .await

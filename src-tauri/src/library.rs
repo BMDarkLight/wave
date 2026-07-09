@@ -1255,6 +1255,18 @@ impl Library {
             .map_err(|error| format!("Failed to read JSON file: {error}"))?;
         let export: PlaylistExportJson = serde_json::from_str(&content)
             .map_err(|error| format!("Failed to parse playlist JSON: {error}"))?;
+        if export.format != "wave-playlist" {
+            return Err(format!(
+                "Unsupported playlist format: {} (expected wave-playlist)",
+                export.format
+            ));
+        }
+        if export.tracks.len() > 10_000 {
+            return Err(format!(
+                "Playlist has too many tracks ({}; max 10000)",
+                export.tracks.len()
+            ));
+        }
 
         let name = playlist_name.unwrap_or(&export.name);
         let playlist_info = self.create_playlist_for_import(name)?;

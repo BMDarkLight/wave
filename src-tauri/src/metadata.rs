@@ -307,6 +307,16 @@ fn read_sidecar_lyrics(path: &Path) -> Option<String> {
 }
 
 fn hash_file_sha256(path: &Path) -> Result<String, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("Failed to read file metadata: {error}"))?;
+    if metadata.len() > crate::path_validation::MAX_FILE_HASH_BYTES {
+        return Err(format!(
+            "File too large to fingerprint ({} bytes, max {})",
+            metadata.len(),
+            crate::path_validation::MAX_FILE_HASH_BYTES
+        ));
+    }
+
     let mut file = File::open(path).map_err(|error| format!("Failed to open file for hashing: {error}"))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];

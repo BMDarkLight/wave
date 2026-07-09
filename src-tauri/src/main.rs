@@ -1,23 +1,39 @@
-// Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     if args.iter().any(|a| a == "--playback-daemon") {
-        let _instance = wave_lib::single_instance::try_acquire(
-            wave_lib::single_instance::InstanceMode::Daemon,
-        )
-        .unwrap_or_else(|e| {
-            eprintln!("{e}");
-            std::process::exit(1);
-        });
+        let _instance =
+            wave_lib::single_instance::try_acquire(wave_lib::single_instance::InstanceMode::Daemon)
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
         wave_lib::playback_daemon::run_daemon();
         return;
     }
 
     if args.len() > 1 {
+        // Playback daemon is running: allow all CLI commands (library + IPC).
+        if wave_lib::playback_daemon::daemon_is_running() {
+            wave_lib::cli::run();
+            return;
+        }
         if wave_lib::cli::is_daemon_ipc_client(&args) {
+            wave_lib::cli::run();
+            return;
+        }
+
+        // GUI is running: allow library/metadata CLI, block playback daemon spawn.
+        if wave_lib::single_instance::gui_is_running() {
+            if wave_lib::cli::conflicts_with_gui(&args) {
+                eprintln!(
+                    "Wave desktop app is already running. Quit it before starting CLI playback, \
+                     or manage playback from the app window."
+                );
+                std::process::exit(1);
+            }
             wave_lib::cli::run();
             return;
         }

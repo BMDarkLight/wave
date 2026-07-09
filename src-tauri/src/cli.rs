@@ -76,6 +76,22 @@ pub enum TracksCmd {
         /// Search query string
         query: String,
     },
+    /// Add a track to a playlist (default playlist if omitted)
+    Add {
+        /// Track ID (UUID) or file path
+        track_id: String,
+        /// Playlist ID (defaults to the main library playlist)
+        #[arg(long)]
+        playlist_id: Option<String>,
+    },
+    /// Remove a track from a playlist (default playlist if omitted)
+    Remove {
+        /// Track ID (UUID) or file path
+        track_id: String,
+        /// Playlist ID (defaults to the main library playlist)
+        #[arg(long)]
+        playlist_id: Option<String>,
+    },
 }
 
 #[derive(clap::Subcommand)]
@@ -107,6 +123,42 @@ pub enum PlaylistsCmd {
     Query {
         /// Search query string
         query: String,
+    },
+    /// Create an empty playlist
+    Create {
+        /// Playlist name
+        name: String,
+    },
+    /// Delete a playlist
+    Delete {
+        /// Playlist ID
+        id: String,
+    },
+    /// Rename a playlist
+    Rename {
+        /// Playlist ID
+        id: String,
+        /// New name
+        name: String,
+    },
+    /// Remove all tracks from a playlist
+    Clear {
+        /// Playlist ID
+        id: String,
+    },
+    /// Add a track to a playlist
+    AddTrack {
+        /// Playlist ID
+        id: String,
+        /// Track ID (UUID) or file path
+        track_id: String,
+    },
+    /// Remove a track from a playlist
+    RemoveTrack {
+        /// Playlist ID
+        id: String,
+        /// Track ID (UUID) or file path
+        track_id: String,
     },
 }
 
@@ -369,6 +421,19 @@ pub fn is_daemon_ipc_client(args: &[String]) -> bool {
     }
 }
 
+/// Commands that spawn or control the CLI playback daemon while the GUI is open.
+pub fn conflicts_with_gui(args: &[String]) -> bool {
+    let cli = match Cli::try_parse_from(args) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    matches!(
+        cli.command,
+        Some(Commands::Playback(_)) | Some(Commands::Queue(_)) | Some(Commands::Devices(_))
+    )
+}
+
 pub fn run() {
     // Handle --cli/--headless flags: show CLI help then exit
     let args: Vec<String> = std::env::args().collect();
@@ -405,6 +470,14 @@ fn run_tracks(cmd: TracksCmd) {
         TracksCmd::Import { paths } => cmd_tracks_import(paths),
         TracksCmd::Info { track_id } => cmd_tracks_info(track_id),
         TracksCmd::Query { query } => cmd_tracks_query(query),
+        TracksCmd::Add {
+            track_id,
+            playlist_id,
+        } => cmd_tracks_add(track_id, playlist_id),
+        TracksCmd::Remove {
+            track_id,
+            playlist_id,
+        } => cmd_tracks_remove(track_id, playlist_id),
     }
 }
 
@@ -533,6 +606,46 @@ fn cmd_tracks_query(query: String) {
     }
 }
 
+fn cmd_tracks_add(track_id: String, playlist_id: Option<String>) {
+    let library = open_library();
+    let path = resolve_track_path(&library, &track_id).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    let result = if let Some(pid) = playlist_id {
+        library.add_track_to_playlist(&pid, path)
+    } else {
+        library.add_track_to_default_playlist(path)
+    };
+    match result {
+        Ok(track) => println!("Added: {} — {}", track.artist, track.title),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_tracks_remove(track_id: String, playlist_id: Option<String>) {
+    let library = open_library();
+    let path = resolve_track_path(&library, &track_id).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    let result = if let Some(pid) = playlist_id {
+        library.remove_track_from_playlist_by_path(&pid, &path)
+    } else {
+        library.remove_track_from_default_playlist(path)
+    };
+    match result {
+        Ok(()) => println!("Track removed from playlist."),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 // ── Playlists commands ──────────────────────────────────────────────────────
 
 fn run_playlists(cmd: PlaylistsCmd) {
@@ -542,6 +655,12 @@ fn run_playlists(cmd: PlaylistsCmd) {
         PlaylistsCmd::Export { id, format, output } => cmd_playlists_export(id, format, output),
         PlaylistsCmd::Info { id } => cmd_playlists_info(id),
         PlaylistsCmd::Query { query } => cmd_playlists_query(query),
+        PlaylistsCmd::Create { name } => cmd_playlists_create(name),
+        PlaylistsCmd::Delete { id } => cmd_playlists_delete(id),
+        PlaylistsCmd::Rename { id, name } => cmd_playlists_rename(id, name),
+        PlaylistsCmd::Clear { id } => cmd_playlists_clear(id),
+        PlaylistsCmd::AddTrack { id, track_id } => cmd_playlists_add_track(id, track_id),
+        PlaylistsCmd::RemoveTrack { id, track_id } => cmd_playlists_remove_track(id, track_id),
     }
 }
 
@@ -570,6 +689,10 @@ fn cmd_playlists_list() {
 
 fn cmd_playlists_import(file: String, name: Option<String>) {
     let library = open_library();
+    if let Err(e) = crate::path_validation::validate_playlist_import_path(&file) {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
     let ext = Path::new(&file)
         .extension()
         .and_then(|e| e.to_str())
@@ -599,13 +722,22 @@ fn cmd_playlists_import(file: String, name: Option<String>) {
 
 fn cmd_playlists_export(id: String, format: String, output: String) {
     let library = open_library();
-    match format.as_str() {
-        "m3u" => library.export_playlist_m3u(&id, &output),
-        "json" => library.export_playlist_json(&id, &output),
+    let expected_ext = match format.as_str() {
+        "m3u" => "m3u",
+        "json" => "json",
         _ => {
             eprintln!("Unknown export format: {format} (use m3u or json)");
             std::process::exit(1);
         }
+    };
+    if let Err(e) = crate::path_validation::validate_safe_output_path(&output, expected_ext) {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+    match format.as_str() {
+        "m3u" => library.export_playlist_m3u(&id, &output),
+        "json" => library.export_playlist_json(&id, &output),
+        _ => unreachable!(),
     }
     .unwrap_or_else(|e| {
         eprintln!("Error: {e}");
@@ -661,6 +793,80 @@ fn cmd_playlists_query(query: String) {
                 println!("  {:36}  {:5} tracks  {}", pl.id, pl.track_count, pl.name);
             }
         }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_playlists_create(name: String) {
+    let library = open_library();
+    match library.create_playlist(&name) {
+        Ok(info) => println!("Created playlist \"{}\" (ID: {})", info.name, info.id),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_playlists_delete(id: String) {
+    let library = open_library();
+    match library.delete_playlist(&id) {
+        Ok(()) => println!("Deleted playlist {id}."),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_playlists_rename(id: String, name: String) {
+    let library = open_library();
+    match library.rename_playlist(&id, &name) {
+        Ok(()) => println!("Renamed playlist {id} to \"{name}\"."),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_playlists_clear(id: String) {
+    let library = open_library();
+    match library.clear_playlist(&id) {
+        Ok(()) => println!("Cleared all tracks from playlist {id}."),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_playlists_add_track(id: String, track_id: String) {
+    let library = open_library();
+    let path = resolve_track_path(&library, &track_id).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    match library.add_track_to_playlist(&id, path) {
+        Ok(track) => println!("Added to playlist: {} — {}", track.artist, track.title),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_playlists_remove_track(id: String, track_id: String) {
+    let library = open_library();
+    let path = resolve_track_path(&library, &track_id).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    });
+    match library.remove_track_from_playlist_by_path(&id, &path) {
+        Ok(()) => println!("Removed track from playlist {id}."),
         Err(e) => {
             eprintln!("Error: {e}");
             std::process::exit(1);
