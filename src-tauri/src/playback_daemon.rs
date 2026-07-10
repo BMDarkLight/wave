@@ -4,13 +4,10 @@
 //! TCP control socket for `wave playback …` subcommands, and shows a system
 //! tray / menu-bar icon with playlist and transport controls.
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
+#[cfg(not(target_os = "android"))]
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use serde::{Deserialize, Serialize};
+#[cfg(not(target_os = "android"))]
 use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
 use crate::app_paths::{daemon_state_path, library_db_path};
@@ -19,6 +16,11 @@ use crate::library::Library;
 use crate::media_controls::TrackMetadata;
 use crate::metadata::{extract_track, Track};
 use crate::path_validation::validate_audio_path;
+
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 // ── IPC types ─────────────────────────────────────────────────────────────────
 
@@ -321,7 +323,16 @@ pub fn run_daemon() {
     let tooltip_for_tick = Arc::clone(&tooltip);
     std::thread::spawn(move || playback_tick_loop(tick_state, tooltip_for_tick));
 
+    #[cfg(not(target_os = "android"))]
     run_tray_loop(state, tooltip);
+    
+    #[cfg(target_os = "android")]
+    {
+        // On Android, we don't run the tray loop - the main thread handles the daemon
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    }
 }
 
 fn request_shutdown(state: &Arc<Mutex<DaemonState>>) {
@@ -632,6 +643,7 @@ fn playback_tick_loop(state: Arc<Mutex<DaemonState>>, tooltip: Arc<Mutex<String>
 
 // ── Tray icon ─────────────────────────────────────────────────────────────────
 
+#[cfg(not(target_os = "android"))]
 fn run_tray_loop(state: Arc<Mutex<DaemonState>>, tooltip: Arc<Mutex<String>>) {
     let icon = load_tray_icon().unwrap_or_else(|e| {
         eprintln!("Failed to load tray icon: {e}");
@@ -718,6 +730,7 @@ fn run_tray_loop(state: Arc<Mutex<DaemonState>>, tooltip: Arc<Mutex<String>>) {
 }
 
 /// Dispatch OS events required for tray context menus (especially on Windows/macOS).
+#[cfg(not(target_os = "android"))]
 fn pump_tray_events() {
     #[cfg(windows)]
     {
@@ -742,6 +755,7 @@ fn pump_tray_events() {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn handle_menu_event(shared: &SharedState, id: &str) {
     if id == "play_pause" {
         toggle_play_pause(shared);
@@ -791,11 +805,13 @@ fn play_pause_label(state: &DaemonState) -> &'static str {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn refresh_tray_menu(tray: &tray_icon::TrayIcon, state: &Arc<Mutex<DaemonState>>) {
     let menu = build_tray_menu(state);
     let _ = tray.set_menu(Some(Box::new(menu)));
 }
 
+#[cfg(not(target_os = "android"))]
 fn build_tray_menu(state: &Arc<Mutex<DaemonState>>) -> Menu {
     let menu = Menu::new();
 
@@ -829,6 +845,7 @@ fn build_tray_menu(state: &Arc<Mutex<DaemonState>>) -> Menu {
     menu
 }
 
+#[cfg(not(target_os = "android"))]
 fn load_tray_icon() -> Result<tray_icon::Icon, String> {
     #[cfg(target_os = "macos")]
     let bytes = include_bytes!("../icons/tray-template.png");

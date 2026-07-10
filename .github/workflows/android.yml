@@ -59,23 +59,29 @@ jobs:
           echo "ANDROID_NDK_ROOT=$ANDROID_NDK_ROOT" >> $GITHUB_ENV
           
           # Set up toolchain for each architecture
+          # Note: Rust target triples map to clang tools as follows:
+          # aarch64-linux-android -> aarch64-linux-android34-clang
+          # armv7-linux-androideabi -> armv7a-linux-androideabi34-clang
           if [ "${{ matrix.arch }}" = "arm64-v8a" ]; then
-            TARGET="aarch64-linux-android"
-            CC="aarch64-linux-android34-clang"
-            CXX="aarch64-linux-android34-clang++"
-            CARGO_TARGET="aarch64_linux_android"
+            RUST_TARGET="aarch64-linux-android"
+            CLANG_TARGET="aarch64-linux-android"
           else
-            TARGET="armv7-linux-androideabi"
-            CC="armv7a-linux-androideabi34-clang"
-            CXX="armv7a-linux-androideabi34-clang++"
-            CARGO_TARGET="armv7_linux_androideabi"
+            RUST_TARGET="armv7-linux-androideabi"
+            CLANG_TARGET="armv7a-linux-androideabi"
           fi
           
           TOOLCHAIN_DIR="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          echo "CC_${CARGO_TARGET}=${TOOLCHAIN_DIR}/${CC}" >> $GITHUB_ENV
-          echo "CXX_${CARGO_TARGET}=${TOOLCHAIN_DIR}/${CXX}" >> $GITHUB_ENV
-          echo "AR_${CARGO_TARGET}=${TOOLCHAIN_DIR}/llvm-ar" >> $GITHUB_ENV
-          echo "CARGO_TARGET_${CARGO_TARGET}_LINKER=${TOOLCHAIN_DIR}/${CC}" >> $GITHUB_ENV
+          CC="${TOOLCHAIN_DIR}/${CLANG_TARGET}34-clang"
+          CXX="${TOOLCHAIN_DIR}/${CLANG_TARGET}34-clang++"
+          AR="${TOOLCHAIN_DIR}/llvm-ar"
+          
+          echo "CC_${RUST_TARGET//-/_}=${CC}" >> $GITHUB_ENV
+          echo "CXX_${RUST_TARGET//-/_}=${CXX}" >> $GITHUB_ENV
+          echo "AR_${RUST_TARGET//-/_}=${AR}" >> $GITHUB_ENV
+          echo "CARGO_TARGET_${RUST_TARGET//-/_}_LINKER=${CC}" >> $GITHUB_ENV
+          
+          # Add toolchain to PATH
+          echo "${TOOLCHAIN_DIR}" >> $GITHUB_PATH
 
       - name: Install Linux dependencies
         run: |
