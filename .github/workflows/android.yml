@@ -63,17 +63,19 @@ jobs:
             TARGET="aarch64-linux-android"
             CC="aarch64-linux-android34-clang"
             CXX="aarch64-linux-android34-clang++"
+            CARGO_TARGET="aarch64_linux_android"
           else
-            TARGET="armv7a-linux-androideabi"
+            TARGET="armv7-linux-androideabi"
             CC="armv7a-linux-androideabi34-clang"
             CXX="armv7a-linux-androideabi34-clang++"
+            CARGO_TARGET="armv7_linux_androideabi"
           fi
           
           TOOLCHAIN_DIR="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          echo "CC_${TARGET//-/_}=${TOOLCHAIN_DIR}/${CC}" >> $GITHUB_ENV
-          echo "CXX_${TARGET//-/_}=${TOOLCHAIN_DIR}/${CXX}" >> $GITHUB_ENV
-          echo "AR_${TARGET//-/_}=${TOOLCHAIN_DIR}/llvm-ar" >> $GITHUB_ENV
-          echo "CARGO_TARGET_${TARGET//-/_}_LINKER=${TOOLCHAIN_DIR}/${CC}" >> $GITHUB_ENV
+          echo "CC_${CARGO_TARGET}=${TOOLCHAIN_DIR}/${CC}" >> $GITHUB_ENV
+          echo "CXX_${CARGO_TARGET}=${TOOLCHAIN_DIR}/${CXX}" >> $GITHUB_ENV
+          echo "AR_${CARGO_TARGET}=${TOOLCHAIN_DIR}/llvm-ar" >> $GITHUB_ENV
+          echo "CARGO_TARGET_${CARGO_TARGET}_LINKER=${TOOLCHAIN_DIR}/${CC}" >> $GITHUB_ENV
 
       - name: Install Linux dependencies
         run: |
