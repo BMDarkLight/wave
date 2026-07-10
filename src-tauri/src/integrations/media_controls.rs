@@ -57,7 +57,22 @@ mod cover_art {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
+mod cover_art {
+    pub struct Cache;
+
+    impl Cache {
+        pub fn new() -> Self {
+            Self
+        }
+
+        pub fn resolve_url(&mut self, cover_url: Option<&str>) -> Option<String> {
+            cover_url.map(str::to_string)
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
 mod cover_art {
     pub struct Cache;
 
@@ -78,9 +93,14 @@ struct MediaBridge {
     cover_art_cache: cover_art::Cache,
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
 struct MediaBridge {
     controls: souvlaki::MediaControls,
+    cover_art_cache: cover_art::Cache,
+}
+
+#[cfg(target_os = "android")]
+struct MediaBridge {
     cover_art_cache: cover_art::Cache,
 }
 
@@ -96,7 +116,7 @@ impl MediaBridge {
             })
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             use souvlaki::{MediaControlEvent, MediaControls, PlatformConfig};
             use tauri::Emitter;
@@ -155,6 +175,16 @@ impl MediaBridge {
                 cover_art_cache: cover_art::Cache::new(),
             })
         }
+
+        #[cfg(target_os = "android")]
+        {
+            // Android media controls are handled via Tauri's Android integration
+            // and MediaSessionCompat through JNI - for now we just provide a stub
+            tracing::info!("Android media controls stub initialized");
+            Ok(Self {
+                cover_art_cache: cover_art::Cache::new(),
+            })
+        }
     }
 
     fn set_metadata(&mut self, meta: &TrackMetadata) {
@@ -167,7 +197,7 @@ impl MediaBridge {
             self.backend.set_metadata(meta, cover_ref);
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             use souvlaki::MediaMetadata;
             let duration = meta.duration_seconds.map(Duration::from_secs_f64);
@@ -184,6 +214,12 @@ impl MediaBridge {
                 tracing::warn!("Failed to update OS media metadata: {error:?}");
             }
         }
+
+        #[cfg(target_os = "android")]
+        {
+            // TODO: Implement Android MediaSession metadata via JNI
+            let _ = meta;
+        }
     }
 
     fn now_playing(&mut self, meta: &TrackMetadata) {
@@ -197,13 +233,19 @@ impl MediaBridge {
             self.backend.set_playback(true, position_secs, false);
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             use souvlaki::{MediaPlayback, MediaPosition};
             let pos = MediaPosition(Duration::from_secs_f64(position_secs));
             let _ = self.controls.set_playback(MediaPlayback::Playing {
                 progress: Some(pos),
             });
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            // TODO: Implement Android MediaSession playback state via JNI
+            let _ = position_secs;
         }
     }
 
@@ -213,13 +255,19 @@ impl MediaBridge {
             self.backend.set_playback(false, position_secs, false);
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             use souvlaki::{MediaPlayback, MediaPosition};
             let pos = MediaPosition(Duration::from_secs_f64(position_secs));
             let _ = self.controls.set_playback(MediaPlayback::Paused {
                 progress: Some(pos),
             });
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            // TODO: Implement Android MediaSession paused state via JNI
+            let _ = position_secs;
         }
     }
 
@@ -229,10 +277,15 @@ impl MediaBridge {
             self.backend.set_playback(false, 0.0, true);
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             use souvlaki::MediaPlayback;
             let _ = self.controls.set_playback(MediaPlayback::Stopped);
+        }
+
+        #[cfg(target_os = "android")]
+        {
+            // TODO: Implement Android MediaSession stopped state via JNI
         }
     }
 
