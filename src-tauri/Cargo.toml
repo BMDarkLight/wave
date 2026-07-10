@@ -18,7 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2.11", features = ["tray-icon"] }
+tauri = { version = "2.11", features = ["tray-icon", "wry"] }
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -39,8 +39,6 @@ sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 tokio = "1"
 clap = { version = "4", features = ["derive"] }
-tray-icon = "0.21"
-muda = "0.17"
 png = "0.17"
 fs4 = { version = "0.12", features = ["sync"] }
 windows-sys = { version = "0.60", features = [
@@ -48,6 +46,20 @@ windows-sys = { version = "0.60", features = [
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tray-icon = "0.24"
+muda = "0.19"
+
+[target.'cfg(target_os = "android")'.dependencies]
+tauri = { version = "2.11", features = [], default-features = false }
+jni = { version = "0.22", default-features = false, features = ["invocation"] }
+ndk = "0.9"
+ndk-glue = "0.7"
+ndk-sys = { version = "0.6", features = [] }
+oboe = "0.6"
+android_logger = "0.15"
+android-activity = { version = "0.6", features = ["native-activity"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
