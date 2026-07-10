@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import trayTemplate from "../assets/tray-template.svg";
 import {
   BiShuffle,
   BiPlay,
@@ -1356,7 +1357,9 @@ function App() {
         >
           <BiMenu />
         </button>
-        <div className="mobile-topbar-title">Wave</div>
+        <div className="mobile-topbar-title">
+            <img src={trayTemplate} alt="Wave" className="mobile-topbar-logo" />
+          </div>
         <button
           className={`mobile-topbar-btn ${showQueue ? "active" : ""}`}
           onClick={handleToggleQueue}
@@ -1383,7 +1386,9 @@ function App() {
       )}
 
       <aside className="sidebar">
-          <div className="brand-mark" style={{ textAlign: "center" }}>Wave</div>
+          <div className="brand-mark" style={{ textAlign: "center" }}>
+            <img src={trayTemplate} alt="Wave" className="brand-logo" />
+          </div>
           <div className="playlist-section">
             <div className="playlist-section-header">
               <p>Playlists</p>

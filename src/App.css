@@ -81,12 +81,28 @@ input:disabled {
 .brand-mark {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 10px;
   min-height: 72px;
   padding: 18px;
   font-size: 22px;
   font-weight: 800;
   letter-spacing: -0.04em;
+}
+
+.brand-logo,
+.mobile-topbar-logo {
+  filter: brightness(0) invert(1);
+}
+
+.brand-logo {
+  width: 48px;
+  height: 48px;
+}
+
+.mobile-topbar-logo {
+  width: 36px;
+  height: 36px;
 }
 
 .brand-mark span,
@@ -1227,6 +1243,12 @@ img.queue-thumb {
   padding: 16px 18px;
   border-bottom: 1px solid var(--line);
   overflow: hidden;
+}
+
+@media (max-width: 900px) {
+  .right-panel-header {
+    padding-top: max(16px, env(safe-area-inset-top, 0px) + 12px);
+  }
 }
 
 .right-panel-header h2 {
