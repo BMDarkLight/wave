@@ -227,10 +227,6 @@ pub fn extract_track(path: &str) -> Result<Track, String> {
     if track.cover_art_data_url.is_none() {
         enrich_cover_art_online(&mut track);
     }
-    if track.lyrics.is_none() {
-        enrich_lyrics_online(&mut track);
-    }
-
     Ok(track)
 }
 
@@ -346,7 +342,7 @@ fn enrich_cover_art_online(track: &mut Track) {
     track.cover_art_source = Some("cover-art-archive".to_string());
 }
 
-fn enrich_lyrics_online(track: &mut Track) {
+pub fn enrich_lyrics_online(track: &mut Track) {
     let client = metadata_client();
 
     let mut request = client

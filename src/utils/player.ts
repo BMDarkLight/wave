@@ -308,6 +308,10 @@ export const removeTrackFromPlaylistById = (id: string, path: string): Promise<v
   return safeInvoke("remove_track_from_playlist_by_id", { id, path });
 };
 
+export const fetchLyricsForTrack = (path: string): Promise<Track | null> => {
+  return safeInvoke<Track>("fetch_lyrics_for_track", { path }).catch(() => null);
+};
+
 export const clearPlaylistById = (id: string): Promise<void> => {
   return safeInvoke("clear_playlist_by_id", { id });
 };
@@ -369,6 +373,10 @@ export const queueInsertNext = (path: string): Promise<void> => {
 
 export const removeFromQueue = (index: number): Promise<string | null> => {
   return safeInvoke<string | null>("remove_from_queue", { index });
+};
+
+export const moveQueueTrack = (from: number, to: number): Promise<void> => {
+  return safeInvoke("move_queue_track", { from, to });
 };
 
 export const clearQueue = (): Promise<void> => {
@@ -454,6 +462,40 @@ export const setRepeat = (mode: "off" | "one" | "all"): Promise<void> => {
 
 export const getPlaybackMode = (): Promise<PlaybackMode> => {
   return safeInvoke<PlaybackMode>("get_playback_mode");
+};
+
+// ── Equalizer ─────────────────────────────────────────────────────────────────
+
+export interface EqSettings {
+  bands: number[];
+  enabled: boolean;
+}
+
+export const EQ_BAND_LABELS = ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"] as const;
+
+export const EQ_PRESETS: { id: string; label: string; bands: number[] }[] = [
+  { id: "flat", label: "Flat", bands: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+  { id: "bass-boost", label: "Bass boost", bands: [4, 4, 2, 0, 0, 0, 0, 0, 0, 0] },
+  { id: "bass-cut", label: "Bass cut", bands: [-4, -4, -2, 0, 0, 0, 0, 0, 0, 0] },
+  { id: "rock", label: "Rock", bands: [3, 2, 0, -1, -1, 0, 1, 2, 3, 2] },
+  { id: "pop", label: "Pop", bands: [1, 1, 2, 3, 3, 2, 1, 1, 1, 1] },
+  { id: "jazz", label: "Jazz", bands: [2, 2, 1, 1, 0, 0, 0, 1, 1, 1] },
+  { id: "classical", label: "Classical", bands: [0, 0, 0, 0, 0, 0, 0, 1, 2, 2] },
+  { id: "vocal", label: "Vocal", bands: [-2, -2, -1, 1, 3, 4, 3, 1, -1, -2] },
+  { id: "loudness", label: "Loudness", bands: [5, 4, 2, 0, -1, 0, 1, 2, 3, 4] },
+  { id: "headphones", label: "Headphones", bands: [0, 0, 0, 1, 1, 0, -1, -1, 0, 0] },
+];
+
+export const getEqSettings = (): Promise<EqSettings> => {
+  return safeInvoke<EqSettings>("get_eq_settings");
+};
+
+export const setEqBands = (bands: number[]): Promise<void> => {
+  return safeInvoke("set_eq_bands", { bands });
+};
+
+export const setEqEnabled = (enabled: boolean): Promise<void> => {
+  return safeInvoke("set_eq_enabled", { enabled });
 };
 
 // ── Audio Output Devices ──────────────────────────────────────────────────────

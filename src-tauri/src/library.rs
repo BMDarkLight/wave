@@ -1129,6 +1129,22 @@ impl Library {
         Ok(())
     }
 
+    pub fn set_track_lyrics(
+        &self,
+        track_id: &str,
+        lyrics: &str,
+        source: &str,
+    ) -> Result<(), String> {
+        let connection = self.lock_connection()?;
+        connection
+            .execute(
+                "UPDATE tracks SET lyrics = ?1, lyrics_source = ?2 WHERE id = ?3",
+                params![lyrics, source, track_id],
+            )
+            .map_err(|e| format!("Failed to update track lyrics: {e}"))?;
+        Ok(())
+    }
+
     pub fn get_tracks_by_paths(&self, paths: &[String]) -> Result<Vec<Option<Track>>, String> {
         if paths.is_empty() {
             return Ok(Vec::new());

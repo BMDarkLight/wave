@@ -9,7 +9,7 @@ use crate::dto::{
 };
 use crate::library::{Library, PlaylistInfo};
 use crate::media_controls::TrackMetadata;
-use crate::metadata::{is_supported_audio_file, supported_audio_extensions, Track};
+use crate::metadata::{enrich_lyrics_online, is_supported_audio_file, supported_audio_extensions, Track};
 use crate::path_validation::{validate_audio_path, validate_safe_output_path};
 use tauri::Manager;
 use walkdir::WalkDir;
@@ -757,6 +757,52 @@ pub async fn get_artist_tracks(
 }
 
 #[tauri::command]
+pub async fn fetch_lyrics_for_track(
+    path: String,
+    app: tauri::AppHandle,
+) -> Result<Track, String> {
+    validate_audio_path(&path)?;
+    let p = path.clone();
+    let app_clone = app.clone();
+
+    // Resolve under the library lock, then release it before any network I/O
+    // so playback controls stay responsive while lyrics are fetched.
+    let mut track = blocking(move || {
+        let library = app_clone.state::<LibraryState>();
+        let lib = library.0.lock().map_err(|e| e.to_string())?;
+        Ok(resolve_track(&lib, &p))
+    })
+    .await?;
+
+    if track.lyrics.is_some() {
+        return Ok(track);
+    }
+
+    let enriched = blocking(move || {
+        let mut track = track;
+        enrich_lyrics_online(&mut track);
+        Ok(track)
+    })
+    .await?;
+    track = enriched;
+
+    if let (Some(lyrics), Some(source)) = (&track.lyrics.clone(), &track.lyrics_source.clone()) {
+        let track_id = track.id.clone();
+        let lyrics = lyrics.clone();
+        let source = source.clone();
+        let app_clone = app.clone();
+        let _ = blocking(move || {
+            let library = app_clone.state::<LibraryState>();
+            let lib = library.0.lock().map_err(|e| e.to_string())?;
+            lib.set_track_lyrics(&track_id, &lyrics, &source)
+        })
+        .await;
+    }
+
+    Ok(track)
+}
+
+#[tauri::command]
 pub async fn play_track_from_specific_playlist(
     playlist_id: String,
     index: usize,
@@ -817,6 +863,20 @@ pub async fn remove_from_queue(
     state: tauri::State<'_, PlayerState>,
 ) -> Result<Option<String>, String> {
     Ok(lock_player(&state)?.remove_from_queue(index))
+}
+
+#[tauri::command]
+pub async fn move_queue_track(
+    from: usize,
+    to: usize,
+    state: tauri::State<'_, PlayerState>,
+) -> Result<(), String> {
+    let moved = lock_player(&state)?.move_queue_track(from, to);
+    if moved {
+        Ok(())
+    } else {
+        Err("Invalid queue move".into())
+    }
 }
 
 #[tauri::command]

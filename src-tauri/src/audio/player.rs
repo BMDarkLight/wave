@@ -280,6 +280,46 @@ impl Queue {
         Some(removed)
     }
 
+    /// Move a track from `from` to `to` within the queue, keeping
+    /// `current_index` and shuffle indices consistent.
+    pub fn move_track(&mut self, from: usize, to: usize) -> bool {
+        let len = self.tracks.len();
+        if from >= len || to >= len || from == to {
+            return false;
+        }
+
+        let item = self.tracks.remove(from);
+        self.tracks.insert(to, item);
+
+        let remap = |idx: usize| -> usize {
+            if idx == from {
+                to
+            } else if from < to {
+                if idx > from && idx <= to {
+                    idx - 1
+                } else {
+                    idx
+                }
+            } else if idx >= to && idx < from {
+                idx + 1
+            } else {
+                idx
+            }
+        };
+
+        if let Some(current) = self.current_index {
+            self.current_index = Some(remap(current));
+        }
+
+        if let Some(ref mut order) = self.shuffle_order {
+            for idx in order.iter_mut() {
+                *idx = remap(*idx);
+            }
+        }
+
+        true
+    }
+
     /// Remove all tracks from the queue except the one currently playing.
     pub fn clear_upcoming(&mut self) {
         if let Some(current_idx) = self.current_index {
@@ -606,6 +646,10 @@ impl AudioPlayer {
 
     pub fn remove_from_queue(&mut self, index: usize) -> Option<String> {
         self.queue.remove_at(index)
+    }
+
+    pub fn move_queue_track(&mut self, from: usize, to: usize) -> bool {
+        self.queue.move_track(from, to)
     }
 
     pub fn clear_upcoming(&mut self) {
