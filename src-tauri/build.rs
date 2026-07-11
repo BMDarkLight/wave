@@ -3,6 +3,23 @@ fn main() {
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
         let ndk = find_ndk();
+        let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+
+        let ndk_arch = match arch.as_str() {
+            "aarch64" => "aarch64",
+            "arm" => "arm",
+            "x86" => "i386",
+            "x86_64" => "x86_64",
+            other => other,
+        };
+        let ndk_triple = match arch.as_str() {
+            "aarch64" => "aarch64-linux-android",
+            "arm" => "arm-linux-androideabi",
+            "x86" => "i686-linux-android",
+            "x86_64" => "x86_64-linux-android",
+            other => other,
+        };
+
         let prebuilt = std::path::PathBuf::from(&ndk).join("toolchains/llvm/prebuilt");
 
         let host_path = std::fs::read_dir(&prebuilt)
@@ -18,8 +35,11 @@ fn main() {
         ] {
             if let Ok(entries) = std::fs::read_dir(base) {
                 for version_dir in entries.filter_map(Result::ok) {
-                    for sub in &["lib/linux/aarch64", "lib/aarch64-linux-android"] {
-                        let path = version_dir.path().join(sub);
+                    for sub in &[
+                        format!("lib/linux/{ndk_arch}"),
+                        format!("lib/{ndk_triple}"),
+                    ] {
+                        let path = version_dir.path().join(&sub);
                         if path.exists() {
                             println!("cargo:rustc-link-search=native={}", path.display());
                         }
