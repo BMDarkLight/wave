@@ -149,6 +149,9 @@ jobs:
           cp -R "$SRC"/. "$RES"/
           echo "Applied Wave launcher icons into $RES"
 
+      - name: Patch Android permissions
+        run: bash ./scripts/patch-android-manifest.sh
+
       # Signs release APKs via keystore.properties + Gradle signingConfigs.
       # Secrets: ANDROID_KEY_BASE64, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
       # Optional: ANDROID_STORE_PASSWORD (defaults to ANDROID_KEY_PASSWORD)

@@ -20,6 +20,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2.11", features = [] }
 tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rodio = { version = "0.19", features = ["symphonia-all"] }
@@ -32,7 +33,6 @@ walkdir = "2"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-souvlaki = "0.8"
 raw-window-handle = "0.6"
 base64 = "0.22"
 sha2 = "0.10"
@@ -51,6 +51,7 @@ windows-sys = { version = "0.60", features = [
 tauri = { version = "2.11", features = ["tray-icon"] }
 tray-icon = "0.21"
 muda = "0.17"
+souvlaki = "0.8"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

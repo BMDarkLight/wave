@@ -2,10 +2,13 @@
 let invokeFn: typeof import("@tauri-apps/api/core").invoke;
 let openFn: typeof import("@tauri-apps/plugin-dialog").open;
 
+const TAURI_UNAVAILABLE =
+  "Tauri API is not available. Open Wave through the Tauri app (desktop or Android), not a plain browser tab.";
+
 const initTauri = async () => {
   try {
     if (!("__TAURI_INTERNALS__" in window)) {
-      console.warn("Tauri APIs are only available inside the Tauri desktop window.");
+      console.warn(TAURI_UNAVAILABLE);
       return false;
     }
 
@@ -27,10 +30,21 @@ const safeInvoke = async <T = any>(cmd: string, args?: Record<string, unknown>):
   await tauriInitialized;
 
   if (!invokeFn) {
-    throw new Error("Tauri API is not available. Use the Tauri desktop window launched by 'npm run dev' or 'npm run tauri dev', not the browser Vite URL.");
+    throw new Error(TAURI_UNAVAILABLE);
   }
 
   return await invokeFn<T>(cmd, args);
+};
+
+export const safeInvokeHostOs = (): Promise<string> => safeInvoke<string>("host_os");
+
+export interface ImportAudioResult {
+  paths: string[];
+  errors: string[];
+}
+
+export const importAudioSources = (paths: string[]): Promise<ImportAudioResult> => {
+  return safeInvoke<ImportAudioResult>("import_audio_sources", { paths });
 };
 
 export interface PlaybackState {
@@ -155,20 +169,44 @@ export const selectAudioFile = async (multiple: boolean = false): Promise<string
   await tauriInitialized;
 
   if (!openFn) {
-    throw new Error("Tauri API is not available. Use the Tauri desktop window launched by 'npm run dev' or 'npm run tauri dev', not the browser Vite URL.");
+    throw new Error(TAURI_UNAVAILABLE);
   }
+
+  // Android ignores file extensions and expects MIME types in `extensions`.
+  // Opening with only `.mp3`-style filters can show an empty/broken picker.
+  const { isAndroid } = await import("./platform");
+  const android = await isAndroid();
 
   const selected = await openFn({
     multiple,
-    filters: [
-      {
-        name: "Audio",
-        extensions: [
-          "aac", "aiff", "alac", "caf", "flac", "m4a", "m4b", "m4p", "mka", "mkv",
-          "mp1", "mp2", "mp3", "mp4", "oga", "ogg", "opus", "wav", "wave", "weba",
+    directory: false,
+    filters: android
+      ? [
+          {
+            name: "Audio",
+            extensions: [
+              "audio/*",
+              "audio/mpeg",
+              "audio/mp4",
+              "audio/aac",
+              "audio/flac",
+              "audio/ogg",
+              "audio/wav",
+              "audio/x-wav",
+              "audio/opus",
+              "application/ogg",
+            ],
+          },
+        ]
+      : [
+          {
+            name: "Audio",
+            extensions: [
+              "aac", "aiff", "alac", "caf", "flac", "m4a", "m4b", "m4p", "mka", "mkv",
+              "mp1", "mp2", "mp3", "mp4", "oga", "ogg", "opus", "wav", "wave", "weba",
+            ],
+          },
         ],
-      },
-    ],
     title: multiple ? "Select Audio Files" : "Select Audio File",
   });
 
@@ -182,7 +220,7 @@ export const selectAudioFolder = async (): Promise<string | null> => {
   await tauriInitialized;
 
   if (!openFn) {
-    throw new Error("Tauri API is not available. Use the Tauri desktop window launched by 'npm run dev' or 'npm run tauri dev', not the browser Vite URL.");
+    throw new Error(TAURI_UNAVAILABLE);
   }
 
   const selected = await openFn({
@@ -197,8 +235,15 @@ export const selectAudioFolder = async (): Promise<string | null> => {
 
 export const getFileName = (path: string | null): string => {
   if (!path) return "No track selected";
-  const parts = path.split(/[/\\]/);
-  return parts[parts.length - 1] || "Unknown";
+  // content://.../document/primary:Music/song.mp3 or plain paths
+  const cleaned = path.split("?")[0] ?? path;
+  const parts = cleaned.split(/[/\\:]/);
+  const last = parts[parts.length - 1] || "Unknown";
+  try {
+    return decodeURIComponent(last);
+  } catch {
+    return last;
+  }
 };
 
 export const addTrackToPlaylist = (path: string): Promise<Track> => {
@@ -410,7 +455,7 @@ export const importPlaylist = (path: string, name?: string): Promise<ImportResul
 export const savePlaylistDialog = async (defaultName?: string): Promise<string | null> => {
   await tauriInitialized;
   if (!openFn) {
-    throw new Error("Tauri API is not available. Run the app inside the Tauri desktop window.");
+    throw new Error(TAURI_UNAVAILABLE);
   }
   const { save } = await import("@tauri-apps/plugin-dialog");
   return save({
@@ -426,7 +471,7 @@ export const savePlaylistDialog = async (defaultName?: string): Promise<string |
 export const openPlaylistDialog = async (): Promise<string | null> => {
   await tauriInitialized;
   if (!openFn) {
-    throw new Error("Tauri API is not available. Run the app inside the Tauri desktop window.");
+    throw new Error(TAURI_UNAVAILABLE);
   }
   const selected = await openFn({
     multiple: false,

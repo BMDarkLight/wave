@@ -10,6 +10,7 @@ mod metadata;
 mod path_validation;
 pub mod playback_daemon;
 mod os_media;
+mod android_import;
 
 pub use app::paths as app_paths;
 pub use app::settings as app_settings;
@@ -43,6 +44,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             // Defer audio device creation until first playback command. Opening
             // cpal/oboe during setup can panic on Android before JNI is ready.
@@ -174,6 +176,8 @@ pub fn run() {
             commands::get_close_action,
             commands::set_close_action,
             commands::toggle_close_action,
+            commands::host_os,
+            commands::import_audio_sources,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

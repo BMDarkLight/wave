@@ -8,6 +8,9 @@
     "vite:dev": "vite --configLoader runner",
     "build": "tsc && vite build --configLoader runner",
     "icons": "npx tauri icon assets/icon-manifest.json",
+    "android:init": "tauri android init",
+    "android:dev": "tauri android dev",
+    "android:build": "tauri android build",
     "preview": "vite preview",
     "tauri": "tauri"
   },

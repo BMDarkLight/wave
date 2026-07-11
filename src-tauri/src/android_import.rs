@@ -1,0 +1,219 @@
+//! Import external audio sources into app-private storage.
+//!
+//! On Android, dialog pickers often return `content://` URIs that cannot be
+//! opened with plain `std::fs`. Copying them into the app data directory gives
+//! the library and player stable local paths.
+
+use std::fs::{self, File};
+use std::io::{copy, Write};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
+use sha2::{Digest, Sha256};
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+use tauri::{AppHandle, Manager};
+use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
+use uuid::Uuid;
+
+use crate::metadata::is_supported_audio_file;
+use crate::path_validation::is_android_content_uri;
+
+fn imports_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {e}"))?
+        .join("imports");
+    fs::create_dir_all(&dir).map_err(|e| format!("Failed to create imports dir: {e}"))?;
+    Ok(dir)
+}
+
+fn guess_extension(path: &str) -> String {
+    let candidate = path
+        .rsplit(['/', '\\', '?'])
+        .next()
+        .unwrap_or(path)
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_lowercase())
+        .unwrap_or_default();
+    // Android content URIs often encode the name as `...document/audio%3A1234`
+    // without a real extension.
+    if !candidate.is_empty()
+        && candidate.len() <= 8
+        && candidate.chars().all(|c| c.is_ascii_alphanumeric())
+        && candidate != "bin"
+        && !candidate.chars().all(|c| c.is_ascii_digit())
+    {
+        candidate
+    } else {
+        "bin".to_string()
+    }
+}
+
+fn sniff_extension(path: &Path) -> String {
+    let Ok(bytes) = fs::read(path) else {
+        return "bin".to_string();
+    };
+    if bytes.starts_with(b"ID3") || matches!(bytes.first(), Some(0xFF)) {
+        return "mp3".to_string();
+    }
+    if bytes.starts_with(b"fLaC") {
+        return "flac".to_string();
+    }
+    if bytes.starts_with(b"OggS") {
+        return "ogg".to_string();
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        return "wav".to_string();
+    }
+    if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
+        return "m4a".to_string();
+    }
+    if bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
+        return "mka".to_string();
+    }
+    "bin".to_string()
+}
+
+fn is_playable_audio_file(path: &Path) -> bool {
+    if is_supported_audio_file(path) {
+        return true;
+    }
+    // Content-based probe for Android imports that lack a real extension.
+    let Ok(file) = File::open(path) else {
+        return false;
+    };
+    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+    symphonia::default::get_probe()
+        .format(
+            &hint,
+            mss,
+            &FormatOptions::default(),
+            &MetadataOptions::default(),
+        )
+        .is_ok()
+}
+
+fn copy_via_fs_plugin(app: &AppHandle, source: &str, dest: &Path) -> Result<(), String> {
+    let file_path = FilePath::from_str(source)
+        .map_err(|e| format!("Invalid audio source URI {source}: {e}"))?;
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    let mut reader = app
+        .fs()
+        .open(file_path, opts)
+        .map_err(|e| format!("Failed to open audio source {source}: {e}"))?;
+
+    let mut writer =
+        File::create(dest).map_err(|e| format!("Failed to create {}: {e}", dest.display()))?;
+    copy(&mut reader, &mut writer)
+        .map_err(|e| format!("Failed to copy audio source {source}: {e}"))?;
+    writer
+        .flush()
+        .map_err(|e| format!("Failed to flush {}: {e}", dest.display()))?;
+    Ok(())
+}
+
+fn content_hash(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Ok(format!("{:x}", hasher.finalize())[..16].to_string())
+}
+
+/// Resolve a picked path/URI into a local filesystem path suitable for Wave.
+///
+/// Regular files are returned unchanged. Content URIs (and unresolved `file:`
+/// URLs) are copied into the app imports directory.
+pub fn materialize_audio_source(app: &AppHandle, source: &str) -> Result<PathBuf, String> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return Err("Audio path cannot be empty".to_string());
+    }
+
+    let as_path = PathBuf::from(trimmed);
+    if as_path.is_file() {
+        if !is_playable_audio_file(&as_path) {
+            return Err(format!("Unsupported audio file: {trimmed}"));
+        }
+        return Ok(as_path);
+    }
+
+    if let Some(local) = trimmed.strip_prefix("file://") {
+        let local_path = PathBuf::from(local);
+        if local_path.is_file() {
+            if !is_playable_audio_file(&local_path) {
+                return Err(format!("Unsupported audio file: {trimmed}"));
+            }
+            return Ok(local_path);
+        }
+    }
+
+    if !is_android_content_uri(trimmed) && !trimmed.starts_with("file:") {
+        return Err(format!("Audio file does not exist: {trimmed}"));
+    }
+
+    let imports = imports_dir(app)?;
+    let mut ext = guess_extension(trimmed);
+    let staging = imports.join(format!("staging-{}.{}", Uuid::new_v4(), &ext));
+    copy_via_fs_plugin(app, trimmed, &staging)?;
+
+    if !is_supported_audio_file(&staging) {
+        let sniffed = sniff_extension(&staging);
+        if sniffed != "bin" {
+            ext = sniffed;
+        }
+    }
+
+    if !is_playable_audio_file(&staging) {
+        let _ = fs::remove_file(&staging);
+        return Err(format!(
+            "Unsupported or unreadable audio source: {trimmed}"
+        ));
+    }
+
+    if ext == "bin" {
+        ext = sniff_extension(&staging);
+        if ext == "bin" {
+            ext = "mp3".to_string(); // last resort; file already probed as playable
+        }
+    }
+
+    let hash = content_hash(&staging)?;
+    let final_path = imports.join(format!("{hash}.{ext}"));
+    if final_path.exists() {
+        let _ = fs::remove_file(&staging);
+        return Ok(final_path);
+    }
+
+    fs::rename(&staging, &final_path).or_else(|_| {
+        fs::copy(&staging, &final_path)
+            .map(|_| ())
+            .and_then(|_| fs::remove_file(&staging))
+    }).map_err(|e| format!("Failed to finalize import {}: {e}", final_path.display()))?;
+
+    Ok(final_path)
+}
+
+/// Materialize many audio sources; return successes and per-source errors.
+pub fn materialize_audio_sources(
+    app: &AppHandle,
+    sources: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut ok = Vec::new();
+    let mut errors = Vec::new();
+    for source in sources {
+        match materialize_audio_source(app, source) {
+            Ok(path) => ok.push(path.to_string_lossy().into_owned()),
+            Err(err) => errors.push(format!("{source}: {err}")),
+        }
+    }
+    (ok, errors)
+}

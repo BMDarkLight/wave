@@ -51,7 +51,21 @@ fn data_root() -> Option<PathBuf> {
     std::env::var("APPDATA").ok().map(PathBuf::from)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+#[cfg(target_os = "android")]
+fn data_root() -> Option<PathBuf> {
+    // Prefer the app sandbox home when the runtime provides it.
+    std::env::var("HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| Some(std::env::temp_dir()))
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "windows",
+    target_os = "android"
+)))]
 fn data_root() -> Option<PathBuf> {
     std::env::var("HOME")
         .ok()

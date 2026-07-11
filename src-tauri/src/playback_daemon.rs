@@ -116,15 +116,15 @@ struct DaemonState {
 
 struct SharedState(Arc<Mutex<DaemonState>>);
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
 struct DaemonMedia {
     controls: Option<souvlaki::MediaControls>,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "android"))]
 struct DaemonMedia;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
 impl DaemonMedia {
     fn new() -> Self {
         use souvlaki::{MediaControls, PlatformConfig};
@@ -174,15 +174,19 @@ impl DaemonMedia {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "android"))]
 impl DaemonMedia {
     fn new() -> Self {
         Self
     }
 
-    fn set_metadata(&mut self, _meta: &TrackMetadata) {}
+    fn set_metadata(&mut self, meta: &TrackMetadata) {
+        let _ = meta;
+    }
 
-    fn set_playback(&mut self, _playing: bool, _position_secs: f64, _stopped: bool) {}
+    fn set_playback(&mut self, playing: bool, position_secs: f64, stopped: bool) {
+        let _ = (playing, position_secs, stopped);
+    }
 
     fn clear(&mut self) {}
 }

@@ -90,6 +90,7 @@ import {
   type QueueTrackState,
   type Track,
 } from "./utils/player";
+import { isAndroid } from "./utils/platform";
 import "./App.css";
 
 function formatInvokeError(err: unknown, fallback: string): string {
@@ -195,6 +196,7 @@ function App() {
   const [rightPanelWidth, setRightPanelWidth] = useState(320);
   const rightPanelOpen = showQueue || !!lyricsPanelTrack || showDeviceList;
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [androidHost, setAndroidHost] = useState(false);
 
   const clampRightPanelWidth = (width: number, sidebar = sidebarWidth) => {
     const reserved = sidebar + 8 + 340; // handles + minimum main column
@@ -305,6 +307,10 @@ function App() {
     onChange();
     media.addEventListener("change", onChange);
     return () => media.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    void isAndroid().then(setAndroidHost);
   }, []);
 
   useEffect(() => {
@@ -654,28 +660,35 @@ function App() {
   const handleAddTrack = async (multiple = false) => {
     try {
       setError(null);
-      setIsAddingTracks(true);
+      // Open the native picker *before* any React state updates so Android
+      // still treats this as a direct user gesture.
       const paths = await selectAudioFile(multiple);
-      if (paths?.length) {
-        const playlistId = selectedPlaylistId ?? getDefaultPlaylistId(playlists);
-        if (!playlistId) {
-          setError("No playlist selected.");
-          return;
-        }
-        let failCount = 0;
-        for (const path of paths) {
-          try {
-            await addTrackToPlaylistById(playlistId, path);
-          } catch (err) {
-            failCount++;
-            console.error("Failed to add track:", path, err);
-          }
-        }
-        if (failCount > 0) setError(`Failed to add ${failCount} track(s).`);
-        await loadPlaylistTracks(playlistId);
-        await loadPlaylists();
+      setShowAddTrackMenu(false);
+      setAddTrackMenuAnchor(null);
+      if (!paths?.length) {
+        return;
       }
+      setIsAddingTracks(true);
+      const playlistId = selectedPlaylistId ?? getDefaultPlaylistId(playlists);
+      if (!playlistId) {
+        setError("No playlist selected.");
+        return;
+      }
+      let failCount = 0;
+      for (const path of paths) {
+        try {
+          await addTrackToPlaylistById(playlistId, path);
+        } catch (err) {
+          failCount++;
+          console.error("Failed to add track:", path, err);
+        }
+      }
+      if (failCount > 0) setError(`Failed to add ${failCount} track(s).`);
+      await loadPlaylistTracks(playlistId);
+      await loadPlaylists();
     } catch (err) {
+      setShowAddTrackMenu(false);
+      setAddTrackMenuAnchor(null);
       setError(formatInvokeError(err, "Failed to add track"));
     } finally {
       setIsAddingTracks(false);
@@ -1057,12 +1070,14 @@ function App() {
   // ── Playlist management ────────────────────────────────────────────────────
 
   const openCreatePlaylistDialog = () => {
+    setMobileNavOpen(false);
     setPlaylistNameInput("");
     setPlaylistDialogError(null);
     setPlaylistDialog({ mode: "create" });
   };
 
   const openRenamePlaylistDialog = (playlistId: string, currentName: string) => {
+    setMobileNavOpen(false);
     setPlaylistNameInput(currentName);
     setPlaylistDialogError(null);
     setPlaylistDialog({ mode: "rename", playlistId, currentName });
@@ -1459,6 +1474,11 @@ function App() {
                   ref={addTrackBtnRef}
                   className="btn-secondary"
                   onClick={() => {
+                    if (androidHost) {
+                      // Nested menus break Android's user-gesture requirement for pickers.
+                      void handleAddTrack(true);
+                      return;
+                    }
                     if (addTrackBtnRef.current) {
                       const rect = addTrackBtnRef.current.getBoundingClientRect();
                       setAddTrackMenuAnchor({ top: rect.bottom + 6, left: rect.left });
@@ -1467,6 +1487,7 @@ function App() {
                   }}
                   disabled={isAddingTracks}
                   type="button"
+                  title={androidHost ? "Add audio files" : "Add tracks"}
                 ><BiPlus /></button>
               </div>
             )}
@@ -1633,6 +1654,21 @@ function App() {
               )}
             </div>
             <div className="queue-eq-mini">
+              <div className="queue-mobile-transport">
+                <label className="queue-mobile-volume">
+                  <span>Volume</span>
+                  <input
+                    className="range-slider"
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value={volumeValue}
+                    onChange={(event) => handleVolume(Number(event.target.value))}
+                  />
+                  <span>{Math.round(volumeValue * 100)}%</span>
+                </label>
+              </div>
               <div className="queue-eq-mini-header">
                 <span>Equalizer</span>
                 <label className="eq-enable">
@@ -1740,9 +1776,16 @@ function App() {
             style={{ position: "fixed", top: `${addTrackMenuAnchor.top}px`, left: `${addTrackMenuAnchor.left}px` }}
             onClick={(e) => e.stopPropagation()}
           >
-            <button type="button" onClick={() => { setShowAddTrackMenu(false); setAddTrackMenuAnchor(null); handleAddTrack(true); }}><BiPlus /> Add files</button>
-            <button type="button" onClick={handleAddFolder}><BiFolderOpen /> Add folder</button>
-            <button type="button" onClick={handleAddFolderAsPlaylist}><BiFolderOpen /> Add folder as playlist</button>
+            <button type="button" onClick={() => { void handleAddTrack(true); }}><BiPlus /> Add files</button>
+            {!androidHost && (
+              <>
+                <button type="button" onClick={handleAddFolder}><BiFolderOpen /> Add folder</button>
+                <button type="button" onClick={handleAddFolderAsPlaylist}><BiFolderOpen /> Add folder as playlist</button>
+              </>
+            )}
+            {androidHost && (
+              <p className="add-track-menu-hint">On Android, pick one or more audio files. Folder import isn’t supported yet.</p>
+            )}
           </div>
         </>,
         document.body
@@ -1922,7 +1965,7 @@ function App() {
 
         <div className="player-controls">
           <button
-            className={`control-btn shuffle-btn desktop-only-control ${playbackMode.shuffle ? "active" : ""}`}
+            className={`control-btn shuffle-btn ${playbackMode.shuffle ? "active" : ""}`}
             onClick={handleToggleShuffle}
             type="button"
             title={playbackMode.shuffle ? "Disable shuffle" : "Enable shuffle"}
@@ -1932,7 +1975,7 @@ function App() {
           <button className="control-btn play-pause-btn" onClick={handlePlayPause} type="button" title="Play/Pause">{playbackState.is_playing ? <BiPause /> : <BiPlay />}</button>
           <button className="control-btn" onClick={handleNext} disabled={!canSkip} type="button" title="Next"><BiSkipNext /></button>
           <button
-            className={`control-btn repeat-btn desktop-only-control ${playbackMode.repeat !== "off" ? "active" : ""} ${playbackMode.repeat === "one" ? "repeat-one" : ""}`}
+            className={`control-btn repeat-btn ${playbackMode.repeat !== "off" ? "active" : ""} ${playbackMode.repeat === "one" ? "repeat-one" : ""}`}
             onClick={handleCycleRepeat}
             type="button"
             title={playbackMode.repeat === "off" ? "Repeat off" : playbackMode.repeat === "all" ? "Repeat all" : "Repeat one"}

@@ -28,14 +28,9 @@ fn lock_poisoned<T>(_: std::sync::PoisonError<T>) -> String {
 }
 
 fn create_audio_player() -> Result<AudioPlayer, String> {
-    // cpal's Android backend can panic (JNI unwraps) instead of returning Err.
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(AudioPlayer::new)) {
-        Ok(Ok(player)) => Ok(player),
-        Ok(Err(error)) => Err(format!("Failed to initialize audio player: {error}")),
-        Err(_) => Err(
-            "Failed to initialize audio player (native audio backend panicked)".to_string(),
-        ),
-    }
+    // Never open the OS audio device during construction. On Android, cpal/oboe
+    // can abort the process via JNI; queue/EQ/UI must stay usable without a stream.
+    Ok(AudioPlayer::new_deferred())
 }
 
 pub(crate) fn ensure_player(slot: &mut Option<AudioPlayer>) -> Result<&mut AudioPlayer, String> {
@@ -187,6 +182,33 @@ fn sync_bridge_now_playing(bridge: &tauri::State<MediaBridgeState>, track: &Trac
     });
 }
 
+// ── Platform / import helpers ─────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn host_os() -> String {
+    std::env::consts::OS.to_string()
+}
+
+#[derive(serde::Serialize)]
+pub struct ImportAudioResult {
+    pub paths: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// Copy picked files/content URIs into app-private storage and return local paths.
+#[tauri::command]
+pub async fn import_audio_sources(
+    paths: Vec<String>,
+    app: tauri::AppHandle,
+) -> Result<ImportAudioResult, String> {
+    let app = app.clone();
+    blocking(move || {
+        let (ok, errors) = crate::android_import::materialize_audio_sources(&app, &paths);
+        Ok(ImportAudioResult { paths: ok, errors })
+    })
+    .await
+}
+
 // ── Playback commands ─────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -196,20 +218,28 @@ pub async fn play_track(
     bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
     validate_audio_path(&path)?;
-    let p = path.clone();
+    let app_clone = app.clone();
+    let local_path = blocking(move || {
+        crate::android_import::materialize_audio_source(&app_clone, &path)
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .await?;
+
+    let play_path = local_path.clone();
     let app_clone = app.clone();
     blocking(move || {
         with_app_player(&app_clone, |player| {
-            player.play(&path).map_err(|e| e.to_string())
+            player.play(&play_path).map_err(|e| e.to_string())
         })
     })
     .await?;
 
     let app_clone = app.clone();
+    let lookup_path = local_path.clone();
     let track = blocking(move || {
         let lib = app_clone.state::<LibraryState>();
         let lib = lib.0.lock().map_err(|e| e.to_string())?;
-        Ok::<_, String>(resolve_track(&lib, &p))
+        Ok::<_, String>(resolve_track(&lib, &lookup_path))
     })
     .await?;
     sync_bridge_now_playing(&bridge, &track);
@@ -391,9 +421,10 @@ pub async fn add_track_to_playlist(
 ) -> Result<Track, String> {
     let app = app.clone();
     blocking(move || {
+        let local = crate::android_import::materialize_audio_source(&app, &path)?;
         let library = app.state::<LibraryState>();
         let lib = library.0.lock().map_err(|e| e.to_string())?;
-        lib.add_track_to_default_playlist(path)
+        lib.add_track_to_default_playlist(local.to_string_lossy().into_owned())
     })
     .await
 }
@@ -743,9 +774,10 @@ pub async fn add_track_to_playlist_by_id(
 ) -> Result<Track, String> {
     let app = app.clone();
     blocking(move || {
+        let local = crate::android_import::materialize_audio_source(&app, &path)?;
         let library = app.state::<LibraryState>();
         let lib = library.0.lock().map_err(|e| e.to_string())?;
-        lib.add_track_to_playlist(&id, path)
+        lib.add_track_to_playlist(&id, local.to_string_lossy().into_owned())
     })
     .await
 }

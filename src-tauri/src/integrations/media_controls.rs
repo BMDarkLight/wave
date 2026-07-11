@@ -1,6 +1,7 @@
 #[cfg(target_os = "windows")]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_os = "android"))]
 use std::time::Duration;
 use tauri::AppHandle;
 
@@ -78,7 +79,12 @@ struct MediaBridge {
     cover_art_cache: cover_art::Cache,
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "android")]
+struct MediaBridge {
+    cover_art_cache: cover_art::Cache,
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
 struct MediaBridge {
     controls: souvlaki::MediaControls,
     cover_art_cache: cover_art::Cache,
@@ -96,7 +102,15 @@ impl MediaBridge {
             })
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "android")]
+        {
+            let _ = app;
+            Ok(Self {
+                cover_art_cache: cover_art::Cache::new(),
+            })
+        }
+
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             use souvlaki::{MediaControlEvent, MediaControls, PlatformConfig};
             use tauri::Emitter;
@@ -167,7 +181,12 @@ impl MediaBridge {
             self.backend.set_metadata(meta, cover_ref);
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "android")]
+        {
+            let _ = (meta, &self.cover_art_cache);
+        }
+
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             use souvlaki::MediaMetadata;
             let duration = meta.duration_seconds.map(Duration::from_secs_f64);
@@ -197,7 +216,12 @@ impl MediaBridge {
             self.backend.set_playback(true, position_secs, false);
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "android")]
+        {
+            let _ = position_secs;
+        }
+
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             use souvlaki::{MediaPlayback, MediaPosition};
             let pos = MediaPosition(Duration::from_secs_f64(position_secs));
@@ -213,7 +237,12 @@ impl MediaBridge {
             self.backend.set_playback(false, position_secs, false);
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "android")]
+        {
+            let _ = position_secs;
+        }
+
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             use souvlaki::{MediaPlayback, MediaPosition};
             let pos = MediaPosition(Duration::from_secs_f64(position_secs));
@@ -229,7 +258,7 @@ impl MediaBridge {
             self.backend.set_playback(false, 0.0, true);
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             use souvlaki::MediaPlayback;
             let _ = self.controls.set_playback(MediaPlayback::Stopped);
@@ -310,7 +339,13 @@ impl MediaBridgeState {
             return;
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "android")]
+        {
+            self.store_bridge(MediaBridge::new(&self.app));
+            return;
+        }
+
+        #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         self.store_bridge(MediaBridge::new(&self.app));
     }
 
@@ -347,7 +382,10 @@ impl MediaBridgeState {
             return;
         }
 
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(any(
+            target_os = "android",
+            all(not(target_os = "windows"), not(target_os = "android"))
+        ))]
         {
             if let Ok(mut guard) = self.bridge.lock() {
                 if let Some(ref mut inner) = *guard {

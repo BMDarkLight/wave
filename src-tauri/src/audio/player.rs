@@ -360,11 +360,14 @@ struct SendableStream(OutputStream);
 // never accessed concurrently from multiple threads.
 unsafe impl Send for SendableStream {}
 
-pub struct AudioPlayer {
-    /// The OutputStream must be kept alive for the duration of the player.
-    /// Dropping it silences all audio.
+struct AudioOutput {
     _stream: SendableStream,
     handle: OutputStreamHandle,
+}
+
+pub struct AudioPlayer {
+    /// Lazily opened so Android can finish JNI setup before cpal/oboe runs.
+    output: Option<AudioOutput>,
     sink: Option<Sink>,
     current_path: Option<PathBuf>,
     clock: PlaybackClock,
@@ -378,13 +381,13 @@ pub struct AudioPlayer {
 }
 
 impl AudioPlayer {
-    pub fn new() -> Result<Self, AudioError> {
-        let (stream, handle) = OutputStream::try_default()
-            .map_err(|error| AudioError::StreamCreation(error.to_string()))?;
-
-        Ok(Self {
-            _stream: SendableStream(stream),
-            handle,
+    /// Create a player without opening an OS audio device.
+    ///
+    /// Queue / EQ / volume state work immediately; the output stream is opened
+    /// on first `play` (or explicit `ensure_output`).
+    pub fn new_deferred() -> Self {
+        Self {
+            output: None,
             sink: None,
             current_path: None,
             clock: PlaybackClock::stopped(),
@@ -393,7 +396,42 @@ impl AudioPlayer {
             repeat: RepeatMode::default(),
             eq_config: Arc::new(Mutex::new(EqConfig::default())),
             eq_version: Arc::new(Mutex::new(0)),
-        })
+        }
+    }
+
+    pub fn new() -> Result<Self, AudioError> {
+        let mut player = Self::new_deferred();
+        player.ensure_output()?;
+        Ok(player)
+    }
+
+    /// Open the default output device if it is not open yet.
+    pub fn ensure_output(&mut self) -> Result<(), AudioError> {
+        if self.output.is_some() {
+            return Ok(());
+        }
+
+        let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            OutputStream::try_default()
+        }));
+
+        let (stream, handle) = match opened {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(error)) => {
+                return Err(AudioError::StreamCreation(error.to_string()));
+            }
+            Err(_) => {
+                return Err(AudioError::StreamCreation(
+                    "native audio backend panicked while opening the output device".to_string(),
+                ));
+            }
+        };
+
+        self.output = Some(AudioOutput {
+            _stream: SendableStream(stream),
+            handle,
+        });
+        Ok(())
     }
 
     /// Create a player that outputs to a specific audio device (by name).
@@ -411,8 +449,10 @@ impl AudioPlayer {
             .map_err(|error| AudioError::StreamCreation(error.to_string()))?;
 
         Ok(Self {
-            _stream: SendableStream(stream),
-            handle,
+            output: Some(AudioOutput {
+                _stream: SendableStream(stream),
+                handle,
+            }),
             sink: None,
             current_path: None,
             clock: PlaybackClock::stopped(),
@@ -427,13 +467,16 @@ impl AudioPlayer {
     /// List all available audio output device names.
     pub fn list_output_devices() -> Vec<String> {
         use cpal::traits::{DeviceTrait, HostTrait};
-        match cpal::default_host().output_devices() {
-            Ok(devices) => devices
-                .filter_map(|d| d.name().ok())
-                .filter(|n| !n.is_empty())
-                .collect(),
-            Err(_) => vec![],
-        }
+        let listed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            match cpal::default_host().output_devices() {
+                Ok(devices) => devices
+                    .filter_map(|d| d.name().ok())
+                    .filter(|n| !n.is_empty())
+                    .collect(),
+                Err(_) => vec![],
+            }
+        }));
+        listed.unwrap_or_default()
     }
 
     fn build_source(
@@ -449,13 +492,20 @@ impl AudioPlayer {
     }
 
     pub fn play(&mut self, path: &str) -> Result<(), AudioError> {
+        self.ensure_output()?;
+        let handle = &self
+            .output
+            .as_ref()
+            .expect("output ensured")
+            .handle;
+
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
 
         let (source, duration) =
             Self::build_source(path, self.eq_config.clone(), self.eq_version.clone())?;
-        let sink = Sink::try_new(&self.handle)
+        let sink = Sink::try_new(handle)
             .map_err(|error| AudioError::SinkCreation(error.to_string()))?;
         sink.set_volume(self.volume);
         sink.append(source);
@@ -595,10 +645,13 @@ impl AudioPlayer {
     /// Query the current default audio output device name (live, every call).
     pub fn current_output_name() -> String {
         use cpal::traits::{DeviceTrait, HostTrait};
-        cpal::default_host()
-            .default_output_device()
-            .and_then(|d| d.name().ok())
-            .unwrap_or_else(|| "Unknown".to_string())
+        let name = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cpal::default_host()
+                .default_output_device()
+                .and_then(|d| d.name().ok())
+                .unwrap_or_else(|| "Unknown".to_string())
+        }));
+        name.unwrap_or_else(|_| "Unknown".to_string())
     }
 
     pub fn play_next(&mut self) -> Result<Option<String>, AudioError> {

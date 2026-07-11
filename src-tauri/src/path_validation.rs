@@ -8,8 +8,19 @@ pub const MAX_FILE_HASH_BYTES: u64 = 500 * 1024 * 1024;
 /// Maximum playlist JSON import size (10 MiB).
 pub const MAX_PLAYLIST_IMPORT_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Android Storage Access Framework / MediaStore content URI.
+pub fn is_android_content_uri(path: &str) -> bool {
+    path.starts_with("content://")
+}
+
 /// Validate that `path` points to a readable supported audio file.
+///
+/// Content URIs are accepted here so callers can materialize them into local
+/// storage before playback/indexing. Plain filesystem paths must exist.
 pub fn validate_audio_path(path: &str) -> Result<PathBuf, String> {
+    if is_android_content_uri(path) || path.starts_with("file://") {
+        return Ok(PathBuf::from(path));
+    }
     let path_buf = PathBuf::from(path);
     if !path_buf.is_file() {
         return Err(format!("Audio file does not exist: {path}"));
