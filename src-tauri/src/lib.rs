@@ -26,6 +26,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Single-instance locking is a desktop concern. On Android, HOME/cwd-based
+    // lock paths are unreliable and can abort launch before the UI starts.
+    #[cfg(not(target_os = "android"))]
     let _instance = single_instance::try_acquire(single_instance::InstanceMode::Gui)
         .unwrap_or_else(|e| {
             eprintln!("{e}");
@@ -39,14 +42,16 @@ pub fn run() {
 
     os_media::set_app_user_model_id("app.bmdarklight.wave");
 
-    let player = AudioPlayer::new().expect("Failed to initialize audio player");
-
-    let player_state = PlayerState(std::sync::Mutex::new(player));
-
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(player_state)
         .setup(|app| {
+            // Create the audio device after Tauri has started so Android's
+            // JNI / ndk_context is available (cpal/oboe need it).
+            let player = AudioPlayer::new().map_err(|e| {
+                format!("Failed to initialize audio player: {e}")
+            })?;
+            app.manage(PlayerState(std::sync::Mutex::new(player)));
+
             let settings = app_settings::AppSettings::load(app.handle());
             app.manage(AppSettingsState(std::sync::Mutex::new(settings)));
 

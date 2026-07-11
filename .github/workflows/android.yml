@@ -136,6 +136,19 @@ jobs:
       - name: Initialize Tauri Android
         run: npx tauri android init
 
+      # `tauri android init` ships default Tauri launcher icons in gen/.
+      # Overlay the Wave icons from src-tauri/icons/android into the Android res tree.
+      - name: Apply Wave Android icons
+        run: |
+          RES="src-tauri/gen/android/app/src/main/res"
+          SRC="src-tauri/icons/android"
+          if [ ! -d "$SRC" ]; then
+            echo "::error::Missing $SRC — run \`npx tauri icon assets/app-icon.png\` first"
+            exit 1
+          fi
+          cp -R "$SRC"/. "$RES"/
+          echo "Applied Wave launcher icons into $RES"
+
       # Signs release APKs via keystore.properties + Gradle signingConfigs.
       # Secrets: ANDROID_KEY_BASE64, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
       # Optional: ANDROID_STORE_PASSWORD (defaults to ANDROID_KEY_PASSWORD)
