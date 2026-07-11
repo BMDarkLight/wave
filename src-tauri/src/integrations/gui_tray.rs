@@ -11,11 +11,23 @@ mod inner {
         AppHandle, Manager,
     };
 
-    use crate::commands::{LibraryState, PlayerState};
+    use crate::audio::player::AudioPlayer;
+    use crate::commands::{ensure_player, LibraryState, PlayerState};
 
     static TRAY_CLICK_STATE: Mutex<Option<Instant>> = Mutex::new(None);
     static TRAY_CLICK_GENERATION: AtomicU64 = AtomicU64::new(0);
     const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(350);
+
+    fn with_player<R>(app: &AppHandle, f: impl FnOnce(&mut AudioPlayer) -> Result<R, String>) {
+        let player_state = app.state::<PlayerState>();
+        let Ok(mut slot) = player_state.0.lock() else {
+            return;
+        };
+        let Ok(player) = ensure_player(&mut slot) else {
+            return;
+        };
+        let _ = f(player);
+    }
 
     pub fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let playlists_sub = build_playlists_submenu(app)?;
@@ -140,23 +152,19 @@ mod inner {
             return;
         }
         if id == "tray_prev" {
-            let _ = app
-                .state::<PlayerState>()
-                .0
-                .lock()
-                .map(|mut p| p.play_previous());
+            let _ = with_player(app, |p| {
+                p.play_previous().map(|_| ()).map_err(|e| e.to_string())
+            });
             return;
         }
         if id == "tray_next" {
-            let _ = app
-                .state::<PlayerState>()
-                .0
-                .lock()
-                .map(|mut p| p.play_next());
+            let _ = with_player(app, |p| {
+                p.play_next().map(|_| ()).map_err(|e| e.to_string())
+            });
             return;
         }
         if id == "tray_stop" {
-            let _ = app.state::<PlayerState>().0.lock().map(|mut p| p.stop());
+            let _ = with_player(app, |p| p.stop().map_err(|e| e.to_string()));
             return;
         }
         if id == "tray_show" {
@@ -206,7 +214,11 @@ mod inner {
 
     fn toggle_play_pause(app: &AppHandle) {
         let player_state = app.state::<PlayerState>();
-        let mut player = match player_state.0.lock() {
+        let mut slot = match player_state.0.lock() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let player = match ensure_player(&mut slot) {
             Ok(p) => p,
             Err(_) => return,
         };
@@ -239,7 +251,7 @@ mod inner {
             }
         }
 
-        drop(player);
+        drop(slot);
         try_play_default_playlist(app);
     }
 
@@ -259,14 +271,11 @@ mod inner {
         let paths: Vec<String> = tracks.iter().map(|t| t.path.clone()).collect();
         let first_path = paths[0].clone();
 
-        let player_state = app.state::<PlayerState>();
-        let mut player = match player_state.0.lock() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        player.queue.set_tracks(paths);
-        player.queue.jump(0);
-        let _ = player.play(&first_path);
+        with_player(app, |player| {
+            player.queue.set_tracks(paths);
+            player.queue.jump(0);
+            player.play(&first_path).map_err(|e| e.to_string())
+        });
     }
 
     fn play_playlist(app: &AppHandle, playlist_id: &str) {
@@ -285,14 +294,11 @@ mod inner {
         let first_path = tracks[0].path.clone();
         let paths: Vec<String> = tracks.iter().map(|t| t.path.clone()).collect();
 
-        let player_state = app.state::<PlayerState>();
-        let mut player = match player_state.0.lock() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        player.queue.set_tracks(paths);
-        player.queue.jump(0);
-        let _ = player.play(&first_path);
+        with_player(app, |player| {
+            player.queue.set_tracks(paths);
+            player.queue.jump(0);
+            player.play(&first_path).map_err(|e| e.to_string())
+        });
     }
 }
 

@@ -7,7 +7,7 @@
     "dev": "tauri dev",
     "vite:dev": "vite --configLoader runner",
     "build": "tsc && vite build --configLoader runner",
-    "icons": "bash scripts/generate-icons.sh",
+    "icons": "npx tauri icon assets/icon-manifest.json",
     "preview": "vite preview",
     "tauri": "tauri"
   },

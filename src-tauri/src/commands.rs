@@ -1,5 +1,6 @@
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use crate::app_settings::{AppSettings, AppSettingsState};
 use crate::audio::player::AudioPlayer;
@@ -14,7 +15,9 @@ use crate::path_validation::{validate_audio_path, validate_safe_output_path};
 use tauri::Manager;
 use walkdir::WalkDir;
 
-pub struct PlayerState(pub Mutex<AudioPlayer>);
+/// Lazily-initialized audio engine. Creation is deferred until first use so
+/// Android can finish wiring JNI / ndk_context before cpal/oboe opens a stream.
+pub struct PlayerState(pub Mutex<Option<AudioPlayer>>);
 pub struct LibraryState(pub Mutex<Library>);
 pub struct MediaBridgeState(pub crate::media_controls::MediaBridgeState);
 
@@ -24,10 +27,58 @@ fn lock_poisoned<T>(_: std::sync::PoisonError<T>) -> String {
     "State lock poisoned".to_string()
 }
 
+fn create_audio_player() -> Result<AudioPlayer, String> {
+    // cpal's Android backend can panic (JNI unwraps) instead of returning Err.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(AudioPlayer::new)) {
+        Ok(Ok(player)) => Ok(player),
+        Ok(Err(error)) => Err(format!("Failed to initialize audio player: {error}")),
+        Err(_) => Err(
+            "Failed to initialize audio player (native audio backend panicked)".to_string(),
+        ),
+    }
+}
+
+pub(crate) fn ensure_player(slot: &mut Option<AudioPlayer>) -> Result<&mut AudioPlayer, String> {
+    if slot.is_none() {
+        *slot = Some(create_audio_player()?);
+    }
+    Ok(slot.as_mut().expect("player just initialized"))
+}
+
+pub struct PlayerGuard<'a>(MutexGuard<'a, Option<AudioPlayer>>);
+
+impl Deref for PlayerGuard<'_> {
+    type Target = AudioPlayer;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref().expect("player must be initialized before deref")
+    }
+}
+
+impl DerefMut for PlayerGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.0
+            .as_mut()
+            .expect("player must be initialized before deref_mut")
+    }
+}
+
 fn lock_player<'a>(
     state: &'a tauri::State<'a, PlayerState>,
-) -> Result<std::sync::MutexGuard<'a, AudioPlayer>, String> {
-    state.0.lock().map_err(lock_poisoned)
+) -> Result<PlayerGuard<'a>, String> {
+    let mut guard = state.0.lock().map_err(lock_poisoned)?;
+    ensure_player(&mut guard)?;
+    Ok(PlayerGuard(guard))
+}
+
+fn with_app_player<R>(
+    app: &tauri::AppHandle,
+    f: impl FnOnce(&mut AudioPlayer) -> Result<R, String>,
+) -> Result<R, String> {
+    let state = app.state::<PlayerState>();
+    let mut slot = state.0.lock().map_err(|e| e.to_string())?;
+    let player = ensure_player(&mut slot)?;
+    f(player)
 }
 
 fn lock_library<'a>(
@@ -148,9 +199,9 @@ pub async fn play_track(
     let p = path.clone();
     let app_clone = app.clone();
     blocking(move || {
-        let player = app_clone.state::<PlayerState>();
-        let mut guard = player.0.lock().map_err(|e| e.to_string())?;
-        guard.play(&path).map_err(|e| e.to_string())
+        with_app_player(&app_clone, |player| {
+            player.play(&path).map_err(|e| e.to_string())
+        })
     })
     .await?;
 
@@ -209,7 +260,18 @@ pub async fn stop_track(
 pub async fn get_playback_state(
     state: tauri::State<'_, PlayerState>,
 ) -> Result<PlaybackStateDto, String> {
-    let player = lock_player(&state)?;
+    let guard = state.0.lock().map_err(lock_poisoned)?;
+    let Some(player) = guard.as_ref() else {
+        return Ok(PlaybackStateDto {
+            is_playing: false,
+            is_paused: false,
+            current_path: None,
+            position_seconds: 0.0,
+            duration_seconds: None,
+            volume: 0.8,
+            output_device_name: AudioPlayer::current_output_name(),
+        });
+    };
     Ok(PlaybackStateDto {
         is_playing: player.is_playing(),
         is_paused: player.is_paused(),
@@ -254,8 +316,11 @@ pub async fn set_volume(
 pub async fn get_eq_settings(
     state: tauri::State<'_, PlayerState>,
 ) -> Result<EqSettingsDto, String> {
-    let player = lock_player(&state)?;
-    let eq = player.eq_settings();
+    let guard = state.0.lock().map_err(lock_poisoned)?;
+    let eq = match guard.as_ref() {
+        Some(player) => player.eq_settings(),
+        None => crate::audio::dsp::EqConfig::default(),
+    };
     Ok(EqSettingsDto {
         bands: eq.bands,
         enabled: eq.enabled,
@@ -444,10 +509,10 @@ pub async fn play_track_from_playlist(
     let track_path = track.path.clone();
     let app_clone = app.clone();
     blocking(move || {
-        let player = app_clone.state::<PlayerState>();
-        let mut player = player.0.lock().map_err(|e| e.to_string())?;
-        sync_queue_from_tracks(&mut player, &tracks, index);
-        player.play(&track_path).map_err(|e| e.to_string())
+        with_app_player(&app_clone, |player| {
+            sync_queue_from_tracks(player, &tracks, index);
+            player.play(&track_path).map_err(|e| e.to_string())
+        })
     })
     .await?;
 
@@ -521,7 +586,14 @@ pub async fn get_supported_audio_extensions() -> Result<Vec<String>, String> {
 pub async fn get_queue(
     state: tauri::State<'_, PlayerState>,
 ) -> Result<QueueStateDto, String> {
-    let player = lock_player(&state)?;
+    let guard = state.0.lock().map_err(lock_poisoned)?;
+    let Some(player) = guard.as_ref() else {
+        return Ok(QueueStateDto {
+            tracks: Vec::new(),
+            current_index: None,
+            is_shuffled: false,
+        });
+    };
     Ok(QueueStateDto {
         tracks: player.queue.tracks().to_vec(),
         current_index: player.queue.current_index(),
@@ -535,9 +607,9 @@ pub async fn play_next(
 ) -> Result<Option<String>, String> {
     let app_clone = app.clone();
     let path = blocking(move || {
-        let player = app_clone.state::<PlayerState>();
-        let mut guard = player.0.lock().map_err(|e| e.to_string())?;
-        guard.play_next().map_err(|e| e.to_string())
+        with_app_player(&app_clone, |guard| {
+            guard.play_next().map_err(|e| e.to_string())
+        })
     })
     .await?;
 
@@ -562,9 +634,9 @@ pub async fn play_previous(
 ) -> Result<Option<String>, String> {
     let app_clone = app.clone();
     let path = blocking(move || {
-        let player = app_clone.state::<PlayerState>();
-        let mut guard = player.0.lock().map_err(|e| e.to_string())?;
-        guard.play_previous().map_err(|e| e.to_string())
+        with_app_player(&app_clone, |guard| {
+            guard.play_previous().map_err(|e| e.to_string())
+        })
     })
     .await?;
 
@@ -613,7 +685,15 @@ pub async fn set_repeat(
 pub async fn get_playback_mode(
     state: tauri::State<'_, PlayerState>,
 ) -> Result<PlaybackModeDto, String> {
-    let player = lock_player(&state)?;
+    use crate::audio::player::RepeatMode;
+
+    let guard = state.0.lock().map_err(lock_poisoned)?;
+    let Some(player) = guard.as_ref() else {
+        return Ok(PlaybackModeDto {
+            repeat: RepeatMode::default(),
+            shuffle: false,
+        });
+    };
     Ok(PlaybackModeDto {
         repeat: player.repeat.clone(),
         shuffle: player.queue.is_shuffled(),
@@ -824,10 +904,10 @@ pub async fn play_track_from_specific_playlist(
     let track_path = track.path.clone();
     let app_clone = app.clone();
     blocking(move || {
-        let player = app_clone.state::<PlayerState>();
-        let mut player = player.0.lock().map_err(|e| e.to_string())?;
-        sync_queue_from_tracks(&mut player, &tracks, index);
-        player.play(&track_path).map_err(|e| e.to_string())
+        with_app_player(&app_clone, |player| {
+            sync_queue_from_tracks(player, &tracks, index);
+            player.play(&track_path).map_err(|e| e.to_string())
+        })
     })
     .await?;
 
@@ -893,12 +973,15 @@ pub async fn get_queue_tracks(
     library: tauri::State<'_, LibraryState>,
 ) -> Result<QueueDto, String> {
     let (paths, current_index, is_shuffled) = {
-        let player = lock_player(&state)?;
-        (
-            player.queue.tracks().to_vec(),
-            player.queue.current_index(),
-            player.queue.is_shuffled(),
-        )
+        let guard = state.0.lock().map_err(lock_poisoned)?;
+        match guard.as_ref() {
+            Some(player) => (
+                player.queue.tracks().to_vec(),
+                player.queue.current_index(),
+                player.queue.is_shuffled(),
+            ),
+            None => (Vec::new(), None, false),
+        }
     };
 
     let lookup = lock_library(&library)?.get_tracks_by_paths(&paths)?;
@@ -925,9 +1008,9 @@ pub async fn play_track_from_queue(
 ) -> Result<(), String> {
     let app_clone = app.clone();
     let path = blocking(move || {
-        let player = app_clone.state::<PlayerState>();
-        let mut guard = player.0.lock().map_err(|e| e.to_string())?;
-        guard.jump_to_queue_index(index).map_err(|e| e.to_string())
+        with_app_player(&app_clone, |guard| {
+            guard.jump_to_queue_index(index).map_err(|e| e.to_string())
+        })
     })
     .await?;
 
@@ -1039,7 +1122,8 @@ pub async fn set_output_device(
     device_name: String,
     state: tauri::State<'_, PlayerState>,
 ) -> Result<(), String> {
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let mut slot = state.0.lock().map_err(|e| e.to_string())?;
+    let guard = ensure_player(&mut slot)?;
 
     // Save state from the current player before replacing it.
     let was_playing = guard.is_playing();
@@ -1049,14 +1133,16 @@ pub async fn set_output_device(
     let volume = guard.volume();
     let queue = std::mem::take(&mut guard.queue);
     let repeat = guard.repeat.clone();
+    let eq_config = guard.eq_config.lock().unwrap().clone();
+    let eq_version = *guard.eq_version.lock().unwrap();
 
     // Build a new player on the requested device.
     let mut new_player = AudioPlayer::new_with_device(&device_name)?;
     new_player.queue = queue;
     new_player.repeat = repeat;
     new_player.set_volume(volume)?;
-    *new_player.eq_config.lock().unwrap() = guard.eq_config.lock().unwrap().clone();
-    *new_player.eq_version.lock().unwrap() = *guard.eq_version.lock().unwrap();
+    *new_player.eq_config.lock().unwrap() = eq_config;
+    *new_player.eq_version.lock().unwrap() = eq_version;
 
     // Resume playback if something was playing.
     if let Some(ref path) = current_path {
@@ -1071,7 +1157,7 @@ pub async fn set_output_device(
         }
     }
 
-    *guard = new_player;
+    *slot = Some(new_player);
     Ok(())
 }
 

@@ -20,7 +20,6 @@ pub use integrations::media_controls;
 use app_settings::AppSettingsState;
 use commands::{LibraryState, MediaBridgeState, PlayerState};
 use dto::CloseAction;
-use audio::player::AudioPlayer;
 use tauri::{Manager, WindowEvent};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -45,12 +44,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // Create the audio device after Tauri has started so Android's
-            // JNI / ndk_context is available (cpal/oboe need it).
-            let player = AudioPlayer::new().map_err(|e| {
-                format!("Failed to initialize audio player: {e}")
-            })?;
-            app.manage(PlayerState(std::sync::Mutex::new(player)));
+            // Defer audio device creation until first playback command. Opening
+            // cpal/oboe during setup can panic on Android before JNI is ready.
+            app.manage(PlayerState(std::sync::Mutex::new(None)));
 
             let settings = app_settings::AppSettings::load(app.handle());
             app.manage(AppSettingsState(std::sync::Mutex::new(settings)));
