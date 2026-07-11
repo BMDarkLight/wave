@@ -23,8 +23,10 @@ jobs:
         include:
           - arch: arm64-v8a
             rust-target: aarch64-linux-android
+            tauri-target: aarch64
           - arch: armeabi-v7a
             rust-target: armv7-linux-androideabi
+            tauri-target: armv7
 
     steps:
       - name: Checkout repository
@@ -131,28 +133,20 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Initialize Tauri Android
+        run: npx tauri android init
+
       - name: Build Tauri Android App
-        uses: tauri-apps/tauri-action@v1
+        run: npx tauri android build --target ${{ matrix.tauri-target }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
-        with:
-          target: ${{ matrix.arch }}
-          args: --target ${{ matrix.rust-target }}
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wave-android-${{ matrix.arch }}
-          path: src-tauri/target/${{ matrix.rust-target }}/release/bundle/apk/*.apk
-          if-no-files-found: error
-
-      - name: Upload AAB artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: wave-android-aab-${{ matrix.arch }}
-          path: src-tauri/target/${{ matrix.rust-target }}/release/bundle/aab/*.aab
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
           if-no-files-found: error
 
   release:
@@ -171,7 +165,6 @@ jobs:
         with:
           files: |
             artifacts/**/*.apk
-            artifacts/**/*.aab
           draft: false
           prerelease: false
         env:
