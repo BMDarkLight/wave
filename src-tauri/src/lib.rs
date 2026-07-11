@@ -14,8 +14,6 @@ mod os_media;
 pub use app::paths as app_paths;
 pub use app::settings as app_settings;
 pub use app::single_instance;
-
-#[cfg(not(target_os = "android"))]
 pub use integrations::gui_tray;
 pub use integrations::media_controls;
 
@@ -87,7 +85,6 @@ pub fn run() {
                 tracing::warn!("Main window not found — OS media controls will init on first use");
             }
 
-            #[cfg(not(target_os = "android"))]
             if let Err(e) = gui_tray::setup(app) {
                 tracing::warn!("System tray unavailable: {e}");
             }
