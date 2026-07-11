@@ -136,17 +136,60 @@ jobs:
       - name: Initialize Tauri Android
         run: npx tauri android init
 
-      - name: Build Tauri Android App
-        run: npx tauri android build --target ${{ matrix.tauri-target }}
+      # Signs release APKs via keystore.properties + Gradle signingConfigs.
+      # Secrets: ANDROID_KEY_BASE64, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
+      # Optional: ANDROID_STORE_PASSWORD (defaults to ANDROID_KEY_PASSWORD)
+      - name: Setup Android signing
+        id: signing
         env:
+          ANDROID_KEY_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
           ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+        run: |
+          if [ -z "${ANDROID_KEY_BASE64}" ] || [ -z "${ANDROID_KEY_ALIAS}" ] || [ -z "${ANDROID_KEY_PASSWORD}" ]; then
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "Skipping Android signing (signing secrets not available for this PR)."
+              echo "enabled=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Missing Android signing secrets. Set ANDROID_KEY_BASE64, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD."
+            exit 1
+          fi
+          bash ./scripts/setup-android-signing.sh
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build Tauri Android App
+        run: npx tauri android build --target ${{ matrix.tauri-target }}
+
+      - name: Verify APK signatures
+        if: steps.signing.outputs.enabled == 'true'
+        run: |
+          shopt -s globstar nullglob
+          apks=(src-tauri/gen/android/app/build/outputs/apk/**/release/*.apk)
+          if [ ${#apks[@]} -eq 0 ]; then
+            echo "::error::No release APKs found to verify"
+            exit 1
+          fi
+
+          BUILD_TOOLS="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          APKSIGNER="${BUILD_TOOLS}/apksigner"
+          if [ ! -x "$APKSIGNER" ]; then
+            echo "::error::apksigner not found under $ANDROID_HOME/build-tools"
+            exit 1
+          fi
+
+          for apk in "${apks[@]}"; do
+            echo "Verifying $apk"
+            # Unsigned release APKs fail this check.
+            "$APKSIGNER" verify --print-certs "$apk"
+          done
 
       - name: Upload APK artifacts
         uses: actions/upload-artifact@v4
         with:
           name: wave-android-${{ matrix.arch }}
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          path: src-tauri/gen/android/app/build/outputs/apk/**/release/*.apk
           if-no-files-found: error
 
   release:
