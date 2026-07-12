@@ -545,12 +545,14 @@ img.track-thumb {
 }
 
 .spinner {
+  flex-shrink: 0;
   width: 18px;
   height: 18px;
   border: 2px solid rgba(255, 255, 255, 0.2);
   border-top-color: var(--green);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+  box-sizing: border-box;
 }
 
 @keyframes spin {
@@ -1259,6 +1261,25 @@ img.queue-thumb {
   color: #d7d7d7;
   font: 400 14px/1.75 "Avenir Next", "Helvetica Neue", sans-serif;
   white-space: pre-wrap;
+}
+
+.lyrics-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.lyrics-line {
+  color: #8a8a8a;
+  font: 600 16px/1.5 "Avenir Next", "Helvetica Neue", sans-serif;
+  transition: color 0.2s ease, transform 0.2s ease;
+  transform-origin: left center;
+}
+
+.lyrics-line.active {
+  color: #fff;
+  font-weight: 800;
+  transform: scale(1.04);
 }
 
 .drag-handle {
@@ -2503,6 +2524,10 @@ img.queue-thumb {
 
   .modal-backdrop {
     z-index: 200;
+    /* Center within the safe visible area, not the full screen behind the
+       status bar / home indicator, so the dialog doesn't look skewed. */
+    padding-top: calc(24px + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
   }
 
   .track-context-menu {

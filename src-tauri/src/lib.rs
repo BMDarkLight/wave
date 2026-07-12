@@ -46,6 +46,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        // No-op on desktop; on Android/iOS owns MediaSession + media notification.
+        .plugin(tauri_plugin_media_session::init())
         .setup(|app| {
             // Defer audio device creation until first playback command. Opening
             // cpal/oboe during setup can panic on Android before JNI is ready.

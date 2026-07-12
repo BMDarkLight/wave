@@ -565,7 +565,8 @@ export interface MediaMetadata {
 
 /**
  * Push track metadata to the OS media interface (macOS Control Center,
- * Windows SMTC, Linux MPRIS).  Call this whenever the playing track changes.
+ * Windows SMTC, Linux MPRIS, Android MediaSession notification).
+ * Call this whenever the playing track changes.
  */
 export const updateMediaMetadata = (metadata: MediaMetadata): Promise<void> => {
   return safeInvoke("update_media_metadata", { metadata });
@@ -633,8 +634,50 @@ export const listenToMediaControls = async (
     ),
   ]);
 
+  // Android MediaSession / Bluetooth / notification buttons arrive via the
+  // media-session plugin rather than the desktop `media-control-*` events.
+  let unregisterPlugin: (() => void) | null = null;
+  try {
+    const { isAndroid } = await import("./platform");
+    if (await isAndroid()) {
+      const { onMediaSessionAction } = await import("./mediaSessionPlugin");
+      const listener = await onMediaSessionAction((event) => {
+        switch (event.action) {
+          case "play":
+            handlers.onPlay?.();
+            break;
+          case "pause":
+            handlers.onPause?.();
+            break;
+          case "stop":
+            handlers.onStop?.();
+            break;
+          case "next":
+            handlers.onNext?.();
+            break;
+          case "previous":
+            handlers.onPrevious?.();
+            break;
+          case "seek":
+            if (typeof event.seekPosition === "number") {
+              handlers.onSetPosition?.(event.seekPosition);
+            }
+            break;
+        }
+      });
+      if (listener) {
+        unregisterPlugin = () => {
+          void listener.unregister();
+        };
+      }
+    }
+  } catch (error) {
+    console.warn("Failed to attach Android media-session listener:", error);
+  }
+
   return () => {
     unlisteners.forEach((u) => u && u());
+    unregisterPlugin?.();
   };
 };
 

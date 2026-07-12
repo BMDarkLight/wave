@@ -3,6 +3,7 @@
 //! Platform code lives in one place per OS:
 //! - Windows → `os_media/windows.rs` (everything: AppUserModelID, SMTC, taskbar)
 //! - Linux/macOS → souvlaki via `integrations/media_controls.rs`
+//! - Android → `tauri-plugin-media-session` (MediaSession + MediaStyle notification)
 
 #[cfg(target_os = "windows")]
 mod windows;

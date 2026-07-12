@@ -60,13 +60,61 @@ mod cover_art {
 
 #[cfg(not(target_os = "windows"))]
 mod cover_art {
-    pub struct Cache;
+    #[cfg(target_os = "android")]
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    #[cfg(target_os = "android")]
+    use std::path::PathBuf;
+
+    pub struct Cache {
+        #[cfg(target_os = "android")]
+        path: Option<PathBuf>,
+    }
 
     impl Cache {
         pub fn new() -> Self {
-            Self
+            Self {
+                #[cfg(target_os = "android")]
+                path: None,
+            }
         }
 
+        /// Resolve cover art to a URL the Android media-session plugin can load
+        /// (`http(s):` or `file:`). Data URLs are written to a temp file.
+        #[cfg(target_os = "android")]
+        pub fn resolve_artwork_url(&mut self, cover_url: Option<&str>) -> Option<String> {
+            let url = cover_url?;
+            if url.starts_with("http://") || url.starts_with("https://") {
+                return Some(url.to_string());
+            }
+            if url.starts_with("file://") {
+                return Some(url.to_string());
+            }
+            if url.starts_with("data:") {
+                let (header, data) = url.split_once(',')?;
+                let mime = header.strip_prefix("data:")?.split(';').next()?;
+                let ext = match mime {
+                    "image/jpeg" | "image/jpg" => "jpg",
+                    "image/png" => "png",
+                    "image/gif" => "gif",
+                    "image/webp" => "webp",
+                    "image/bmp" => "bmp",
+                    _ => return None,
+                };
+                let bytes = STANDARD.decode(data).ok()?;
+                let dir = crate::app_paths::data_dir();
+                let _ = std::fs::create_dir_all(&dir);
+                let path = dir.join(format!("wave-cover.{ext}"));
+                std::fs::write(&path, bytes).ok()?;
+                self.path = Some(path.clone());
+                return Some(format!("file://{}", path.display()));
+            }
+            if std::path::Path::new(url).exists() {
+                return Some(format!("file://{url}"));
+            }
+            None
+        }
+
+        #[cfg(not(target_os = "android"))]
         pub fn resolve_url(&mut self, cover_url: Option<&str>) -> Option<String> {
             cover_url.map(str::to_string)
         }
@@ -81,7 +129,9 @@ struct MediaBridge {
 
 #[cfg(target_os = "android")]
 struct MediaBridge {
+    app: AppHandle,
     cover_art_cache: cover_art::Cache,
+    last_playing: Option<bool>,
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
@@ -104,9 +154,17 @@ impl MediaBridge {
 
         #[cfg(target_os = "android")]
         {
-            let _ = app;
+            use tauri_plugin_media_session::MediaSessionExt;
+
+            // Request POST_NOTIFICATIONS early so the first play can show the shade.
+            if let Err(error) = app.media_session().initialize() {
+                tracing::warn!("Android media session initialize: {error}");
+            }
+
             Ok(Self {
+                app: app.clone(),
                 cover_art_cache: cover_art::Cache::new(),
+                last_playing: None,
             })
         }
 
@@ -183,7 +241,25 @@ impl MediaBridge {
 
         #[cfg(target_os = "android")]
         {
-            let _ = (meta, &self.cover_art_cache);
+            use tauri_plugin_media_session::{MediaSessionExt, MediaState};
+
+            let artwork_url = self
+                .cover_art_cache
+                .resolve_artwork_url(meta.cover_url.as_deref());
+
+            if let Err(error) = self.app.media_session().update_state(MediaState {
+                title: meta.title.clone(),
+                artist: meta.artist.clone(),
+                album: meta.album.clone(),
+                artwork_url,
+                duration: meta.duration_seconds,
+                can_prev: Some(true),
+                can_next: Some(true),
+                can_seek: Some(true),
+                ..Default::default()
+            }) {
+                tracing::warn!("Failed to update Android media session metadata: {error}");
+            }
         }
 
         #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
@@ -218,7 +294,20 @@ impl MediaBridge {
 
         #[cfg(target_os = "android")]
         {
-            let _ = position_secs;
+            use tauri_plugin_media_session::{MediaSessionExt, MediaState};
+
+            self.last_playing = Some(true);
+            if let Err(error) = self.app.media_session().update_state(MediaState {
+                is_playing: Some(true),
+                position: Some(position_secs),
+                playback_speed: Some(1.0),
+                can_prev: Some(true),
+                can_next: Some(true),
+                can_seek: Some(true),
+                ..Default::default()
+            }) {
+                tracing::warn!("Failed to set Android media session playing: {error}");
+            }
         }
 
         #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
@@ -239,7 +328,20 @@ impl MediaBridge {
 
         #[cfg(target_os = "android")]
         {
-            let _ = position_secs;
+            use tauri_plugin_media_session::{MediaSessionExt, MediaState};
+
+            self.last_playing = Some(false);
+            if let Err(error) = self.app.media_session().update_state(MediaState {
+                is_playing: Some(false),
+                position: Some(position_secs),
+                playback_speed: Some(1.0),
+                can_prev: Some(true),
+                can_next: Some(true),
+                can_seek: Some(true),
+                ..Default::default()
+            }) {
+                tracing::warn!("Failed to set Android media session paused: {error}");
+            }
         }
 
         #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
@@ -258,6 +360,16 @@ impl MediaBridge {
             self.backend.set_playback(false, 0.0, true);
         }
 
+        #[cfg(target_os = "android")]
+        {
+            use tauri_plugin_media_session::MediaSessionExt;
+
+            self.last_playing = None;
+            if let Err(error) = self.app.media_session().clear() {
+                tracing::warn!("Failed to clear Android media session: {error}");
+            }
+        }
+
         #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
         {
             use souvlaki::MediaPlayback;
@@ -266,6 +378,31 @@ impl MediaBridge {
     }
 
     fn update_position(&mut self, position_secs: f64, playing: bool) {
+        #[cfg(target_os = "android")]
+        {
+            use tauri_plugin_media_session::{MediaSessionExt, TimelineUpdate};
+
+            // Avoid rebuilding the notification on every UI poll tick.
+            if self.last_playing != Some(playing) {
+                if playing {
+                    self.set_playing(position_secs);
+                } else {
+                    self.set_paused(position_secs);
+                }
+                return;
+            }
+
+            if let Err(error) = self.app.media_session().update_timeline(TimelineUpdate {
+                position: Some(position_secs),
+                ..Default::default()
+            }) {
+                // Session may not exist yet (before first update_state).
+                tracing::debug!("Android media timeline update skipped: {error}");
+            }
+            return;
+        }
+
+        #[cfg(not(target_os = "android"))]
         if playing {
             self.set_playing(position_secs);
         } else {

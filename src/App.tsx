@@ -124,6 +124,41 @@ const getTrackTitle = (track?: Track | null, fallbackPath?: string | null) => {
   return fallbackPath ? getFileName(fallbackPath) : "Choose a song";
 };
 
+type LyricLine = { time: number; text: string };
+
+const LRC_TAG_RE = /\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g;
+
+// Parses LRC-style "[mm:ss.xx] text" lyrics into timestamped lines. Returns
+// null if the text doesn't look like it has real timestamps (plain lyrics),
+// so the caller can fall back to rendering the raw text.
+const parseTimedLyrics = (raw?: string | null): LyricLine[] | null => {
+  if (!raw) return null;
+  const lines = raw.split(/\r?\n/);
+  const result: LyricLine[] = [];
+  let matchedLines = 0;
+  let nonEmptyLines = 0;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    nonEmptyLines++;
+    const tags = [...trimmed.matchAll(LRC_TAG_RE)];
+    if (tags.length === 0) continue;
+    matchedLines++;
+    const text = trimmed.replace(LRC_TAG_RE, "").trim();
+    for (const tag of tags) {
+      const minutes = parseInt(tag[1], 10);
+      const seconds = parseInt(tag[2], 10);
+      const fraction = tag[3] ? parseFloat(`0.${tag[3]}`) : 0;
+      result.push({ time: minutes * 60 + seconds + fraction, text });
+    }
+  }
+
+  if (nonEmptyLines === 0 || matchedLines < nonEmptyLines * 0.4) return null;
+  result.sort((a, b) => a.time - b.time);
+  return result;
+};
+
 const Artwork = ({
   track,
   fallback,
@@ -201,6 +236,7 @@ function App() {
 
   // Lyrics panel
   const [lyricsPanelTrack, setLyricsPanelTrack] = useState<Track | null>(null);
+  const activeLyricLineRef = useRef<HTMLParagraphElement>(null);
 
   // Audio output device selection
   const [outputDevices, setOutputDevices] = useState<string[]>([]);
@@ -579,6 +615,31 @@ function App() {
   const displayDuration =
     playbackState.duration_seconds ?? currentTrack?.duration_seconds ?? 0;
   const displayPosition = Math.min(seekValue, displayDuration || seekValue);
+
+  // Live (LRC-style) timestamped lyrics for the open lyrics panel.
+  const timedLyrics = useMemo(
+    () => parseTimedLyrics(lyricsPanelTrack?.lyrics),
+    [lyricsPanelTrack?.lyrics],
+  );
+  const isLyricsPanelOnCurrentTrack =
+    !!lyricsPanelTrack && lyricsPanelTrack.path === playbackState.current_path;
+  const activeLyricIndex = useMemo(() => {
+    if (!timedLyrics || !isLyricsPanelOnCurrentTrack) return -1;
+    let idx = -1;
+    for (let i = 0; i < timedLyrics.length; i++) {
+      if (timedLyrics[i].time > displayPosition) break;
+      idx = i;
+    }
+    return idx;
+  }, [timedLyrics, isLyricsPanelOnCurrentTrack, displayPosition]);
+
+  useEffect(() => {
+    if (activeLyricIndex < 0) return;
+    activeLyricLineRef.current?.scrollIntoView({
+      block: "center",
+      behavior: "smooth",
+    });
+  }, [activeLyricIndex]);
 
   const selectedPlaylist =
     playlists.find((p) => p.id === selectedPlaylistId) ?? null;
@@ -2251,7 +2312,21 @@ function App() {
                 )}
               </div>
               <div className="lyrics-panel-body">
-                {lyricsPanelTrack.lyrics ? (
+                {timedLyrics ? (
+                  <div className="lyrics-lines">
+                    {timedLyrics.map((line, index) => (
+                      <p
+                        key={`${line.time}-${index}`}
+                        ref={
+                          index === activeLyricIndex ? activeLyricLineRef : null
+                        }
+                        className={`lyrics-line ${index === activeLyricIndex ? "active" : ""}`}
+                      >
+                        {line.text || "\u00A0"}
+                      </p>
+                    ))}
+                  </div>
+                ) : lyricsPanelTrack.lyrics ? (
                   <pre>{lyricsPanelTrack.lyrics}</pre>
                 ) : (
                   <p className="lyrics-empty">No lyrics available</p>
@@ -2977,7 +3052,7 @@ function App() {
           role="status"
           aria-live="polite"
         >
-          <div className="spinner" /> Fetching lyrics…
+          <div className="spinner" /> Fetching
           <button
             className="loading-cancel-btn"
             onClick={cancelLyricsFetch}
