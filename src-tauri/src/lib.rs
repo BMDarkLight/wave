@@ -49,11 +49,18 @@ pub fn run() {
         // No-op on desktop; on Android/iOS owns MediaSession + media notification.
         .plugin(tauri_plugin_media_session::init())
         .setup(|app| {
+            let settings = app_settings::AppSettings::load(app.handle());
+
             // Defer audio device creation until first playback command. Opening
             // cpal/oboe during setup can panic on Android before JNI is ready.
-            app.manage(PlayerState(std::sync::Mutex::new(None)));
+            // The in-memory player itself is safe to initialize now, allowing
+            // persisted volume and EQ values to be restored before first play.
+            let mut player = audio::player::AudioPlayer::new_deferred();
+            player.set_volume(settings.volume)?;
+            player.set_eq_bands(settings.equalizer.bands);
+            player.set_eq_enabled(settings.equalizer.enabled);
+            app.manage(PlayerState(std::sync::Mutex::new(Some(player))));
 
-            let settings = app_settings::AppSettings::load(app.handle());
             app.manage(AppSettingsState(std::sync::Mutex::new(settings)));
 
             let library = library::Library::new(app.handle())?;

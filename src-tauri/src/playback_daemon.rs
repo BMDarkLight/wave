@@ -1113,11 +1113,10 @@ fn spawn_daemon() -> Result<(), String> {
 
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .process_group(0);
+            .stderr(std::process::Stdio::null());
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
     }
 
     cmd.spawn()

@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+use crate::audio::dsp::EqConfig;
 use crate::dto::CloseAction;
 
 const SETTINGS_FILE: &str = "wave-settings.json";
@@ -13,12 +14,16 @@ const SETTINGS_FILE: &str = "wave-settings.json";
 #[serde(default)]
 pub struct AppSettings {
     pub close_action: CloseAction,
+    pub volume: f32,
+    pub equalizer: EqConfig,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             close_action: CloseAction::Quit,
+            volume: 0.8,
+            equalizer: EqConfig::default(),
         }
     }
 }
@@ -31,10 +36,12 @@ impl AppSettings {
         if !path.exists() {
             return Self::default();
         }
-        match fs::read_to_string(&path) {
+        let mut settings = match fs::read_to_string(&path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
             Err(_) => Self::default(),
-        }
+        };
+        settings.normalize();
+        settings
     }
 
     pub fn save(&self, app: &tauri::AppHandle) -> Result<(), String> {
@@ -53,6 +60,19 @@ impl AppSettings {
             CloseAction::Quit => CloseAction::HideWindow,
             CloseAction::HideWindow => CloseAction::Quit,
         };
+    }
+
+    fn normalize(&mut self) {
+        if !self.volume.is_finite() {
+            self.volume = Self::default().volume;
+        }
+        self.volume = self.volume.clamp(0.0, 1.0);
+        for gain in &mut self.equalizer.bands {
+            if !gain.is_finite() {
+                *gain = 0.0;
+            }
+            *gain = gain.clamp(-24.0, 24.0);
+        }
     }
 }
 

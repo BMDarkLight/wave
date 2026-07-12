@@ -388,8 +388,13 @@ pub async fn seek_track(
 pub async fn set_volume(
     volume: f32,
     state: tauri::State<'_, PlayerState>,
+    settings_state: tauri::State<'_, AppSettingsState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     lock_player(&state)?.set_volume(volume)?;
+    let mut settings = lock_settings(&settings_state)?;
+    settings.volume = volume;
+    settings.save(&app)?;
     Ok(())
 }
 
@@ -414,6 +419,8 @@ pub async fn get_eq_settings(
 pub async fn set_eq_bands(
     bands: Vec<f32>,
     state: tauri::State<'_, PlayerState>,
+    settings_state: tauri::State<'_, AppSettingsState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     if bands.len() != 10 {
         return Err("Expected exactly 10 EQ band values".to_string());
@@ -429,6 +436,9 @@ pub async fn set_eq_bands(
     let mut arr = [0.0f32; 10];
     arr.copy_from_slice(&bands);
     lock_player(&state)?.set_eq_bands(arr);
+    let mut settings = lock_settings(&settings_state)?;
+    settings.equalizer.bands = arr;
+    settings.save(&app)?;
     Ok(())
 }
 
@@ -436,8 +446,13 @@ pub async fn set_eq_bands(
 pub async fn set_eq_enabled(
     enabled: bool,
     state: tauri::State<'_, PlayerState>,
+    settings_state: tauri::State<'_, AppSettingsState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     lock_player(&state)?.set_eq_enabled(enabled);
+    let mut settings = lock_settings(&settings_state)?;
+    settings.equalizer.enabled = enabled;
+    settings.save(&app)?;
     Ok(())
 }
 
@@ -457,11 +472,18 @@ pub async fn export_eq_settings(
 pub async fn import_eq_settings(
     path: String,
     state: tauri::State<'_, PlayerState>,
+    settings_state: tauri::State<'_, AppSettingsState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     let eq = crate::audio::dsp::EqPresetFile::load_from(&path)?;
-    let mut player = lock_player(&state)?;
-    player.set_eq_bands(eq.bands);
-    player.set_eq_enabled(eq.enabled);
+    {
+        let mut player = lock_player(&state)?;
+        player.set_eq_bands(eq.bands);
+        player.set_eq_enabled(eq.enabled);
+    }
+    let mut settings = lock_settings(&settings_state)?;
+    settings.equalizer = eq;
+    settings.save(&app)?;
     Ok(())
 }
 

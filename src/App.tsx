@@ -1820,7 +1820,7 @@ function App() {
 
   return (
     <div
-      className={`app-container${androidHost ? " android-host" : ""}${mobileNavOpen ? " nav-open" : ""}${rightPanelOpen || rightPanelClosing ? " panel-open" : ""}${rightPanelClosing ? " panel-closing" : ""}`}
+      className={`app-container${mobileNavOpen ? " nav-open" : ""}${rightPanelOpen || rightPanelClosing ? " panel-open" : ""}${rightPanelClosing ? " panel-closing" : ""}`}
       style={
         {
           "--sidebar-width": `${sidebarWidth}px`,

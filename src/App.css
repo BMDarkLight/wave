@@ -2063,7 +2063,6 @@ img.queue-thumb {
     --mobile-topbar-height: 52px;
     --player-height: 108px;
     --sidebar-width: 0px;
-    --system-navigation-inset: 0px;
   }
 
   body {
@@ -2081,28 +2080,6 @@ img.queue-thumb {
   .app-container {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr);
-  }
-
-  .app-container.android-host {
-    /* Android WebView does not consistently expose the three-button/gesture
-       navigation area through safe-area-inset-bottom. Reserve one nav-bar row
-       so playback controls never sit underneath the system buttons. */
-    --system-navigation-inset: max(
-      48px,
-      env(safe-area-inset-bottom, 0px)
-    );
-  }
-
-  .app-container.android-host::after {
-    content: "";
-    position: fixed;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    z-index: 55;
-    height: var(--system-navigation-inset);
-    background: #000;
-    pointer-events: none;
   }
 
   .mobile-topbar {
@@ -2176,10 +2153,11 @@ img.queue-thumb {
     position: fixed;
     top: 0;
     left: 0;
-    bottom: var(--system-navigation-inset);
+    bottom: 0;
     z-index: 90;
     width: min(304px, 86vw);
-    height: calc(100dvh - var(--system-navigation-inset));
+    height: 100%;
+    height: 100dvh;
     padding: 12px;
     padding-top: max(12px, env(safe-area-inset-top, 0px));
     padding-bottom: 12px;
@@ -2231,9 +2209,7 @@ img.queue-thumb {
     padding:
       calc(var(--mobile-topbar-height) + env(safe-area-inset-top, 0px) + 12px)
       0
-      calc(
-        var(--player-height) + var(--system-navigation-inset) + 28px
-      );
+      calc(var(--player-height) + 28px);
     -webkit-overflow-scrolling: touch;
   }
 
@@ -2337,14 +2313,15 @@ img.queue-thumb {
     position: fixed;
     top: 0;
     right: 0;
-    bottom: var(--system-navigation-inset);
+    bottom: 0;
     left: auto;
     z-index: 90;
     display: flex;
     flex-direction: column;
     width: min(360px, 92vw);
     max-width: none;
-    height: calc(100dvh - var(--system-navigation-inset));
+    height: 100%;
+    height: 100dvh;
     margin: 0;
     padding: 12px;
     padding-top: max(12px, env(safe-area-inset-top, 0px));
@@ -2434,9 +2411,7 @@ img.queue-thumb {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding-bottom: calc(
-      var(--player-height) + var(--system-navigation-inset) + 12px
-    );
+    padding-bottom: calc(var(--player-height) + 12px);
   }
 
   .lyrics-panel-cover {
@@ -2456,7 +2431,7 @@ img.queue-thumb {
     position: absolute;
     left: 0;
     right: 0;
-    bottom: var(--system-navigation-inset);
+    bottom: 0;
     z-index: 60;
     grid-column: auto;
     grid-row: auto;
@@ -2465,7 +2440,7 @@ img.queue-thumb {
     column-gap: 8px;
     row-gap: 8px;
     align-items: center;
-    padding: 10px 14px max(10px, env(safe-area-inset-bottom, 0px));
+    padding: 10px 14px max(18px, env(safe-area-inset-bottom, 0px));
     min-height: var(--player-height);
     background: rgba(12, 12, 12, 0.78);
     border-top: 1px solid rgba(255, 255, 255, 0.1);
@@ -2550,9 +2525,7 @@ img.queue-thumb {
   }
 
   .loading-indicator {
-    bottom: calc(
-      var(--player-height) + var(--system-navigation-inset) + 12px
-    );
+    bottom: calc(var(--player-height) + 12px);
   }
 
   .modal-dialog {
