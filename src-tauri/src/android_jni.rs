@@ -11,7 +11,19 @@
 /// This is a no-op on non-Android targets.
 #[cfg(target_os = "android")]
 pub(crate) fn ensure_jni_thread_attached() {
-    let vm_ptr = unsafe { ndk_context::android_context().vm() };
+    // ndk_context::android_context() panics if the Android runtime context
+    // hasn't been initialised yet (e.g. during early startup). Wrap in
+    // catch_unwind so a panic here never poisons the caller's mutex.
+    let vm_ptr = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        unsafe { ndk_context::android_context().vm() }
+    })) {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            tracing::warn!("Cannot attach JNI thread: android context not yet initialized");
+            return;
+        }
+    };
+
     if vm_ptr.is_null() {
         tracing::warn!("Cannot attach JNI thread: JavaVM pointer is null");
         return;

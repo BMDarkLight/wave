@@ -23,8 +23,21 @@ pub struct MediaBridgeState(pub crate::media_controls::MediaBridgeState);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn lock_poisoned<T>(_: std::sync::PoisonError<T>) -> String {
+fn lock_poisoned<T>(e: std::sync::PoisonError<T>) -> String {
+    tracing::warn!("Mutex was poisoned, recovering: {e}");
     "State lock poisoned".to_string()
+}
+
+fn lock_player_state<'a>(
+    state: &'a tauri::State<'a, PlayerState>,
+) -> std::sync::MutexGuard<'a, Option<AudioPlayer>> {
+    match state.0.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::warn!("Player mutex was poisoned, recovering");
+            poisoned.into_inner()
+        }
+    }
 }
 
 fn create_audio_player() -> Result<AudioPlayer, String> {
@@ -61,7 +74,15 @@ impl DerefMut for PlayerGuard<'_> {
 fn lock_player<'a>(
     state: &'a tauri::State<'a, PlayerState>,
 ) -> Result<PlayerGuard<'a>, String> {
-    let mut guard = state.0.lock().map_err(lock_poisoned)?;
+    // Recover from poisoned mutex: a previous panic may have left the lock in a
+    // poisoned state, but the player data is still usable.
+    let mut guard = match state.0.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::warn!("Player mutex was poisoned, recovering: {poisoned}");
+            poisoned.into_inner()
+        }
+    };
     ensure_player(&mut guard)?;
     Ok(PlayerGuard(guard))
 }
@@ -71,7 +92,13 @@ fn with_app_player<R>(
     f: impl FnOnce(&mut AudioPlayer) -> Result<R, String>,
 ) -> Result<R, String> {
     let state = app.state::<PlayerState>();
-    let mut slot = state.0.lock().map_err(|e| e.to_string())?;
+    let mut slot = match state.0.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::warn!("Player mutex was poisoned, recovering: {poisoned}");
+            poisoned.into_inner()
+        }
+    };
     let player = ensure_player(&mut slot)?;
     f(player)
 }
@@ -292,7 +319,7 @@ pub async fn stop_track(
 pub async fn get_playback_state(
     state: tauri::State<'_, PlayerState>,
 ) -> Result<PlaybackStateDto, String> {
-    let guard = state.0.lock().map_err(lock_poisoned)?;
+    let guard = lock_player_state(&state);
     let Some(player) = guard.as_ref() else {
         return Ok(PlaybackStateDto {
             is_playing: false,
@@ -348,7 +375,7 @@ pub async fn set_volume(
 pub async fn get_eq_settings(
     state: tauri::State<'_, PlayerState>,
 ) -> Result<EqSettingsDto, String> {
-    let guard = state.0.lock().map_err(lock_poisoned)?;
+    let guard = lock_player_state(&state);
     let eq = match guard.as_ref() {
         Some(player) => player.eq_settings(),
         None => crate::audio::dsp::EqConfig::default(),
@@ -651,7 +678,7 @@ pub async fn get_supported_audio_extensions() -> Result<Vec<String>, String> {
 pub async fn get_queue(
     state: tauri::State<'_, PlayerState>,
 ) -> Result<QueueStateDto, String> {
-    let guard = state.0.lock().map_err(lock_poisoned)?;
+    let guard = lock_player_state(&state);
     let Some(player) = guard.as_ref() else {
         return Ok(QueueStateDto {
             tracks: Vec::new(),
@@ -752,7 +779,7 @@ pub async fn get_playback_mode(
 ) -> Result<PlaybackModeDto, String> {
     use crate::audio::player::RepeatMode;
 
-    let guard = state.0.lock().map_err(lock_poisoned)?;
+    let guard = lock_player_state(&state);
     let Some(player) = guard.as_ref() else {
         return Ok(PlaybackModeDto {
             repeat: RepeatMode::default(),
@@ -1071,7 +1098,7 @@ pub async fn get_queue_tracks(
     library: tauri::State<'_, LibraryState>,
 ) -> Result<QueueDto, String> {
     let (paths, current_index, is_shuffled) = {
-        let guard = state.0.lock().map_err(lock_poisoned)?;
+        let guard = lock_player_state(&state);
         match guard.as_ref() {
             Some(player) => (
                 player.queue.tracks().to_vec(),
@@ -1220,7 +1247,7 @@ pub async fn set_output_device(
     device_name: String,
     state: tauri::State<'_, PlayerState>,
 ) -> Result<(), String> {
-    let mut slot = state.0.lock().map_err(|e| e.to_string())?;
+    let mut slot = lock_player_state(&state);
     let guard = ensure_player(&mut slot)?;
 
     // Save state from the current player before replacing it.

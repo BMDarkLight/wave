@@ -392,7 +392,13 @@ fn handle_ipc_connection(
     let request = envelope.request;
     let should_shutdown = matches!(request, DaemonRequest::Shutdown | DaemonRequest::Stop);
     let response = {
-        let mut guard = state.lock().expect("daemon state lock");
+        let mut guard = match state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("Daemon mutex was poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         handle_request(&mut guard, request)
     };
 
@@ -628,7 +634,13 @@ fn playback_tick_loop(state: Arc<Mutex<DaemonState>>, tooltip: Arc<Mutex<String>
             break;
         }
 
-        let mut guard = state.lock().expect("daemon state lock");
+        let mut guard = match state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("Daemon mutex was poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         if !guard.player.is_playing() && !guard.player.is_paused() {
             if let Ok(Some(path)) = guard.player.play_next() {
                 sync_media_for_path(&mut guard, &path);
@@ -781,13 +793,25 @@ fn handle_menu_event(shared: &SharedState, id: &str) {
         request_shutdown(&shared.0);
     }
     if let Some(playlist_id) = id.strip_prefix("playlist:") {
-        let mut guard = shared.0.lock().expect("daemon state lock");
+        let mut guard = match shared.0.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("Daemon mutex was poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         let _ = daemon_start(&mut guard, playlist_id);
     }
 }
 
 fn toggle_play_pause(shared: &SharedState) {
-    let mut guard = shared.0.lock().expect("daemon state lock");
+    let mut guard = match shared.0.lock() {
+        Ok(g) => g,
+        Err(poisoned) => {
+            tracing::warn!("Daemon mutex was poisoned, recovering");
+            poisoned.into_inner()
+        }
+    };
     if guard.player.is_playing() {
         let _ = guard.player.pause();
     } else if guard.player.is_paused() {

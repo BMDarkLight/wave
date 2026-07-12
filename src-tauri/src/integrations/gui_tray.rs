@@ -20,8 +20,12 @@ mod inner {
 
     fn with_player<R>(app: &AppHandle, f: impl FnOnce(&mut AudioPlayer) -> Result<R, String>) {
         let player_state = app.state::<PlayerState>();
-        let Ok(mut slot) = player_state.0.lock() else {
-            return;
+        let mut slot = match player_state.0.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("Player mutex was poisoned, recovering");
+                poisoned.into_inner()
+            }
         };
         let Ok(player) = ensure_player(&mut slot) else {
             return;
@@ -216,7 +220,10 @@ mod inner {
         let player_state = app.state::<PlayerState>();
         let mut slot = match player_state.0.lock() {
             Ok(p) => p,
-            Err(_) => return,
+            Err(poisoned) => {
+                tracing::warn!("Player mutex was poisoned, recovering");
+                poisoned.into_inner()
+            }
         };
         let player = match ensure_player(&mut slot) {
             Ok(p) => p,

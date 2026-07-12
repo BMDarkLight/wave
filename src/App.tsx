@@ -958,7 +958,7 @@ function App() {
       await updatePlaybackState();
       await loadQueueTracks();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not start playback");
+      setError(formatInvokeError(err, "Could not start playback"));
     }
   };
 
@@ -1045,7 +1045,7 @@ function App() {
       await updatePlaybackState();
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to control playback",
+        formatInvokeError(err, "Failed to control playback"),
       );
     }
   };
@@ -1057,7 +1057,7 @@ function App() {
       setSeekValue(0);
       await updatePlaybackState();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to stop track");
+      setError(formatInvokeError(err, "Failed to stop track"));
     }
   };
 
@@ -1077,7 +1077,7 @@ function App() {
       await loadQueueTracks();
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to go to previous track",
+        formatInvokeError(err, "Failed to go to previous track"),
       );
     }
   };
@@ -1098,7 +1098,7 @@ function App() {
       await loadQueueTracks();
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : "Failed to go to next track",
+        formatInvokeError(err, "Failed to go to next track"),
       );
     }
   };
@@ -1111,7 +1111,7 @@ function App() {
         await updatePlaybackState();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to seek track");
+      setError(formatInvokeError(err, "Failed to seek track"));
     } finally {
       document.body.classList.remove("is-seeking");
     }
@@ -1177,7 +1177,7 @@ function App() {
       await setPlayerVolume(value);
       await updatePlaybackState();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to set volume");
+      setError(formatInvokeError(err, "Failed to set volume"));
     }
   };
 
@@ -1268,7 +1268,7 @@ function App() {
       await loadPlaylistTracks(selectedPlaylistId);
       await loadPlaylists();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to clear playlist");
+      setError(formatInvokeError(err, "Failed to clear playlist"));
     } finally {
       setIsLoading(false);
     }
@@ -1553,7 +1553,7 @@ function App() {
       await updatePlaybackState();
       await loadQueueTracks();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not start playback");
+      setError(formatInvokeError(err, "Could not start playback"));
     }
   };
 

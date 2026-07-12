@@ -490,7 +490,17 @@ impl AudioPlayer {
         eq_config: Arc<Mutex<EqConfig>>,
         eq_version: Arc<Mutex<u64>>,
     ) -> Result<(impl Source<Item = f32> + Send + 'static, Option<Duration>), AudioError> {
-        let source = SymphoniaSource::new(path)?;
+        let source = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            SymphoniaSource::new(path)
+        })) {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(AudioError::Decode(format!(
+                    "Audio decoding crashed while opening \"{path}\". \
+                     The file may be corrupted."
+                )));
+            }
+        };
         let duration = source.total_duration();
         let converted = source.convert_samples();
         let eq = Equalizer::new(converted, eq_config, eq_version);
@@ -506,15 +516,32 @@ impl AudioPlayer {
             .handle;
 
         if let Some(sink) = self.sink.take() {
-            sink.stop();
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                sink.stop();
+            }));
         }
 
         let (source, duration) =
             Self::build_source(path, self.eq_config.clone(), self.eq_version.clone())?;
-        let sink = Sink::try_new(handle)
-            .map_err(|error| AudioError::SinkCreation(format!(
-                "Could not initialise audio playback: {error}"
-            )))?;
+
+        let sink = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Sink::try_new(handle)
+        })) {
+            Ok(Ok(sink)) => sink,
+            Ok(Err(error)) => {
+                return Err(AudioError::SinkCreation(format!(
+                    "Could not initialise audio playback: {error}"
+                )));
+            }
+            Err(_) => {
+                return Err(AudioError::SinkCreation(
+                    "Audio playback initialisation crashed. \
+                     Another app may be using the speaker exclusively."
+                        .to_string(),
+                ));
+            }
+        };
+
         sink.set_volume(self.volume);
         sink.append(source);
         sink.play();
