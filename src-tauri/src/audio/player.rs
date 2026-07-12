@@ -411,6 +411,8 @@ impl AudioPlayer {
             return Ok(());
         }
 
+        crate::android_jni::ensure_jni_thread_attached();
+
         let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             OutputStream::try_default()
         }));

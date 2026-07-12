@@ -11,6 +11,7 @@ mod path_validation;
 pub mod playback_daemon;
 mod os_media;
 mod android_import;
+mod android_jni;
 
 pub use app::paths as app_paths;
 pub use app::settings as app_settings;
