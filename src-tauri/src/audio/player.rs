@@ -412,6 +412,12 @@ impl AudioPlayer {
         }
 
         crate::android_jni::ensure_jni_thread_attached();
+        if !crate::android_jni::android_audio_ready() {
+            return Err(AudioError::StreamCreation(
+                "Android audio context is not ready yet — try playing again in a moment"
+                    .to_string(),
+            ));
+        }
 
         let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             OutputStream::try_default()
@@ -424,12 +430,18 @@ impl AudioPlayer {
                     "Could not open audio output device: {error}"
                 )));
             }
-            Err(_) => {
-                return Err(AudioError::StreamCreation(
-                    "The audio system crashed while opening the output device. \
-                     Check that no other app is exclusively using the speaker."
-                        .to_string(),
-                ));
+            Err(payload) => {
+                let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = payload.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                tracing::error!("OutputStream::try_default panicked: {msg}");
+                return Err(AudioError::StreamCreation(format!(
+                    "Audio system crash: {msg}"
+                )));
             }
         };
 
@@ -443,6 +455,13 @@ impl AudioPlayer {
     /// Create a player that outputs to a specific audio device (by name).
     pub fn new_with_device(device_name: &str) -> Result<Self, AudioError> {
         use cpal::traits::{DeviceTrait, HostTrait};
+
+        crate::android_jni::ensure_jni_thread_attached();
+        if !crate::android_jni::android_audio_ready() {
+            return Err(AudioError::StreamCreation(
+                "Android audio context is not ready yet — try again in a moment".to_string(),
+            ));
+        }
 
         let host = cpal::default_host();
         let device = host
@@ -473,6 +492,7 @@ impl AudioPlayer {
     /// List all available audio output device names.
     pub fn list_output_devices() -> Vec<String> {
         use cpal::traits::{DeviceTrait, HostTrait};
+        crate::android_jni::ensure_jni_thread_attached();
         let listed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match cpal::default_host().output_devices() {
                 Ok(devices) => devices

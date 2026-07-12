@@ -288,14 +288,43 @@ function App() {
     left?: number;
   } | null>(null);
 
-  // Sort state
+  // Sort state — cycles asc → desc → off on repeated header clicks
   const [sortColumn, setSortColumn] = useState<"index" | "title" | "album">(
     "index",
   );
-  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc" | "none">(
+    "asc",
+  );
+
+  // Resizable title/album split (album column width in px)
+  const [albumColWidth, setAlbumColWidth] = useState(200);
+  const trackGridCols = `48px minmax(80px, 1fr) ${albumColWidth}px 64px 40px`;
+
+  const handleAlbumColResizeStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startWidth = albumColWidth;
+    const onMouseMove = (ev: MouseEvent) => {
+      // Handle sits on the title/album boundary: drag right → title grows, album shrinks.
+      const dx = ev.clientX - startX;
+      setAlbumColWidth(Math.max(80, Math.min(480, startWidth - dx)));
+    };
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  };
 
   const sortedPlaylist = useMemo(() => {
     const sorted = [...playlist];
+    if (sortDirection === "none") return sorted;
     if (sortColumn === "title") {
       sorted.sort((a, b) =>
         (getTrackTitle(a) ?? "").localeCompare(getTrackTitle(b) ?? ""),
@@ -309,7 +338,9 @@ function App() {
 
   const handleSort = (column: typeof sortColumn) => {
     if (sortColumn === column) {
-      setSortDirection((d) => (d === "asc" ? "desc" : "asc"));
+      setSortDirection((d) =>
+        d === "asc" ? "desc" : d === "desc" ? "none" : "asc",
+      );
     } else {
       setSortColumn(column);
       setSortDirection("asc");
@@ -1044,9 +1075,7 @@ function App() {
       }
       await updatePlaybackState();
     } catch (err) {
-      setError(
-        formatInvokeError(err, "Failed to control playback"),
-      );
+      setError(formatInvokeError(err, "Failed to control playback"));
     }
   };
 
@@ -1076,9 +1105,7 @@ function App() {
       await updatePlaybackState();
       await loadQueueTracks();
     } catch (err) {
-      setError(
-        formatInvokeError(err, "Failed to go to previous track"),
-      );
+      setError(formatInvokeError(err, "Failed to go to previous track"));
     }
   };
 
@@ -1097,9 +1124,7 @@ function App() {
       await updatePlaybackState();
       await loadQueueTracks();
     } catch (err) {
-      setError(
-        formatInvokeError(err, "Failed to go to next track"),
-      );
+      setError(formatInvokeError(err, "Failed to go to next track"));
     }
   };
 
@@ -1853,14 +1878,17 @@ function App() {
                 )}
             </div>
           ) : (
-            <div className="track-list">
+            <div
+              className="track-list"
+              style={{ "--track-grid": trackGridCols } as React.CSSProperties}
+            >
               <div className="track-list-header">
                 <div
                   className="track-col-index sort-header"
                   onClick={() => handleSort("index")}
                 >
                   #
-                  {sortColumn === "index"
+                  {sortColumn === "index" && sortDirection !== "none"
                     ? sortDirection === "asc"
                       ? " ▲"
                       : " ▼"
@@ -1871,25 +1899,35 @@ function App() {
                   onClick={() => handleSort("title")}
                 >
                   Title
-                  {sortColumn === "title"
+                  {sortColumn === "title" && sortDirection !== "none"
                     ? sortDirection === "asc"
                       ? " ▲"
                       : " ▼"
                     : ""}
+                  <div
+                    className="resize-handle"
+                    onMouseDown={handleAlbumColResizeStart}
+                    onClick={(e) => e.stopPropagation()}
+                    title="Resize columns"
+                    role="separator"
+                    aria-orientation="vertical"
+                    aria-label="Resize title and album columns"
+                  />
                 </div>
                 <div
                   className="track-album sort-header"
                   onClick={() => handleSort("album")}
                 >
                   Album
-                  {sortColumn === "album"
+                  {sortColumn === "album" && sortDirection !== "none"
                     ? sortDirection === "asc"
                       ? " ▲"
                       : " ▼"
                     : ""}
                 </div>
-                <div className="track-duration">Time</div>
-                <div className="track-actions-cell" aria-hidden="true" />
+                <div className="track-duration track-duration-header">
+                  Duration
+                </div>
               </div>
               {sortedPlaylist.map((track) => (
                 <div

@@ -604,6 +604,7 @@ img.track-thumb {
 }
 
 .track-list {
+  --track-grid: 48px minmax(80px, 1fr) 200px 64px 40px;
   width: 100%;
   overflow: hidden;
   border-radius: 0;
@@ -613,6 +614,7 @@ img.track-thumb {
 .sort-header {
   cursor: pointer;
   user-select: none;
+  position: relative;
 }
 
 .sort-header:hover {
@@ -622,11 +624,28 @@ img.track-thumb {
 .track-list-header,
 .track-item {
   display: grid;
-  grid-template-columns: 48px minmax(120px, 3fr) minmax(100px, 2fr) 72px 40px;
+  grid-template-columns: var(--track-grid);
   column-gap: 16px;
   align-items: center;
   width: 100%;
   padding: 10px 24px;
+}
+
+.resize-handle {
+  position: absolute;
+  right: -3px;
+  top: -4px;
+  bottom: -4px;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 5;
+  border-radius: 3px;
+  transition: background 0.15s ease;
+}
+
+.resize-handle:hover,
+.resize-handle:active {
+  background: rgba(255, 255, 255, 0.25);
 }
 
 .track-col-index {
@@ -643,6 +662,14 @@ img.track-thumb {
 .track-duration {
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.track-list-header .track-duration-header {
+  grid-column: span 2;
+  min-width: 0;
+  overflow: visible;
+  white-space: nowrap;
+  text-align: right;
 }
 
 .track-actions-cell {
@@ -744,6 +771,10 @@ img.track-thumb {
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.track-album {
+  text-align: left;
 }
 
 .track-duration {
@@ -1987,9 +2018,11 @@ img.queue-thumb {
 }
 
 @media (max-width: 1100px) {
+  .track-list {
+    --track-grid: 44px minmax(0, 2.5fr) minmax(0, 1.5fr) 64px 40px !important;
+  }
   .track-list-header,
   .track-item {
-    grid-template-columns: 44px minmax(0, 2.5fr) minmax(0, 1.5fr) 64px 40px;
     column-gap: 12px;
   }
 }
@@ -2173,9 +2206,20 @@ img.queue-thumb {
     font-size: 26px;
   }
 
+  .track-list {
+    --track-grid: 32px minmax(0, 1fr) 52px 56px !important;
+  }
+
+  .resize-handle {
+    display: none;
+  }
+
+  .track-list-header .track-duration-header {
+    grid-column: span 2;
+  }
+
   .track-list-header,
   .track-item {
-    grid-template-columns: 32px minmax(0, 1fr) 44px 68px;
     column-gap: 10px;
     padding: 8px 14px;
   }
@@ -2489,12 +2533,12 @@ img.queue-thumb {
     display: none;
   }
 
-  .track-list-header,
-  .track-item {
-    grid-template-columns: minmax(0, 1fr) 44px 68px;
+  .track-list {
+    --track-grid: minmax(0, 1fr) 52px 56px !important;
   }
 
-  .track-list-header .track-duration {
+  .track-list-header .track-duration-header {
+    grid-column: span 2;
     text-align: right;
   }
 
