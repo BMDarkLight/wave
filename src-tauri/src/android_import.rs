@@ -135,13 +135,13 @@ fn content_hash(path: &Path) -> Result<String, String> {
 pub fn materialize_audio_source(app: &AppHandle, source: &str) -> Result<PathBuf, String> {
     let trimmed = source.trim();
     if trimmed.is_empty() {
-        return Err("Audio path cannot be empty".to_string());
+        return Err("Audio path is empty".to_string());
     }
 
     let as_path = PathBuf::from(trimmed);
     if as_path.is_file() {
         if !is_playable_audio_file(&as_path) {
-            return Err(format!("Unsupported audio file: {trimmed}"));
+            return Err(format!("Unsupported audio format: {trimmed}"));
         }
         return Ok(as_path);
     }
@@ -150,10 +150,11 @@ pub fn materialize_audio_source(app: &AppHandle, source: &str) -> Result<PathBuf
         let local_path = PathBuf::from(local);
         if local_path.is_file() {
             if !is_playable_audio_file(&local_path) {
-                return Err(format!("Unsupported audio file: {trimmed}"));
+                return Err(format!("Unsupported audio format: {trimmed}"));
             }
             return Ok(local_path);
         }
+        return Err(format!("Audio file not found: {trimmed}"));
     }
 
     if !is_android_content_uri(trimmed) && !trimmed.starts_with("file:") {
@@ -175,7 +176,7 @@ pub fn materialize_audio_source(app: &AppHandle, source: &str) -> Result<PathBuf
     if !is_playable_audio_file(&staging) {
         let _ = fs::remove_file(&staging);
         return Err(format!(
-            "Unsupported or unreadable audio source: {trimmed}"
+            "Could not read audio from source: {trimmed}"
         ));
     }
 

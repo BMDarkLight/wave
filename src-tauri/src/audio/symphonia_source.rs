@@ -37,8 +37,10 @@ pub struct SymphoniaSource {
 impl SymphoniaSource {
     pub fn new(path: &str) -> Result<Self, AudioError> {
         crate::path_validation::validate_audio_path(path)
-            .map_err(|e| AudioError::FileOpen(e))?;
-        let file = File::open(path).map_err(|error| AudioError::FileOpen(error.to_string()))?;
+            .map_err(|e| AudioError::FileOpen(format!("{e}: {path}")))?;
+        let file = File::open(path).map_err(|error| {
+            AudioError::FileOpen(format!("Cannot open audio file \"{path}\": {error}"))
+        })?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
 
         let mut hint = Hint::new();
@@ -52,14 +54,14 @@ impl SymphoniaSource {
 
         let mut probed = symphonia::default::get_probe()
             .format(&hint, mss, &format_opts, &metadata_opts)
-            .map_err(|error| AudioError::Decode(format!("Failed to probe format: {error}")))?;
+            .map_err(|error| AudioError::Decode(format!("Unrecognised or corrupted audio format in \"{path}\": {error}")))?;
 
         let track_id = probed
             .format
             .tracks()
             .iter()
             .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-            .ok_or_else(|| AudioError::UnsupportedFormat("No supported audio track found".into()))?
+            .ok_or_else(|| AudioError::UnsupportedFormat(format!("No playable audio stream found in \"{path}\"")))?
             .id;
 
         let track = probed

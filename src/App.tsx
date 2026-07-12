@@ -958,7 +958,7 @@ function App() {
       await updatePlaybackState();
       await loadQueueTracks();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to play track");
+      setError(err instanceof Error ? err.message : "Could not start playback");
     }
   };
 
@@ -1553,7 +1553,7 @@ function App() {
       await updatePlaybackState();
       await loadQueueTracks();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to play track");
+      setError(err instanceof Error ? err.message : "Could not start playback");
     }
   };
 

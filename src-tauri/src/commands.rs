@@ -219,9 +219,11 @@ pub async fn play_track(
 ) -> Result<(), String> {
     validate_audio_path(&path)?;
     let app_clone = app.clone();
+    let path_clone = path.clone();
     let local_path = blocking(move || {
-        crate::android_import::materialize_audio_source(&app_clone, &path)
+        crate::android_import::materialize_audio_source(&app_clone, &path_clone)
             .map(|p| p.to_string_lossy().into_owned())
+            .map_err(|e| format!("Could not access audio file: {e}"))
     })
     .await?;
 
@@ -229,7 +231,7 @@ pub async fn play_track(
     let app_clone = app.clone();
     blocking(move || {
         with_app_player(&app_clone, |player| {
-            player.play(&play_path).map_err(|e| e.to_string())
+            player.play(&play_path).map_err(|e| format!("Playback failed: {e}"))
         })
     })
     .await?;
@@ -525,7 +527,7 @@ pub async fn play_track_from_playlist(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let app_clone = app.clone();
-    let (tracks, track) = blocking(move || {
+    let (raw_tracks, track) = blocking(move || {
         let library = app_clone.state::<LibraryState>();
         let lib = library.0.lock().map_err(|e| e.to_string())?;
         let tracks = lib.get_default_playlist_tracks()?;
@@ -537,12 +539,44 @@ pub async fn play_track_from_playlist(
     })
     .await?;
 
-    let track_path = track.path.clone();
     let app_clone = app.clone();
+    let raw_track_paths: Vec<String> = raw_tracks.iter().map(|t| t.path.clone()).collect();
+    let materialized_paths = blocking(move || {
+        Ok::<_, String>(raw_track_paths
+            .into_iter()
+            .map(|path| {
+                crate::android_import::materialize_audio_source(&app_clone, &path)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Failed to materialize track {path}: {e}");
+                        path
+                    })
+            })
+            .collect::<Vec<_>>())
+    })
+    .await?;
+
+    let local_path = materialized_paths
+        .get(index)
+        .cloned()
+        .unwrap_or_default();
+
+    if local_path.is_empty() {
+        return Err(format!("Audio file not found for track at index {index}"));
+    }
+
+    let tracks: Vec<Track> = raw_tracks
+        .into_iter()
+        .zip(materialized_paths.into_iter())
+        .map(|(mut t, p)| { t.path = p; t })
+        .collect();
+
+    let app_clone = app.clone();
+    let tracks_clone = tracks.clone();
     blocking(move || {
         with_app_player(&app_clone, |player| {
-            sync_queue_from_tracks(player, &tracks, index);
-            player.play(&track_path).map_err(|e| e.to_string())
+            sync_queue_from_tracks(player, &tracks_clone, index);
+            player.play(&local_path).map_err(|e| format!("Playback failed: {e}"))
         })
     })
     .await?;
@@ -921,7 +955,7 @@ pub async fn play_track_from_specific_playlist(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let app_clone = app.clone();
-    let (tracks, track) = blocking(move || {
+    let (raw_tracks, track) = blocking(move || {
         let library = app_clone.state::<LibraryState>();
         let lib = library.0.lock().map_err(|e| e.to_string())?;
         let tracks = lib.get_playlist_tracks(&playlist_id)?;
@@ -933,12 +967,44 @@ pub async fn play_track_from_specific_playlist(
     })
     .await?;
 
-    let track_path = track.path.clone();
     let app_clone = app.clone();
+    let raw_track_paths: Vec<String> = raw_tracks.iter().map(|t| t.path.clone()).collect();
+    let materialized_paths = blocking(move || {
+        Ok::<_, String>(raw_track_paths
+            .into_iter()
+            .map(|path| {
+                crate::android_import::materialize_audio_source(&app_clone, &path)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Failed to materialize track {path}: {e}");
+                        path
+                    })
+            })
+            .collect::<Vec<_>>())
+    })
+    .await?;
+
+    let local_path = materialized_paths
+        .get(index)
+        .cloned()
+        .unwrap_or_default();
+
+    if local_path.is_empty() {
+        return Err(format!("Audio file not found for track at index {index}"));
+    }
+
+    let tracks: Vec<Track> = raw_tracks
+        .into_iter()
+        .zip(materialized_paths.into_iter())
+        .map(|(mut t, p)| { t.path = p; t })
+        .collect();
+
+    let app_clone = app.clone();
+    let tracks_clone = tracks.clone();
     blocking(move || {
         with_app_player(&app_clone, |player| {
-            sync_queue_from_tracks(player, &tracks, index);
-            player.play(&track_path).map_err(|e| e.to_string())
+            sync_queue_from_tracks(player, &tracks_clone, index);
+            player.play(&local_path).map_err(|e| format!("Playback failed: {e}"))
         })
     })
     .await?;

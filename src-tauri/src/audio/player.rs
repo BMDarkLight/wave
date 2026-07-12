@@ -420,11 +420,15 @@ impl AudioPlayer {
         let (stream, handle) = match opened {
             Ok(Ok(pair)) => pair,
             Ok(Err(error)) => {
-                return Err(AudioError::StreamCreation(error.to_string()));
+                return Err(AudioError::StreamCreation(format!(
+                    "Could not open audio output device: {error}"
+                )));
             }
             Err(_) => {
                 return Err(AudioError::StreamCreation(
-                    "native audio backend panicked while opening the output device".to_string(),
+                    "The audio system crashed while opening the output device. \
+                     Check that no other app is exclusively using the speaker."
+                        .to_string(),
                 ));
             }
         };
@@ -508,7 +512,9 @@ impl AudioPlayer {
         let (source, duration) =
             Self::build_source(path, self.eq_config.clone(), self.eq_version.clone())?;
         let sink = Sink::try_new(handle)
-            .map_err(|error| AudioError::SinkCreation(error.to_string()))?;
+            .map_err(|error| AudioError::SinkCreation(format!(
+                "Could not initialise audio playback: {error}"
+            )))?;
         sink.set_volume(self.volume);
         sink.append(source);
         sink.play();
