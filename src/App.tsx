@@ -112,7 +112,9 @@ const emptyPlaybackState: PlaybackState = {
 const formatTime = (seconds?: number | null) => {
   if (!seconds || !Number.isFinite(seconds)) return "0:00";
   const minutes = Math.floor(seconds / 60);
-  const remaining = Math.floor(seconds % 60).toString().padStart(2, "0");
+  const remaining = Math.floor(seconds % 60)
+    .toString()
+    .padStart(2, "0");
   return `${minutes}:${remaining}`;
 };
 
@@ -146,7 +148,8 @@ const Artwork = ({
 };
 
 function App() {
-  const [playbackState, setPlaybackState] = useState<PlaybackState>(emptyPlaybackState);
+  const [playbackState, setPlaybackState] =
+    useState<PlaybackState>(emptyPlaybackState);
   const [playlist, setPlaylist] = useState<Track[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -157,13 +160,18 @@ function App() {
   const [isLoadingPlaylist, setIsLoadingPlaylist] = useState(false);
   const [importedCount, setImportedCount] = useState(0);
   const [showAddTrackMenu, setShowAddTrackMenu] = useState(false);
-  const [addTrackMenuAnchor, setAddTrackMenuAnchor] = useState<{ top: number; left: number } | null>(null);
+  const [addTrackMenuAnchor, setAddTrackMenuAnchor] = useState<{
+    top: number;
+    left: number;
+  } | null>(null);
   const [seekValue, setSeekValue] = useState(0);
   const [volumeValue, setVolumeValue] = useState(0.8);
 
   // Playlist management
   const [playlists, setPlaylists] = useState<PlaylistInfo[]>([]);
-  const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(
+    null,
+  );
 
   // Favorited track paths (for heart toggle state in the track list)
   const [favoritePaths, setFavoritePaths] = useState<Set<string>>(new Set());
@@ -171,11 +179,24 @@ function App() {
   // Clear-playlist confirmation modal
   const [showClearConfirm, setShowClearConfirm] = useState(false);
 
+  // Delete-playlist confirmation modal
+  const [deletePlaylistConfirm, setDeletePlaylistConfirm] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+
   // Playback mode
-  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>({ repeat: "off", shuffle: false });
+  const [playbackMode, setPlaybackMode] = useState<PlaybackMode>({
+    repeat: "off",
+    shuffle: false,
+  });
 
   // Queue panel
-  const [queueData, setQueueData] = useState<QueueTrackState>({ tracks: [], current_index: null, is_shuffled: false });
+  const [queueData, setQueueData] = useState<QueueTrackState>({
+    tracks: [],
+    current_index: null,
+    is_shuffled: false,
+  });
   const [showQueue, setShowQueue] = useState(false);
 
   // Lyrics panel
@@ -187,14 +208,58 @@ function App() {
 
   // Equalizer
   const [showEqPanel, setShowEqPanel] = useState(false);
-  const [eqSettings, setEqSettings] = useState<EqSettings>({ bands: Array(10).fill(0), enabled: false });
-  const [eqAnchor, setEqAnchor] = useState<{ bottom: number; right: number } | null>(null);
+  const [eqSettings, setEqSettings] = useState<EqSettings>({
+    bands: Array(10).fill(0),
+    enabled: false,
+  });
+  const [eqAnchor, setEqAnchor] = useState<{
+    bottom: number;
+    right: number;
+  } | null>(null);
   const volumeIconRef = useRef<HTMLButtonElement>(null);
 
   // Resizable columns
   const [sidebarWidth, setSidebarWidth] = useState(252);
   const [rightPanelWidth, setRightPanelWidth] = useState(320);
   const rightPanelOpen = showQueue || !!lyricsPanelTrack || showDeviceList;
+  const [rightPanelClosing, setRightPanelClosing] = useState(false);
+  const rightPanelClosingRef = useRef(false);
+  const rightPanelCloseTimer = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+
+  const isMobileLayout = () => window.innerWidth <= 900;
+
+  const closeRightPanelDelayed = () => {
+    if (rightPanelClosingRef.current) return;
+    if (!isMobileLayout()) {
+      setShowQueue(false);
+      setShowDeviceList(false);
+      setLyricsPanelTrack(null);
+      return;
+    }
+    rightPanelClosingRef.current = true;
+    setRightPanelClosing(true);
+    rightPanelCloseTimer.current = setTimeout(() => {
+      rightPanelClosingRef.current = false;
+      setRightPanelClosing(false);
+      setShowQueue(false);
+      setShowDeviceList(false);
+      setLyricsPanelTrack(null);
+    }, 280);
+  };
+
+  const cancelCloseRightPanel = () => {
+    if (rightPanelCloseTimer.current) {
+      clearTimeout(rightPanelCloseTimer.current);
+      rightPanelCloseTimer.current = null;
+    }
+    if (rightPanelClosingRef.current) {
+      rightPanelClosingRef.current = false;
+      setRightPanelClosing(false);
+    }
+  };
+
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [androidHost, setAndroidHost] = useState(false);
 
@@ -206,21 +271,35 @@ function App() {
 
   // Track context menu
   const [menuTrackPath, setMenuTrackPath] = useState<string | null>(null);
-  const [menuAnchor, setMenuAnchor] = useState<{ top: number; right?: number; left?: number } | null>(null);
-  const [showAddToPlaylist, setShowAddToPlaylist] = useState(false);
+  const [menuAnchor, setMenuAnchor] = useState<{
+    top: number;
+    right?: number;
+    left?: number;
+  } | null>(null);
+  const [addToPlaylistTrack, setAddToPlaylistTrack] = useState<string | null>(
+    null,
+  );
 
   // Queue context menu
   const [queueMenuIndex, setQueueMenuIndex] = useState<number | null>(null);
-  const [queueMenuAnchor, setQueueMenuAnchor] = useState<{ top: number; right?: number; left?: number } | null>(null);
+  const [queueMenuAnchor, setQueueMenuAnchor] = useState<{
+    top: number;
+    right?: number;
+    left?: number;
+  } | null>(null);
 
   // Sort state
-  const [sortColumn, setSortColumn] = useState<"index" | "title" | "album">("index");
+  const [sortColumn, setSortColumn] = useState<"index" | "title" | "album">(
+    "index",
+  );
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
 
   const sortedPlaylist = useMemo(() => {
     const sorted = [...playlist];
     if (sortColumn === "title") {
-      sorted.sort((a, b) => (getTrackTitle(a) ?? "").localeCompare(getTrackTitle(b) ?? ""));
+      sorted.sort((a, b) =>
+        (getTrackTitle(a) ?? "").localeCompare(getTrackTitle(b) ?? ""),
+      );
     } else if (sortColumn === "album") {
       sorted.sort((a, b) => (a.album ?? "").localeCompare(b.album ?? ""));
     }
@@ -240,47 +319,64 @@ function App() {
   // Panel toggles (only one open at a time)
   const handleToggleQueue = () => {
     setMobileNavOpen(false);
+    setRightPanelWidth((width) => clampRightPanelWidth(width));
+    if (showQueue) {
+      closeRightPanelDelayed();
+      return;
+    }
+    cancelCloseRightPanel();
     setShowDeviceList(false);
     setLyricsPanelTrack(null);
-    setRightPanelWidth((width) => clampRightPanelWidth(width));
-    setShowQueue((v) => {
-      const next = !v;
-      if (next) void loadEqSettings();
-      return next;
-    });
+    setShowQueue(true);
+    void loadEqSettings();
   };
 
   const handleToggleLyrics = () => {
     setMobileNavOpen(false);
+    setRightPanelWidth((width) => clampRightPanelWidth(width));
+    if (lyricsPanelTrack) {
+      closeRightPanelDelayed();
+      return;
+    }
+    cancelCloseRightPanel();
     setShowQueue(false);
     setShowDeviceList(false);
-    setRightPanelWidth((width) => clampRightPanelWidth(width));
-    setLyricsPanelTrack((prev) => (prev ? null : currentTrack ?? null));
+    setLyricsPanelTrack(currentTrack ?? null);
   };
 
   const handleOpenLyrics = () => {
     if (!currentTrack) return;
     setMobileNavOpen(false);
+    setRightPanelWidth((width) => clampRightPanelWidth(width));
+    cancelCloseRightPanel();
     setShowQueue(false);
     setShowDeviceList(false);
-    setRightPanelWidth((width) => clampRightPanelWidth(width));
     setLyricsPanelTrack(currentTrack);
   };
 
   const handleToggleDevice = () => {
     setMobileNavOpen(false);
+    setRightPanelWidth((width) => clampRightPanelWidth(width));
+    if (showDeviceList) {
+      closeRightPanelDelayed();
+      return;
+    }
+    cancelCloseRightPanel();
     setShowQueue(false);
     setLyricsPanelTrack(null);
-    setRightPanelWidth((width) => clampRightPanelWidth(width));
-    setShowDeviceList((v) => !v);
+    setShowDeviceList(true);
   };
 
   // Create / rename playlist dialog
   const [playlistDialog, setPlaylistDialog] = useState<
-    { mode: "create" } | { mode: "rename"; playlistId: string; currentName: string } | null
+    | { mode: "create" }
+    | { mode: "rename"; playlistId: string; currentName: string }
+    | null
   >(null);
   const [playlistNameInput, setPlaylistNameInput] = useState("");
-  const [playlistDialogError, setPlaylistDialogError] = useState<string | null>(null);
+  const [playlistDialogError, setPlaylistDialogError] = useState<string | null>(
+    null,
+  );
   const playlistNameInputRef = useRef<HTMLInputElement>(null);
   const addTrackBtnRef = useRef<HTMLButtonElement>(null);
   const selectedPlaylistIdRef = useRef<string | null>(null);
@@ -289,9 +385,13 @@ function App() {
 
   const currentTrack = useMemo(() => {
     if (!playbackState.current_path) return null;
-    const fromQueue = queueData.tracks.find((track) => track.path === playbackState.current_path);
+    const fromQueue = queueData.tracks.find(
+      (track) => track.path === playbackState.current_path,
+    );
     if (fromQueue) return fromQueue;
-    const fromPlaylist = playlist.find((track) => track.path === playbackState.current_path);
+    const fromPlaylist = playlist.find(
+      (track) => track.path === playbackState.current_path,
+    );
     return fromPlaylist ?? null;
   }, [playbackState.current_path, queueData.tracks, playlist]);
 
@@ -314,7 +414,8 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const clamp = () => setRightPanelWidth((width) => clampRightPanelWidth(width));
+    const clamp = () =>
+      setRightPanelWidth((width) => clampRightPanelWidth(width));
     clamp();
     window.addEventListener("resize", clamp);
     return () => window.removeEventListener("resize", clamp);
@@ -334,9 +435,13 @@ function App() {
     const onMouseMove = (e: MouseEvent) => {
       const dx = e.clientX - dragStartRef.current.x;
       if (dragging === "sidebar") {
-        setSidebarWidth(Math.max(180, Math.min(400, dragStartRef.current.width + dx)));
+        setSidebarWidth(
+          Math.max(180, Math.min(400, dragStartRef.current.width + dx)),
+        );
       } else {
-        setRightPanelWidth(clampRightPanelWidth(dragStartRef.current.width - dx));
+        setRightPanelWidth(
+          clampRightPanelWidth(dragStartRef.current.width - dx),
+        );
       }
     };
     const onMouseUp = () => {
@@ -357,7 +462,10 @@ function App() {
 
   const onDragStart = (which: "sidebar" | "right") => (e: React.MouseEvent) => {
     e.preventDefault();
-    dragStartRef.current = { x: e.clientX, width: which === "sidebar" ? sidebarWidth : rightPanelWidth };
+    dragStartRef.current = {
+      x: e.clientX,
+      width: which === "sidebar" ? sidebarWidth : rightPanelWidth,
+    };
     document.body.style.cursor = "col-resize";
     document.body.style.userSelect = "none";
     document.documentElement.style.userSelect = "none";
@@ -381,26 +489,40 @@ function App() {
     setLyricsFetchPath(path);
 
     let cancelled = false;
-    fetchLyricsForTrack(path).then((updated) => {
-      if (cancelled || lyricsFetchIdRef.current !== fetchId) return;
-      setLyricsFetchPath(null);
-      if (!updated?.lyrics) return;
-      setPlaylist((prev) =>
-        prev.map((t) =>
-          t.path === path ? { ...t, lyrics: updated.lyrics, lyrics_source: updated.lyrics_source } : t
-        )
-      );
-      setQueueData((prev) => ({
-        ...prev,
-        tracks: prev.tracks.map((t) =>
-          t.path === path ? { ...t, lyrics: updated.lyrics, lyrics_source: updated.lyrics_source } : t
-        ),
-      }));
-    }).catch(() => {
-      if (!cancelled && lyricsFetchIdRef.current === fetchId) {
+    fetchLyricsForTrack(path)
+      .then((updated) => {
+        if (cancelled || lyricsFetchIdRef.current !== fetchId) return;
         setLyricsFetchPath(null);
-      }
-    });
+        if (!updated?.lyrics) return;
+        setPlaylist((prev) =>
+          prev.map((t) =>
+            t.path === path
+              ? {
+                  ...t,
+                  lyrics: updated.lyrics,
+                  lyrics_source: updated.lyrics_source,
+                }
+              : t,
+          ),
+        );
+        setQueueData((prev) => ({
+          ...prev,
+          tracks: prev.tracks.map((t) =>
+            t.path === path
+              ? {
+                  ...t,
+                  lyrics: updated.lyrics,
+                  lyrics_source: updated.lyrics_source,
+                }
+              : t,
+          ),
+        }));
+      })
+      .catch(() => {
+        if (!cancelled && lyricsFetchIdRef.current === fetchId) {
+          setLyricsFetchPath(null);
+        }
+      });
 
     return () => {
       cancelled = true;
@@ -416,16 +538,19 @@ function App() {
   };
 
   const currentPlaylistIndex = useMemo(
-    () => playlist.findIndex((track) => track.path === playbackState.current_path),
-    [playlist, playbackState.current_path]
+    () =>
+      playlist.findIndex((track) => track.path === playbackState.current_path),
+    [playlist, playbackState.current_path],
   );
 
   const hasActiveQueue = queueData.tracks.length > 0;
   const canSkip = hasActiveQueue || playlist.length > 0;
-  const displayDuration = playbackState.duration_seconds ?? currentTrack?.duration_seconds ?? 0;
+  const displayDuration =
+    playbackState.duration_seconds ?? currentTrack?.duration_seconds ?? 0;
   const displayPosition = Math.min(seekValue, displayDuration || seekValue);
 
-  const selectedPlaylist = playlists.find((p) => p.id === selectedPlaylistId) ?? null;
+  const selectedPlaylist =
+    playlists.find((p) => p.id === selectedPlaylistId) ?? null;
 
   const sortedPlaylists = useMemo(() => {
     const priority = ["All Local Files", "Favorites"];
@@ -445,7 +570,9 @@ function App() {
     }
     // Keep the OS media controls position in sync during playback and pause.
     if (state.current_path) {
-      updateMediaPosition(state.position_seconds, state.is_playing).catch(console.error);
+      updateMediaPosition(state.position_seconds, state.is_playing).catch(
+        console.error,
+      );
     } else {
       clearMediaSession().catch(console.error);
     }
@@ -467,7 +594,9 @@ function App() {
     try {
       const mode = await getPlaybackMode();
       setPlaybackMode(mode);
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   };
 
   const loadQueueTracks = async () => {
@@ -488,7 +617,9 @@ function App() {
 
   // Resolve the default playlist ID from the playlists list.
   const getDefaultPlaylistId = (list: PlaylistInfo[]): string | null => {
-    return (list.find((p) => p.name === "All Local Files") ?? list[0])?.id ?? null;
+    return (
+      (list.find((p) => p.name === "All Local Files") ?? list[0])?.id ?? null
+    );
   };
 
   useEffect(() => {
@@ -508,16 +639,30 @@ function App() {
         await loadFavoritePaths();
         listOutputDevices().then(setOutputDevices).catch(console.error);
       } catch (err: any) {
-        if (err?.message?.includes("not available") || err?.message?.includes("undefined")) {
-          setError("Tauri API not available. Run `npm run tauri dev` instead of plain Vite.");
+        if (
+          err?.message?.includes("not available") ||
+          err?.message?.includes("undefined")
+        ) {
+          setError(
+            "Tauri API not available. Run `npm run tauri dev` instead of plain Vite.",
+          );
         }
       }
     };
 
     initApp();
-    const interval = setInterval(() => updatePlaybackState().catch(() => {}), 500);
-    const queueInterval = setInterval(() => loadQueueTracks().catch(() => {}), 2000);
-    const modeInterval = setInterval(() => loadPlaybackMode().catch(() => {}), 2000);
+    const interval = setInterval(
+      () => updatePlaybackState().catch(() => {}),
+      500,
+    );
+    const queueInterval = setInterval(
+      () => loadQueueTracks().catch(() => {}),
+      2000,
+    );
+    const modeInterval = setInterval(
+      () => loadPlaybackMode().catch(() => {}),
+      2000,
+    );
     return () => {
       clearInterval(interval);
       clearInterval(queueInterval);
@@ -529,7 +674,13 @@ function App() {
   // Falls back to the selected playlist if the queue is exhausted.
   useEffect(() => {
     const wasPlaying = wasPlayingRef.current;
-    const { is_playing, is_paused, current_path, position_seconds, duration_seconds } = playbackState;
+    const {
+      is_playing,
+      is_paused,
+      current_path,
+      position_seconds,
+      duration_seconds,
+    } = playbackState;
 
     if (
       wasPlaying &&
@@ -602,7 +753,9 @@ function App() {
       } else {
         const list = await listPlaylists();
         const defaultId =
-          list.find((p) => p.name === "All Local Files")?.id ?? list[0]?.id ?? null;
+          list.find((p) => p.name === "All Local Files")?.id ??
+          list[0]?.id ??
+          null;
         if (defaultId) {
           const tracks = await getPlaylistTracksById(defaultId);
           if (tracks.length > 0) {
@@ -701,11 +854,22 @@ function App() {
       setIsAddingTracks(true);
       setShowAddTrackMenu(false);
       const directory = await selectAudioFolder();
-      if (!directory) { setIsAddingTracks(false); return; }
+      if (!directory) {
+        setIsAddingTracks(false);
+        return;
+      }
       const paths = await scanDirectory(directory);
-      if (!paths.length) { setError("No audio files found in the selected folder."); setIsAddingTracks(false); return; }
+      if (!paths.length) {
+        setError("No audio files found in the selected folder.");
+        setIsAddingTracks(false);
+        return;
+      }
       const playlistId = selectedPlaylistId ?? getDefaultPlaylistId(playlists);
-      if (!playlistId) { setError("No playlist selected."); setIsAddingTracks(false); return; }
+      if (!playlistId) {
+        setError("No playlist selected.");
+        setIsAddingTracks(false);
+        return;
+      }
       setIsAddingTracks(false);
       runFolderImport(paths, playlistId).catch(() => {});
     } catch (err) {
@@ -720,7 +884,10 @@ function App() {
       setIsAddingTracks(true);
       setShowAddTrackMenu(false);
       const directory = await selectAudioFolder();
-      if (!directory) { setIsAddingTracks(false); return; }
+      if (!directory) {
+        setIsAddingTracks(false);
+        return;
+      }
       const folderName = getFileName(directory);
       const info = await createPlaylist(folderName);
       setSelectedPlaylistId(info.id);
@@ -795,7 +962,9 @@ function App() {
     }
   };
 
-  const isTrackPlayable = async (path: string | null | undefined): Promise<boolean> => {
+  const isTrackPlayable = async (
+    path: string | null | undefined,
+  ): Promise<boolean> => {
     if (!path) return false;
     try {
       return await isTrackInPlaylist(path);
@@ -804,7 +973,9 @@ function App() {
     }
   };
 
-  const ensureTrackPlayableOrPick = async (path: string | null | undefined): Promise<boolean> => {
+  const ensureTrackPlayableOrPick = async (
+    path: string | null | undefined,
+  ): Promise<boolean> => {
     if (await isTrackPlayable(path)) return true;
     await stopTrack();
     setSeekValue(0);
@@ -818,14 +989,16 @@ function App() {
       if (playbackState.is_playing) {
         await pauseTrack();
       } else if (playbackState.is_paused) {
-        if (!(await ensureTrackPlayableOrPick(playbackState.current_path))) return;
+        if (!(await ensureTrackPlayableOrPick(playbackState.current_path)))
+          return;
         await resumeTrack();
       } else if (
         playbackState.current_path &&
         playbackState.duration_seconds != null &&
         playbackState.position_seconds < playbackState.duration_seconds - 1
       ) {
-        if (!(await ensureTrackPlayableOrPick(playbackState.current_path))) return;
+        if (!(await ensureTrackPlayableOrPick(playbackState.current_path)))
+          return;
         await playTrack(playbackState.current_path);
       } else if (
         !playbackState.current_path &&
@@ -835,14 +1008,20 @@ function App() {
         await playTrackFromSpecificPlaylist(selectedPlaylistId, 0);
       } else if (hasActiveQueue && queueData.current_index != null) {
         const nextIdx = queueData.current_index + 1;
-        if (nextIdx < queueData.tracks.length && (await isTrackPlayable(queueData.tracks[nextIdx]?.path))) {
+        if (
+          nextIdx < queueData.tracks.length &&
+          (await isTrackPlayable(queueData.tracks[nextIdx]?.path))
+        ) {
           await playTrackFromQueue(nextIdx);
         } else if (selectedPlaylistId && playlist.length > 0) {
-          const nextIndex = currentPlaylistIndex >= 0
-            ? (currentPlaylistIndex + 1) % playlist.length
-            : 0;
+          const nextIndex =
+            currentPlaylistIndex >= 0
+              ? (currentPlaylistIndex + 1) % playlist.length
+              : 0;
           await playTrackFromSpecificPlaylist(selectedPlaylistId, nextIndex);
-        } else if (await isTrackPlayable(queueData.tracks[queueData.current_index]?.path)) {
+        } else if (
+          await isTrackPlayable(queueData.tracks[queueData.current_index]?.path)
+        ) {
           await playTrackFromQueue(queueData.current_index);
         } else {
           await handleAddTrack(false);
@@ -865,7 +1044,9 @@ function App() {
       }
       await updatePlaybackState();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to control playback");
+      setError(
+        err instanceof Error ? err.message : "Failed to control playback",
+      );
     }
   };
 
@@ -887,13 +1068,17 @@ function App() {
       const path = await playPrevious();
       if (!path && selectedPlaylistId && playlist.length > 0) {
         const prevIndex =
-          currentPlaylistIndex > 0 ? currentPlaylistIndex - 1 : playlist.length - 1;
+          currentPlaylistIndex > 0
+            ? currentPlaylistIndex - 1
+            : playlist.length - 1;
         await playTrackFromSpecificPlaylist(selectedPlaylistId, prevIndex);
       }
       await updatePlaybackState();
       await loadQueueTracks();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to go to previous track");
+      setError(
+        err instanceof Error ? err.message : "Failed to go to previous track",
+      );
     }
   };
 
@@ -904,13 +1089,17 @@ function App() {
       const path = await playNext();
       if (!path && selectedPlaylistId && playlist.length > 0) {
         const nextIndex =
-          currentPlaylistIndex >= 0 ? (currentPlaylistIndex + 1) % playlist.length : 0;
+          currentPlaylistIndex >= 0
+            ? (currentPlaylistIndex + 1) % playlist.length
+            : 0;
         await playTrackFromSpecificPlaylist(selectedPlaylistId, nextIndex);
       }
       await updatePlaybackState();
       await loadQueueTracks();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to go to next track");
+      setError(
+        err instanceof Error ? err.message : "Failed to go to next track",
+      );
     }
   };
 
@@ -943,11 +1132,22 @@ function App() {
     const isEditableTarget = (target: EventTarget | null) => {
       if (!(target instanceof HTMLElement)) return false;
       const tag = target.tagName;
-      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || target.isContentEditable;
+      return (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        target.isContentEditable
+      );
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey || isEditableTarget(event.target)) return;
+      if (
+        event.metaKey ||
+        event.ctrlKey ||
+        event.altKey ||
+        isEditableTarget(event.target)
+      )
+        return;
 
       if (event.code === "Space" || event.key === " ") {
         event.preventDefault();
@@ -961,7 +1161,9 @@ function App() {
         event.preventDefault();
         const delta = event.key === "ArrowLeft" ? -5 : 5;
         const next = Math.max(0, position + delta);
-        void handleSeekRef.current(duration > 0 ? Math.min(duration, next) : next);
+        void handleSeekRef.current(
+          duration > 0 ? Math.min(duration, next) : next,
+        );
       }
     };
 
@@ -982,7 +1184,10 @@ function App() {
   const loadEqSettings = async () => {
     try {
       const settings = await getEqSettings();
-      const bands = Array.from({ length: 10 }, (_, i) => settings.bands[i] ?? 0);
+      const bands = Array.from(
+        { length: 10 },
+        (_, i) => settings.bands[i] ?? 0,
+      );
       setEqSettings({ bands, enabled: settings.enabled });
     } catch (err) {
       console.error("Failed to load EQ settings", err);
@@ -1018,7 +1223,9 @@ function App() {
   };
 
   const handleEqBandChange = async (index: number, gain: number) => {
-    const bands = eqSettings.bands.map((value, i) => (i === index ? gain : value));
+    const bands = eqSettings.bands.map((value, i) =>
+      i === index ? gain : value,
+    );
     setEqSettings((s) => ({ ...s, bands, enabled: true }));
     try {
       await setEqBands(bands);
@@ -1076,7 +1283,10 @@ function App() {
     setPlaylistDialog({ mode: "create" });
   };
 
-  const openRenamePlaylistDialog = (playlistId: string, currentName: string) => {
+  const openRenamePlaylistDialog = (
+    playlistId: string,
+    currentName: string,
+  ) => {
     setMobileNavOpen(false);
     setPlaylistNameInput(currentName);
     setPlaylistDialogError(null);
@@ -1119,7 +1329,13 @@ function App() {
 
   const handleDeletePlaylist = async (id: string) => {
     const playlistInfo = playlists.find((p) => p.id === id);
-    if (!confirm(`Delete playlist "${playlistInfo?.name ?? "Unknown"}"?`)) return;
+    setDeletePlaylistConfirm({ id, name: playlistInfo?.name ?? "Unknown" });
+  };
+
+  const confirmDeletePlaylist = async () => {
+    if (!deletePlaylistConfirm) return;
+    const { id } = deletePlaylistConfirm;
+    setDeletePlaylistConfirm(null);
     try {
       setError(null);
       await deletePlaylist(id);
@@ -1222,11 +1438,14 @@ function App() {
     }
   };
 
-  const handleAddTrackToPlaylist = async (targetPlaylistId: string, path: string) => {
+  const handleAddTrackToPlaylist = async (
+    targetPlaylistId: string,
+    path: string,
+  ) => {
     try {
       setError(null);
       await addTrackToPlaylistById(targetPlaylistId, path);
-      setShowAddToPlaylist(false);
+      setAddToPlaylistTrack(null);
       setMenuTrackPath(null);
       await loadPlaylists();
       if (targetPlaylistId === selectedPlaylistId) {
@@ -1260,18 +1479,34 @@ function App() {
     }
   };
 
-  const openTrackContextMenu = (path: string, anchor: { top: number; right?: number; left?: number }) => {
+  const openTrackContextMenu = (
+    path: string,
+    anchor: { top: number; right?: number; left?: number },
+  ) => {
     setQueueMenuIndex(null);
     setQueueMenuAnchor(null);
     setMenuTrackPath(path);
     setMenuAnchor(anchor);
-    setShowAddToPlaylist(false);
+    setAddToPlaylistTrack(null);
   };
 
-  const openQueueContextMenu = (index: number, anchor: { top: number; right?: number; left?: number }) => {
+  const closeTrackContextMenu = () => {
     setMenuTrackPath(null);
     setMenuAnchor(null);
-    setShowAddToPlaylist(false);
+  };
+
+  const closeQueueContextMenu = () => {
+    setQueueMenuIndex(null);
+    setQueueMenuAnchor(null);
+  };
+
+  const openQueueContextMenu = (
+    index: number,
+    anchor: { top: number; right?: number; left?: number },
+  ) => {
+    setMenuTrackPath(null);
+    setMenuAnchor(null);
+    setAddToPlaylistTrack(null);
     setQueueMenuIndex(index);
     setQueueMenuAnchor(anchor);
   };
@@ -1298,7 +1533,12 @@ function App() {
 
   const handleCycleRepeat = async () => {
     try {
-      const next = playbackMode.repeat === "off" ? "all" : playbackMode.repeat === "all" ? "one" : "off";
+      const next =
+        playbackMode.repeat === "off"
+          ? "all"
+          : playbackMode.repeat === "all"
+            ? "one"
+            : "off";
       await setRepeat(next);
       await loadPlaybackMode();
     } catch (err) {
@@ -1319,12 +1559,17 @@ function App() {
 
   // ── Export / Import ────────────────────────────────────────────────────────
 
-  const handleExportPlaylistById = async (playlistId: string, playlistName: string) => {
+  const handleExportPlaylistById = async (
+    playlistId: string,
+    playlistName: string,
+  ) => {
     try {
       setError(null);
       const path = await savePlaylistDialog(playlistName);
       if (!path) return;
-      const exportFormat = path.toLowerCase().endsWith(".json") ? "json" : "m3u";
+      const exportFormat = path.toLowerCase().endsWith(".json")
+        ? "json"
+        : "m3u";
       await exportPlaylist(playlistId, path, exportFormat);
     } catch (err) {
       setError(formatInvokeError(err, `Failed to export "${playlistName}"`));
@@ -1345,17 +1590,26 @@ function App() {
     }
   };
 
-  const isCurrentTrack = (track: Track) => track.path === playbackState.current_path;
-  const coverLetters = getTrackTitle(currentTrack, playbackState.current_path).slice(0, 2).toUpperCase();
+  const isCurrentTrack = (track: Track) =>
+    track.path === playbackState.current_path;
+  const coverLetters = getTrackTitle(currentTrack, playbackState.current_path)
+    .slice(0, 2)
+    .toUpperCase();
 
   return (
     <div
-      className={`app-container${mobileNavOpen ? " nav-open" : ""}${rightPanelOpen ? " panel-open" : ""}`}
-      style={{
-        "--sidebar-width": `${sidebarWidth}px`,
-        "--right-panel-width": rightPanelOpen ? `${rightPanelWidth}px` : "0px",
-        "--right-handle-width": rightPanelOpen ? "4px" : "0px",
-      } as React.CSSProperties}
+      className={`app-container${mobileNavOpen ? " nav-open" : ""}${rightPanelOpen || rightPanelClosing ? " panel-open" : ""}${rightPanelClosing ? " panel-closing" : ""}`}
+      style={
+        {
+          "--sidebar-width": `${sidebarWidth}px`,
+          "--right-panel-width":
+            rightPanelOpen || rightPanelClosing
+              ? `${rightPanelWidth}px`
+              : "0px",
+          "--right-handle-width":
+            rightPanelOpen || rightPanelClosing ? "4px" : "0px",
+        } as React.CSSProperties
+      }
     >
       <header className="mobile-topbar">
         <button
@@ -1373,8 +1627,8 @@ function App() {
           <BiMenu />
         </button>
         <div className="mobile-topbar-title">
-            <img src={trayTemplate} alt="Wave" className="mobile-topbar-logo" />
-          </div>
+          <img src={trayTemplate} alt="Wave" className="mobile-topbar-logo" />
+        </div>
         <button
           className={`mobile-topbar-btn ${showQueue ? "active" : ""}`}
           onClick={handleToggleQueue}
@@ -1386,35 +1640,49 @@ function App() {
         </button>
       </header>
 
-      {(mobileNavOpen || rightPanelOpen) && (
-        <button
-          className="nav-backdrop"
-          onClick={() => {
-            setMobileNavOpen(false);
-            setShowQueue(false);
-            setShowDeviceList(false);
-            setLyricsPanelTrack(null);
-          }}
-          type="button"
-          aria-label="Close panel"
-        />
-      )}
+      <button
+        className={`nav-backdrop${mobileNavOpen || rightPanelOpen || rightPanelClosing ? " nav-backdrop-open" : ""}${rightPanelClosing ? " nav-backdrop-closing" : ""}`}
+        onClick={() => {
+          setMobileNavOpen(false);
+          closeRightPanelDelayed();
+        }}
+        type="button"
+        aria-label="Close panel"
+      />
 
       <aside className="sidebar">
-          <div className="brand-mark" style={{ textAlign: "center" }}>
-            <img src={trayTemplate} alt="Wave" className="brand-logo" />
+        <div className="brand-mark" style={{ textAlign: "center" }}>
+          <img src={trayTemplate} alt="Wave" className="brand-logo" />
+        </div>
+        <div className="playlist-section">
+          <div className="playlist-section-header">
+            <p>Playlists</p>
+            <button
+              className="playlist-add-btn"
+              onClick={handleImportPlaylist}
+              type="button"
+              title="Import playlist"
+            >
+              <BiImport />
+            </button>
+            <button
+              className="playlist-add-btn"
+              onClick={openCreatePlaylistDialog}
+              type="button"
+              title="Create playlist"
+            >
+              <BiPlus />
+            </button>
           </div>
-          <div className="playlist-section">
-            <div className="playlist-section-header">
-              <p>Playlists</p>
-              <button className="playlist-add-btn" onClick={handleImportPlaylist} type="button" title="Import playlist"><BiImport /></button>
-              <button className="playlist-add-btn" onClick={openCreatePlaylistDialog} type="button" title="Create playlist"><BiPlus /></button>
-            </div>
           <div className="playlist-list">
             {playlists.length === 0 ? (
               <div className="playlist-empty">
                 <p>No playlists yet</p>
-                <button className="btn-ghost btn-sm" onClick={openCreatePlaylistDialog} type="button">
+                <button
+                  className="btn-ghost btn-sm"
+                  onClick={openCreatePlaylistDialog}
+                  type="button"
+                >
                   Create one
                 </button>
               </div>
@@ -1425,31 +1693,53 @@ function App() {
                   className={`playlist-item ${selectedPlaylistId === pl.id ? "active" : ""}`}
                   onClick={() => handleSelectPlaylist(pl.id)}
                 >
-                  <span className="playlist-item-name" title={pl.name}>{pl.name}</span>
-                  {pl.name !== "All Local Files" && <span className="playlist-item-count">{pl.track_count}</span>}
+                  <span className="playlist-item-name" title={pl.name}>
+                    {pl.name}
+                  </span>
+                  {pl.name !== "All Local Files" && (
+                    <span className="playlist-item-count">
+                      {pl.track_count}
+                    </span>
+                  )}
                   <div className="playlist-item-actions">
                     <button
                       className="playlist-export-btn"
-                      onClick={(e) => { e.stopPropagation(); handleExportPlaylistById(pl.id, pl.name); }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleExportPlaylistById(pl.id, pl.name);
+                      }}
                       title={`Export`}
                       type="button"
-                    ><BiExport /></button>
-                    {pl.name !== "All Local Files" && pl.name !== "Favorites" && (
-                      <>
-                        <button
-                          className="playlist-rename-btn"
-                          onClick={(e) => { e.stopPropagation(); openRenamePlaylistDialog(pl.id, pl.name); }}
-                          title="Rename playlist"
-                          type="button"
-                        ><BiEditAlt /></button>
-                        <button
-                          className="playlist-delete-btn"
-                          onClick={(e) => { e.stopPropagation(); handleDeletePlaylist(pl.id); }}
-                          title="Delete playlist"
-                          type="button"
-                        ><BiTrash /></button>
-                      </>
-                    )}
+                    >
+                      <BiExport />
+                    </button>
+                    {pl.name !== "All Local Files" &&
+                      pl.name !== "Favorites" && (
+                        <>
+                          <button
+                            className="playlist-rename-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openRenamePlaylistDialog(pl.id, pl.name);
+                            }}
+                            title="Rename playlist"
+                            type="button"
+                          >
+                            <BiEditAlt />
+                          </button>
+                          <button
+                            className="playlist-delete-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeletePlaylist(pl.id);
+                            }}
+                            title="Delete playlist"
+                            type="button"
+                          >
+                            <BiTrash />
+                          </button>
+                        </>
+                      )}
                   </div>
                 </div>
               ))
@@ -1458,14 +1748,26 @@ function App() {
         </div>
       </aside>
 
-      <div className="drag-handle drag-handle-sidebar" onMouseDown={onDragStart("sidebar")} />
+      <div
+        className="drag-handle drag-handle-sidebar"
+        onMouseDown={onDragStart("sidebar")}
+      />
 
       <main className="main-content">
         <div className="hero-copy">
           <h1>{selectedPlaylist?.name ?? "All Local Files"}</h1>
-          <p>{playlist.length ? `${playlist.length} tracks in this playlist` : "No tracks in this playlist"}</p>
+          <p>
+            {playlist.length
+              ? `${playlist.length} tracks in this playlist`
+              : "No tracks in this playlist"}
+          </p>
           <div className="hero-actions">
-            <button className="big-play" onClick={handlePlayPause} type="button" title="Play or pause">
+            <button
+              className="big-play"
+              onClick={handlePlayPause}
+              type="button"
+              title="Play or pause"
+            >
               {playbackState.is_playing ? <BiPause /> : <BiPlay />}
             </button>
             {selectedPlaylist?.name !== "Favorites" && (
@@ -1480,49 +1782,112 @@ function App() {
                       return;
                     }
                     if (addTrackBtnRef.current) {
-                      const rect = addTrackBtnRef.current.getBoundingClientRect();
-                      setAddTrackMenuAnchor({ top: rect.bottom + 6, left: rect.left });
+                      const rect =
+                        addTrackBtnRef.current.getBoundingClientRect();
+                      setAddTrackMenuAnchor({
+                        top: rect.bottom + 6,
+                        left: rect.left,
+                      });
                     }
                     setShowAddTrackMenu((v) => !v);
                   }}
                   disabled={isAddingTracks}
                   type="button"
                   title={androidHost ? "Add audio files" : "Add tracks"}
-                ><BiPlus /></button>
+                >
+                  <BiPlus />
+                </button>
               </div>
             )}
-            {playlist.length > 0 && selectedPlaylist?.name !== "All Local Files" && selectedPlaylist?.name !== "Favorites" && <button className="btn-ghost" onClick={handleClearPlaylist} type="button">Clear</button>}
+            {playlist.length > 0 &&
+              selectedPlaylist?.name !== "All Local Files" &&
+              selectedPlaylist?.name !== "Favorites" && (
+                <button
+                  className="btn-ghost"
+                  onClick={handleClearPlaylist}
+                  type="button"
+                >
+                  Clear
+                </button>
+              )}
           </div>
         </div>
-
-        {error && <div className="error-banner"><span>{error}</span><button onClick={() => setError(null)} type="button"><BiX /></button></div>}
 
         <section className="playlist-container">
           {playlist.length === 0 && isLoadingPlaylist ? (
             <div className="empty-state">
-              <div className="empty-icon"><span className="import-spinner" /></div>
+              <div className="empty-icon">
+                <span className="import-spinner" />
+              </div>
               <h2>Loading…</h2>
             </div>
           ) : playlist.length === 0 && isImporting ? (
             <div className="empty-state">
-              <div className="empty-icon"><span className="import-spinner" /></div>
-              <h2>Importing songs{importedCount > 0 ? ` (${importedCount} added)` : ""}…</h2>
-              <p className="import-subtitle">Your songs will appear here as they are added.</p>
+              <div className="empty-icon">
+                <span className="import-spinner" />
+              </div>
+              <h2>
+                Importing songs
+                {importedCount > 0 ? ` (${importedCount} added)` : ""}…
+              </h2>
+              <p className="import-subtitle">
+                Your songs will appear here as they are added.
+              </p>
             </div>
           ) : playlist.length === 0 ? (
             <div className="empty-state">
-              <div className="empty-icon"><BiMusic /></div>
+              <div className="empty-icon">
+                <BiMusic />
+              </div>
               <h2>Your playlist is empty</h2>
-              {selectedPlaylist?.name !== "All Local Files" && selectedPlaylist?.name !== "Favorites" && (
-                <button className="btn-primary" onClick={() => handleAddTrack(false)} disabled={isAddingTracks} type="button">Add your first track</button>
-              )}
+              {selectedPlaylist?.name !== "All Local Files" &&
+                selectedPlaylist?.name !== "Favorites" && (
+                  <button
+                    className="btn-primary"
+                    onClick={() => handleAddTrack(false)}
+                    disabled={isAddingTracks}
+                    type="button"
+                  >
+                    Add your first track
+                  </button>
+                )}
             </div>
           ) : (
             <div className="track-list">
               <div className="track-list-header">
-                <div className="track-col-index sort-header" onClick={() => handleSort("index")}>#{sortColumn === "index" ? (sortDirection === "asc" ? " ▲" : " ▼") : ""}</div>
-                <div className="track-title-cell sort-header" onClick={() => handleSort("title")}>Title{sortColumn === "title" ? (sortDirection === "asc" ? " ▲" : " ▼") : ""}</div>
-                <div className="track-album sort-header" onClick={() => handleSort("album")}>Album{sortColumn === "album" ? (sortDirection === "asc" ? " ▲" : " ▼") : ""}</div>
+                <div
+                  className="track-col-index sort-header"
+                  onClick={() => handleSort("index")}
+                >
+                  #
+                  {sortColumn === "index"
+                    ? sortDirection === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </div>
+                <div
+                  className="track-title-cell sort-header"
+                  onClick={() => handleSort("title")}
+                >
+                  Title
+                  {sortColumn === "title"
+                    ? sortDirection === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </div>
+                <div
+                  className="track-album sort-header"
+                  onClick={() => handleSort("album")}
+                >
+                  Album
+                  {sortColumn === "album"
+                    ? sortDirection === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </div>
                 <div className="track-duration">Time</div>
                 <div className="track-actions-cell" aria-hidden="true" />
               </div>
@@ -1530,27 +1895,52 @@ function App() {
                 <div
                   key={track.id}
                   className={`track-item ${isCurrentTrack(track) ? "active" : ""}`}
-                  onClick={() => handlePlayTrack(playlist.findIndex((t) => t.path === track.path))}
+                  onClick={() =>
+                    handlePlayTrack(
+                      playlist.findIndex((t) => t.path === track.path),
+                    )
+                  }
                   onContextMenu={(event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    openTrackContextMenu(track.path, { top: event.clientY, left: event.clientX });
+                    openTrackContextMenu(track.path, {
+                      top: event.clientY,
+                      left: event.clientX,
+                    });
                   }}
                 >
-                  <div className="track-col-index">{isCurrentTrack(track) && playbackState.is_playing ? <span className="mini-bars"><i /><i /><i /></span> : playlist.findIndex((t) => t.path === track.path) + 1}</div>
+                  <div className="track-col-index">
+                    {isCurrentTrack(track) && playbackState.is_playing ? (
+                      <span className="mini-bars">
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                    ) : (
+                      playlist.findIndex((t) => t.path === track.path) + 1
+                    )}
+                  </div>
                   <div className="track-title-cell">
-                    <Artwork track={track} fallback={getTrackTitle(track).slice(0, 1).toUpperCase()} className="track-thumb" />
+                    <Artwork
+                      track={track}
+                      fallback={getTrackTitle(track).slice(0, 1).toUpperCase()}
+                      className="track-thumb"
+                    />
                     <div>
                       <div className="track-name">{getTrackTitle(track)}</div>
                       <div className="track-meta">
                         {track.artist}
                         {track.lyrics ? " · lyrics" : ""}
-                        {track.cover_art_source === "cover-art-archive" ? " · online cover" : ""}
+                        {track.cover_art_source === "cover-art-archive"
+                          ? " · online cover"
+                          : ""}
                       </div>
                     </div>
                   </div>
                   <div className="track-album">{track.album}</div>
-                  <div className="track-duration">{formatTime(track.duration_seconds)}</div>
+                  <div className="track-duration">
+                    {formatTime(track.duration_seconds)}
+                  </div>
                   <div className="track-actions-cell">
                     <div className="track-actions-hover">
                       <button
@@ -1560,34 +1950,65 @@ function App() {
                           if (menuTrackPath === track.path) {
                             setMenuTrackPath(null);
                             setMenuAnchor(null);
-                            setShowAddToPlaylist(false);
+                            setAddToPlaylistTrack(null);
                           } else {
-                            const rect = event.currentTarget.getBoundingClientRect();
-                            openTrackContextMenu(track.path, { top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                            const rect =
+                              event.currentTarget.getBoundingClientRect();
+                            openTrackContextMenu(track.path, {
+                              top: rect.bottom + 4,
+                              right: window.innerWidth - rect.right,
+                            });
                           }
                         }}
                         title="More"
                         type="button"
-                      ><BiDotsHorizontalRounded /></button>
-                      <button className="track-action-btn" onClick={(event) => { event.stopPropagation(); handleRemoveTrack(track.path); }} title="Remove" type="button"><BiX /></button>
+                      >
+                        <BiDotsHorizontalRounded />
+                      </button>
+                      <button
+                        className="track-action-btn"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleRemoveTrack(track.path);
+                        }}
+                        title="Remove"
+                        type="button"
+                      >
+                        <BiX />
+                      </button>
                     </div>
                     <button
                       className={`track-action-btn favorite-btn ${favoritePaths.has(track.path) ? "active" : ""}`}
-                      onClick={(event) => { event.stopPropagation(); handleToggleFavorite(track.path); }}
-                      title={favoritePaths.has(track.path) ? "Remove from Favorites" : "Add to Favorites"}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleToggleFavorite(track.path);
+                      }}
+                      title={
+                        favoritePaths.has(track.path)
+                          ? "Remove from Favorites"
+                          : "Add to Favorites"
+                      }
                       type="button"
-                    >{favoritePaths.has(track.path) ? <BiSolidHeart /> : <BiHeart />}</button>
+                    >
+                      {favoritePaths.has(track.path) ? (
+                        <BiSolidHeart />
+                      ) : (
+                        <BiHeart />
+                      )}
+                    </button>
                   </div>
                 </div>
               ))}
             </div>
           )}
         </section>
-
       </main>
 
-      {rightPanelOpen && (
-        <div className="drag-handle drag-handle-right" onMouseDown={onDragStart("right")} />
+      {(rightPanelOpen || rightPanelClosing) && (
+        <div
+          className="drag-handle drag-handle-right"
+          onMouseDown={onDragStart("right")}
+        />
       )}
 
       <aside className="right-panel">
@@ -1597,9 +2018,22 @@ function App() {
               <h2>Queue</h2>
               <div className="right-panel-header-actions">
                 {queueData.tracks.length > 0 && (
-                  <button className="btn-ghost btn-sm" onClick={handleClearQueue} type="button">Clear</button>
+                  <button
+                    className="btn-ghost btn-sm"
+                    onClick={handleClearQueue}
+                    type="button"
+                  >
+                    Clear
+                  </button>
                 )}
-                <button className="right-panel-close" onClick={() => setShowQueue(false)} type="button" title="Close"><BiX /></button>
+                <button
+                  className="right-panel-close"
+                  onClick={closeRightPanelDelayed}
+                  type="button"
+                  title="Close"
+                >
+                  <BiX />
+                </button>
               </div>
             </div>
             <div className="right-panel-list">
@@ -1617,15 +2051,26 @@ function App() {
                     onContextMenu={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      openQueueContextMenu(index, { top: event.clientY, left: event.clientX });
+                      openQueueContextMenu(index, {
+                        top: event.clientY,
+                        left: event.clientX,
+                      });
                     }}
                   >
-                    <Artwork track={track} fallback={getTrackTitle(track).slice(0, 1).toUpperCase()} className="queue-thumb" />
+                    <Artwork
+                      track={track}
+                      fallback={getTrackTitle(track).slice(0, 1).toUpperCase()}
+                      className="queue-thumb"
+                    />
                     <div className="queue-item-info">
-                      <div className="queue-item-name">{getTrackTitle(track)}</div>
+                      <div className="queue-item-name">
+                        {getTrackTitle(track)}
+                      </div>
                       <div className="queue-item-artist">{track.artist}</div>
                     </div>
-                    <div className="queue-item-duration">{formatTime(track.duration_seconds)}</div>
+                    <div className="queue-item-duration">
+                      {formatTime(track.duration_seconds)}
+                    </div>
                     <div className="queue-item-actions">
                       <button
                         className="queue-item-menu"
@@ -1635,19 +2080,30 @@ function App() {
                             setQueueMenuIndex(null);
                             setQueueMenuAnchor(null);
                           } else {
-                            const rect = event.currentTarget.getBoundingClientRect();
-                            openQueueContextMenu(index, { top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                            const rect =
+                              event.currentTarget.getBoundingClientRect();
+                            openQueueContextMenu(index, {
+                              top: rect.bottom + 4,
+                              right: window.innerWidth - rect.right,
+                            });
                           }
                         }}
                         title="More"
                         type="button"
-                      ><BiDotsHorizontalRounded /></button>
+                      >
+                        <BiDotsHorizontalRounded />
+                      </button>
                       <button
                         className="queue-item-remove"
-                        onClick={(e) => { e.stopPropagation(); handleRemoveFromQueue(index); }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleRemoveFromQueue(index);
+                        }}
                         title="Remove from queue"
                         type="button"
-                      ><BiX /></button>
+                      >
+                        <BiX />
+                      </button>
                     </div>
                   </div>
                 ))
@@ -1664,9 +2120,12 @@ function App() {
                     max="1"
                     step="0.01"
                     value={volumeValue}
-                    onChange={(event) => handleVolume(Number(event.target.value))}
+                    onChange={(event) =>
+                      handleVolume(Number(event.target.value))
+                    }
                   />
                   <span>{Math.round(volumeValue * 100)}%</span>
+                  <br />
                 </label>
               </div>
               <div className="queue-eq-mini-header">
@@ -1683,17 +2142,24 @@ function App() {
                   className="eq-preset-select eq-preset-select-mini"
                   value=""
                   onChange={(event) => {
-                    if (event.target.value) void handleEqPreset(event.target.value);
+                    if (event.target.value)
+                      void handleEqPreset(event.target.value);
                   }}
                   aria-label="EQ preset"
                 >
-                  <option value="" disabled>Presets</option>
+                  <option value="" disabled>
+                    Presets
+                  </option>
                   {EQ_PRESETS.map((preset) => (
-                    <option key={preset.id} value={preset.id}>{preset.label}</option>
+                    <option key={preset.id} value={preset.id}>
+                      {preset.label}
+                    </option>
                   ))}
                 </select>
               </div>
-              <div className={`queue-eq-mini-bands ${eqSettings.enabled ? "" : "disabled"}`}>
+              <div
+                className={`queue-eq-mini-bands ${eqSettings.enabled ? "" : "disabled"}`}
+              >
                 {EQ_BAND_LABELS.map((label, index) => (
                   <div className="eq-band eq-band-mini" key={label}>
                     <input
@@ -1702,7 +2168,9 @@ function App() {
                       max={12}
                       step={0.5}
                       value={eqSettings.bands[index] ?? 0}
-                      onChange={(event) => handleEqBandChange(index, Number(event.target.value))}
+                      onChange={(event) =>
+                        handleEqBandChange(index, Number(event.target.value))
+                      }
                       aria-label={`${label} Hz`}
                       title={`${label} Hz: ${(eqSettings.bands[index] ?? 0).toFixed(1)} dB`}
                     />
@@ -1717,15 +2185,32 @@ function App() {
           <div className="right-panel-content">
             <div className="lyrics-panel-scroll">
               <div className="lyrics-panel-cover">
-                <Artwork track={lyricsPanelTrack} fallback={getTrackTitle(lyricsPanelTrack).slice(0, 2).toUpperCase()} className="lyrics-cover" />
+                <Artwork
+                  track={lyricsPanelTrack}
+                  fallback={getTrackTitle(lyricsPanelTrack)
+                    .slice(0, 2)
+                    .toUpperCase()}
+                  className="lyrics-cover"
+                />
               </div>
               <div className="lyrics-panel-header">
                 <div className="right-panel-header">
                   <h2>{getTrackTitle(lyricsPanelTrack)}</h2>
-                  <button className="right-panel-close" onClick={() => setLyricsPanelTrack(null)} type="button" title="Close"><BiX /></button>
+                  <button
+                    className="right-panel-close"
+                    onClick={closeRightPanelDelayed}
+                    type="button"
+                    title="Close"
+                  >
+                    <BiX />
+                  </button>
                 </div>
-                {lyricsPanelTrack.artist && <p className="lyrics-artist">by {lyricsPanelTrack.artist}</p>}
-                {lyricsPanelTrack.album && <p className="lyrics-album">From {lyricsPanelTrack.album}</p>}
+                {lyricsPanelTrack.artist && (
+                  <p className="lyrics-artist">by {lyricsPanelTrack.artist}</p>
+                )}
+                {lyricsPanelTrack.album && (
+                  <p className="lyrics-album">From {lyricsPanelTrack.album}</p>
+                )}
               </div>
               <div className="lyrics-panel-body">
                 {lyricsPanelTrack.lyrics ? (
@@ -1741,7 +2226,14 @@ function App() {
           <div className="right-panel-content">
             <div className="right-panel-header">
               <h2>Audio Output</h2>
-              <button className="right-panel-close" onClick={() => setShowDeviceList(false)} type="button" title="Close"><BiX /></button>
+              <button
+                className="right-panel-close"
+                onClick={closeRightPanelDelayed}
+                type="button"
+                title="Close"
+              >
+                <BiX />
+              </button>
             </div>
             <div className="right-panel-list">
               {outputDevices.map((name) => (
@@ -1754,7 +2246,11 @@ function App() {
                       await updatePlaybackState();
                       setShowDeviceList(false);
                     } catch (err) {
-                      setError(err instanceof Error ? err.message : "Failed to change audio device");
+                      setError(
+                        err instanceof Error
+                          ? err.message
+                          : "Failed to change audio device",
+                      );
                       setShowDeviceList(false);
                     }
                   }}
@@ -1768,96 +2264,166 @@ function App() {
         )}
       </aside>
 
-      {showAddTrackMenu && addTrackMenuAnchor && createPortal(
-        <>
-          <div className="context-menu-backdrop" onClick={() => { setShowAddTrackMenu(false); setAddTrackMenuAnchor(null); }} />
-          <div
-            className="add-track-menu"
-            style={{ position: "fixed", top: `${addTrackMenuAnchor.top}px`, left: `${addTrackMenuAnchor.left}px` }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <button type="button" onClick={() => { void handleAddTrack(true); }}><BiPlus /> Add files</button>
-            {!androidHost && (
-              <>
-                <button type="button" onClick={handleAddFolder}><BiFolderOpen /> Add folder</button>
-                <button type="button" onClick={handleAddFolderAsPlaylist}><BiFolderOpen /> Add folder as playlist</button>
-              </>
-            )}
-            {androidHost && (
-              <p className="add-track-menu-hint">On Android, pick one or more audio files. Folder import isn’t supported yet.</p>
-            )}
-          </div>
-        </>,
-        document.body
-      )}
+      {showAddTrackMenu &&
+        addTrackMenuAnchor &&
+        createPortal(
+          <>
+            <div
+              className="context-menu-backdrop"
+              onClick={() => {
+                setShowAddTrackMenu(false);
+                setAddTrackMenuAnchor(null);
+              }}
+            />
+            <div
+              className="add-track-menu"
+              style={{
+                position: "fixed",
+                top: `${addTrackMenuAnchor.top}px`,
+                left: `${addTrackMenuAnchor.left}px`,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  void handleAddTrack(true);
+                }}
+              >
+                <BiPlus /> Add files
+              </button>
+              {!androidHost && (
+                <>
+                  <button type="button" onClick={handleAddFolder}>
+                    <BiFolderOpen /> Add folder
+                  </button>
+                  <button type="button" onClick={handleAddFolderAsPlaylist}>
+                    <BiFolderOpen /> Add folder as playlist
+                  </button>
+                </>
+              )}
+              {androidHost && (
+                <p className="add-track-menu-hint">
+                  On Android, pick one or more audio files. Folder import isn’t
+                  supported yet.
+                </p>
+              )}
+            </div>
+          </>,
+          document.body,
+        )}
 
-      {menuTrackPath && menuAnchor && (() => {
-        const menuTrack = playlist.find((t) => t.path === menuTrackPath);
-        if (!menuTrack) return null;
-        const addToPlaylistOptions = playlists.filter((p) => p.id !== selectedPlaylistId && p.name !== "Favorites");
-        return createPortal(
+      {menuTrackPath &&
+        menuAnchor &&
+        (() => {
+          const menuTrack = playlist.find((t) => t.path === menuTrackPath);
+          if (!menuTrack) return null;
+          const addToPlaylistOptions = playlists.filter(
+            (p) => p.id !== selectedPlaylistId && p.name !== "Favorites",
+          );
+          return createPortal(
+            <div
+              className="track-context-menu"
+              style={{
+                position: "fixed",
+                top: `${menuAnchor.top}px`,
+                ...(menuAnchor.left != null
+                  ? { left: `${menuAnchor.left}px` }
+                  : { right: `${menuAnchor.right ?? 0}px` }),
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  closeTrackContextMenu();
+                  handlePlayNext(menuTrack.path);
+                }}
+              >
+                <BiListPlus /> Play Next
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  closeTrackContextMenu();
+                  handleAddToQueue(menuTrack.path);
+                }}
+              >
+                <BiListPlus /> Add to Queue
+              </button>
+              {addToPlaylistOptions.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeTrackContextMenu();
+                    setAddToPlaylistTrack(menuTrack.path);
+                  }}
+                >
+                  <BiListUl /> Add to Playlist...
+                </button>
+              )}
+              <button
+                className="delete-action"
+                type="button"
+                onClick={() => {
+                  closeTrackContextMenu();
+                  handleRemoveTrack(menuTrack.path);
+                }}
+              >
+                <BiTrash /> Remove from Playlist
+              </button>
+            </div>,
+            document.body,
+          );
+        })()}
+
+      {queueMenuIndex != null &&
+        queueMenuAnchor &&
+        createPortal(
           <div
             className="track-context-menu"
             style={{
               position: "fixed",
-              top: `${menuAnchor.top}px`,
-              ...(menuAnchor.left != null ? { left: `${menuAnchor.left}px` } : { right: `${menuAnchor.right ?? 0}px` }),
+              top: `${queueMenuAnchor.top}px`,
+              ...(queueMenuAnchor.left != null
+                ? { left: `${queueMenuAnchor.left}px` }
+                : { right: `${queueMenuAnchor.right ?? 0}px` }),
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <button type="button" onClick={() => handlePlayNext(menuTrack.path)}><BiListPlus /> Play Next</button>
-            <button type="button" onClick={() => handleAddToQueue(menuTrack.path)}><BiListPlus /> Add to Queue</button>
-            {addToPlaylistOptions.length > 0 && (
-              <>
-                <button type="button" onClick={() => setShowAddToPlaylist(true)}><BiListUl /> Add to Playlist...</button>
-                {showAddToPlaylist && (
-                  <div className="add-to-playlist-submenu">
-                    {addToPlaylistOptions.map((p) => (
-                      <button key={p.id} type="button" onClick={() => handleAddTrackToPlaylist(p.id, menuTrack.path)}>
-                        {p.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
+            <button
+              type="button"
+              disabled={queueMenuIndex <= 0}
+              onClick={() => {
+                closeQueueContextMenu();
+                handleMoveQueueTrack(queueMenuIndex, queueMenuIndex - 1);
+              }}
+            >
+              <BiChevronUp /> Move Up
+            </button>
+            <button
+              type="button"
+              disabled={queueMenuIndex >= queueData.tracks.length - 1}
+              onClick={() => {
+                closeQueueContextMenu();
+                handleMoveQueueTrack(queueMenuIndex, queueMenuIndex + 1);
+              }}
+            >
+              <BiChevronDown /> Move Down
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const index = queueMenuIndex;
+                closeQueueContextMenu();
+                handleRemoveFromQueue(index);
+              }}
+            >
+              <BiX /> Remove
+            </button>
           </div>,
-          document.body
-        );
-      })()}
-
-      {queueMenuIndex != null && queueMenuAnchor && createPortal(
-        <div
-          className="track-context-menu"
-          style={{
-            position: "fixed",
-            top: `${queueMenuAnchor.top}px`,
-            ...(queueMenuAnchor.left != null ? { left: `${queueMenuAnchor.left}px` } : { right: `${queueMenuAnchor.right ?? 0}px` }),
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <button
-            type="button"
-            disabled={queueMenuIndex <= 0}
-            onClick={() => handleMoveQueueTrack(queueMenuIndex, queueMenuIndex - 1)}
-          ><BiChevronUp /> Move Up</button>
-          <button
-            type="button"
-            disabled={queueMenuIndex >= queueData.tracks.length - 1}
-            onClick={() => handleMoveQueueTrack(queueMenuIndex, queueMenuIndex + 1)}
-          ><BiChevronDown /> Move Down</button>
-          <button
-            type="button"
-            onClick={() => {
-              const index = queueMenuIndex;
-              setQueueMenuIndex(null);
-              setQueueMenuAnchor(null);
-              handleRemoveFromQueue(index);
-            }}
-          ><BiX /> Remove</button>
-        </div>,
-        document.body
-      )}
+          document.body,
+        )}
 
       {(menuTrackPath || queueMenuIndex != null) && (
         <div
@@ -1865,7 +2431,7 @@ function App() {
           onClick={() => {
             setMenuTrackPath(null);
             setMenuAnchor(null);
-            setShowAddToPlaylist(false);
+            setAddToPlaylistTrack(null);
             setQueueMenuIndex(null);
             setQueueMenuAnchor(null);
           }}
@@ -1873,7 +2439,7 @@ function App() {
             event.preventDefault();
             setMenuTrackPath(null);
             setMenuAnchor(null);
-            setShowAddToPlaylist(false);
+            setAddToPlaylistTrack(null);
             setQueueMenuIndex(null);
             setQueueMenuAnchor(null);
           }}
@@ -1890,8 +2456,19 @@ function App() {
             }}
           >
             <div className="modal-header">
-              <h2>{playlistDialog.mode === "create" ? "Create playlist" : "Rename playlist"}</h2>
-              <button className="modal-close-btn" onClick={closePlaylistDialog} type="button" title="Close"><BiX /></button>
+              <h2>
+                {playlistDialog.mode === "create"
+                  ? "Create playlist"
+                  : "Rename playlist"}
+              </h2>
+              <button
+                className="modal-close-btn"
+                onClick={closePlaylistDialog}
+                type="button"
+                title="Close"
+              >
+                <BiX />
+              </button>
             </div>
             <form
               onSubmit={(event) => {
@@ -1912,9 +2489,17 @@ function App() {
                 placeholder="My playlist"
                 autoComplete="off"
               />
-              {playlistDialogError && <p className="modal-error">{playlistDialogError}</p>}
+              {playlistDialogError && (
+                <p className="modal-error">{playlistDialogError}</p>
+              )}
               <div className="modal-actions">
-                <button className="btn-ghost" onClick={closePlaylistDialog} type="button">Cancel</button>
+                <button
+                  className="btn-ghost"
+                  onClick={closePlaylistDialog}
+                  type="button"
+                >
+                  Cancel
+                </button>
                 <button className="btn-primary" type="submit">
                   {playlistDialog.mode === "create" ? "Create" : "Save"}
                 </button>
@@ -1925,7 +2510,10 @@ function App() {
       )}
 
       {showClearConfirm && (
-        <div className="modal-backdrop" onClick={() => setShowClearConfirm(false)}>
+        <div
+          className="modal-backdrop"
+          onClick={() => setShowClearConfirm(false)}
+        >
           <div
             className="modal-dialog confirm-dialog"
             onClick={(event) => event.stopPropagation()}
@@ -1936,10 +2524,108 @@ function App() {
             <div className="modal-header">
               <h2>Clear playlist?</h2>
             </div>
-            <p className="confirm-text">This will remove all tracks from this playlist. The files on disk won't be affected.</p>
+            <p className="confirm-text">
+              This will remove all tracks from this playlist. The files on disk
+              won't be affected.
+            </p>
             <div className="modal-actions">
-              <button className="btn-ghost" onClick={() => setShowClearConfirm(false)} type="button">Cancel</button>
-              <button className="btn-primary" onClick={confirmClearPlaylist} type="button">Clear</button>
+              <button
+                className="btn-ghost"
+                onClick={() => setShowClearConfirm(false)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-primary"
+                onClick={confirmClearPlaylist}
+                type="button"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deletePlaylistConfirm && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setDeletePlaylistConfirm(null)}
+        >
+          <div
+            className="modal-dialog confirm-dialog"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setDeletePlaylistConfirm(null);
+            }}
+          >
+            <div className="modal-header">
+              <h2>Delete playlist?</h2>
+            </div>
+            <p className="confirm-text">
+              This will permanently delete "{deletePlaylistConfirm.name}". This
+              action cannot be undone.
+            </p>
+            <div className="modal-actions">
+              <button
+                className="btn-ghost"
+                onClick={() => setDeletePlaylistConfirm(null)}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-danger"
+                onClick={confirmDeletePlaylist}
+                type="button"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {addToPlaylistTrack && (
+        <div
+          className="modal-backdrop"
+          onClick={() => setAddToPlaylistTrack(null)}
+        >
+          <div
+            className="modal-dialog"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setAddToPlaylistTrack(null);
+            }}
+          >
+            <div className="modal-header">
+              <h2>Add to playlist</h2>
+              <button
+                className="modal-close-btn"
+                onClick={() => setAddToPlaylistTrack(null)}
+                type="button"
+              >
+                <BiX />
+              </button>
+            </div>
+            <div className="playlist-picker-list">
+              {playlists
+                .filter(
+                  (p) => p.id !== selectedPlaylistId && p.name !== "Favorites",
+                )
+                .map((p) => (
+                  <button
+                    key={p.id}
+                    className="playlist-picker-item"
+                    type="button"
+                    onClick={() =>
+                      handleAddTrackToPlaylist(p.id, addToPlaylistTrack)
+                    }
+                  >
+                    {p.name}
+                  </button>
+                ))}
             </div>
           </div>
         </div>
@@ -1947,7 +2633,19 @@ function App() {
 
       <footer className="player-bar">
         <div className="player-left">
-          <Artwork track={currentTrack} fallback={coverLetters} className="album-art" />
+          <button
+            className="album-art-btn"
+            onClick={handleOpenLyrics}
+            disabled={!currentTrack}
+            type="button"
+            title={currentTrack ? "Show lyrics" : undefined}
+          >
+            <Artwork
+              track={currentTrack}
+              fallback={coverLetters}
+              className="album-art"
+            />
+          </button>
           <div className="now-playing-info">
             <button
               type="button"
@@ -1958,8 +2656,17 @@ function App() {
             >
               {getTrackTitle(currentTrack, playbackState.current_path)}
             </button>
-            <div className="now-playing-artist">{currentTrack?.artist ?? (playbackState.current_path ? "Local file" : "No track selected")}</div>
-            <div className="now-playing-path">{currentTrack?.album ?? playbackState.current_path ?? "Add music to your playlist"}</div>
+            <div className="now-playing-artist">
+              {currentTrack?.artist ??
+                (playbackState.current_path
+                  ? "Local file"
+                  : "No track selected")}
+            </div>
+            <div className="now-playing-path">
+              {currentTrack?.album ??
+                playbackState.current_path ??
+                "Add music to your playlist"}
+            </div>
           </div>
         </div>
 
@@ -1969,17 +2676,58 @@ function App() {
             onClick={handleToggleShuffle}
             type="button"
             title={playbackMode.shuffle ? "Disable shuffle" : "Enable shuffle"}
-          ><BiShuffle /></button>
-          <button className="control-btn" onClick={handlePrevious} disabled={!canSkip} type="button" title="Previous"><BiSkipPrevious /></button>
-          <button className="control-btn desktop-only-control" onClick={handleStop} disabled={!playbackState.current_path} type="button" title="Stop"><BiStop /></button>
-          <button className="control-btn play-pause-btn" onClick={handlePlayPause} type="button" title="Play/Pause">{playbackState.is_playing ? <BiPause /> : <BiPlay />}</button>
-          <button className="control-btn" onClick={handleNext} disabled={!canSkip} type="button" title="Next"><BiSkipNext /></button>
+          >
+            <BiShuffle />
+          </button>
+          <button
+            className="control-btn"
+            onClick={handlePrevious}
+            disabled={!canSkip}
+            type="button"
+            title="Previous"
+          >
+            <BiSkipPrevious />
+          </button>
+          <button
+            className="control-btn desktop-only-control"
+            onClick={handleStop}
+            disabled={!playbackState.current_path}
+            type="button"
+            title="Stop"
+          >
+            <BiStop />
+          </button>
+          <button
+            className="control-btn play-pause-btn"
+            onClick={handlePlayPause}
+            type="button"
+            title="Play/Pause"
+          >
+            {playbackState.is_playing ? <BiPause /> : <BiPlay />}
+          </button>
+          <button
+            className="control-btn"
+            onClick={handleNext}
+            disabled={!canSkip}
+            type="button"
+            title="Next"
+          >
+            <BiSkipNext />
+          </button>
           <button
             className={`control-btn repeat-btn ${playbackMode.repeat !== "off" ? "active" : ""} ${playbackMode.repeat === "one" ? "repeat-one" : ""}`}
             onClick={handleCycleRepeat}
             type="button"
-            title={playbackMode.repeat === "off" ? "Repeat off" : playbackMode.repeat === "all" ? "Repeat all" : "Repeat one"}
-          ><BiRepeat /></button>
+            title={
+              playbackMode.repeat === "off"
+                ? "Repeat off"
+                : playbackMode.repeat === "all"
+                  ? "Repeat all"
+                  : "Repeat one"
+            }
+          >
+            <BiRepeat />
+          </button>
         </div>
 
         <div className="seek-row">
@@ -1994,7 +2742,9 @@ function App() {
             disabled={!playbackState.current_path}
             onPointerDown={() => document.body.classList.add("is-seeking")}
             onChange={(event) => setSeekValue(Number(event.target.value))}
-            onPointerUp={(event) => handleSeek(Number(event.currentTarget.value))}
+            onPointerUp={(event) =>
+              handleSeek(Number(event.currentTarget.value))
+            }
           />
           <span>{formatTime(displayDuration)}</span>
         </div>
@@ -2007,15 +2757,21 @@ function App() {
                 onClick={handleToggleLyrics}
                 type="button"
                 title="Toggle lyrics"
-              ><BiMusic /></button>
+              >
+                <BiMusic />
+              </button>
             )}
             <button
               className={`control-btn queue-toggle desktop-queue-btn ${showQueue ? "active" : ""}`}
               onClick={handleToggleQueue}
               type="button"
               title="Toggle queue"
-            ><BiListUl /></button>
-            <span className={`status-dot ${playbackState.is_playing ? "playing" : playbackState.is_paused ? "paused" : ""}`} />
+            >
+              <BiListUl />
+            </button>
+            <span
+              className={`status-dot ${playbackState.is_playing ? "playing" : playbackState.is_paused ? "paused" : ""}`}
+            />
             <button
               ref={volumeIconRef}
               className={`volume-icon desktop-only-control ${showEqPanel ? "active" : ""} ${eqSettings.enabled ? "eq-on" : ""}`}
@@ -2024,10 +2780,26 @@ function App() {
               title="Equalizer"
               aria-label="Open equalizer"
             >
-              {volumeValue === 0 ? <BiVolumeMute /> : volumeValue < 0.5 ? <BiVolumeLow /> : <BiVolumeFull />}
+              {volumeValue === 0 ? (
+                <BiVolumeMute />
+              ) : volumeValue < 0.5 ? (
+                <BiVolumeLow />
+              ) : (
+                <BiVolumeFull />
+              )}
             </button>
-            <input className="range-slider volume" type="range" min="0" max="1" step="0.01" value={volumeValue} onChange={(event) => handleVolume(Number(event.target.value))} />
-            <span className="volume-percent">{Math.round(volumeValue * 100)}%</span>
+            <input
+              className="range-slider volume"
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={volumeValue}
+              onChange={(event) => handleVolume(Number(event.target.value))}
+            />
+            <span className="volume-percent">
+              {Math.round(volumeValue * 100)}%
+            </span>
           </div>
           <div className="device-selector">
             <button
@@ -2045,78 +2817,136 @@ function App() {
         </div>
       </footer>
 
-      {showEqPanel && eqAnchor && createPortal(
-        <>
-          <div className="context-menu-backdrop" onClick={() => { setShowEqPanel(false); setEqAnchor(null); }} />
-          <div
-            className="eq-panel"
-            style={{ position: "fixed", bottom: `${eqAnchor.bottom}px`, right: `${eqAnchor.right}px` }}
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-label="Equalizer"
-          >
-            <div className="eq-panel-header">
-              <h3>Equalizer</h3>
-              <label className="eq-enable">
-                <input
-                  type="checkbox"
-                  checked={eqSettings.enabled}
-                  onChange={(event) => handleEqEnabled(event.target.checked)}
-                />
-                On
-              </label>
-              <button className="eq-close" onClick={() => { setShowEqPanel(false); setEqAnchor(null); }} type="button" title="Close" aria-label="Close equalizer">
-                <BiX />
-              </button>
-            </div>
-            <div className="eq-panel-toolbar">
-              <select
-                className="eq-preset-select"
-                value=""
-                onChange={(event) => {
-                  if (event.target.value) void handleEqPreset(event.target.value);
-                }}
-                aria-label="EQ preset"
-              >
-                <option value="" disabled>Presets</option>
-                {EQ_PRESETS.map((preset) => (
-                  <option key={preset.id} value={preset.id}>{preset.label}</option>
-                ))}
-              </select>
-              <button className="btn-ghost btn-sm" onClick={handleEqReset} type="button">Reset</button>
-            </div>
-            <div className={`eq-bands ${eqSettings.enabled ? "" : "disabled"}`}>
-              {EQ_BAND_LABELS.map((label, index) => (
-                <div className="eq-band" key={label}>
-                  <span className="eq-band-gain">{(eqSettings.bands[index] ?? 0) > 0 ? "+" : ""}{(eqSettings.bands[index] ?? 0).toFixed(0)}</span>
+      {showEqPanel &&
+        eqAnchor &&
+        createPortal(
+          <>
+            <div
+              className="context-menu-backdrop"
+              onClick={() => {
+                setShowEqPanel(false);
+                setEqAnchor(null);
+              }}
+            />
+            <div
+              className="eq-panel"
+              style={{
+                position: "fixed",
+                bottom: `${eqAnchor.bottom}px`,
+                right: `${eqAnchor.right}px`,
+              }}
+              onClick={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-label="Equalizer"
+            >
+              <div className="eq-panel-header">
+                <h3>Equalizer</h3>
+                <label className="eq-enable">
                   <input
-                    type="range"
-                    min={-12}
-                    max={12}
-                    step={0.5}
-                    value={eqSettings.bands[index] ?? 0}
-                    onChange={(event) => handleEqBandChange(index, Number(event.target.value))}
-                    aria-label={`${label} Hz`}
-                    title={`${label} Hz`}
+                    type="checkbox"
+                    checked={eqSettings.enabled}
+                    onChange={(event) => handleEqEnabled(event.target.checked)}
                   />
-                  <span className="eq-band-label">{label}</span>
-                </div>
-              ))}
+                  On
+                </label>
+                <button
+                  className="eq-close"
+                  onClick={() => {
+                    setShowEqPanel(false);
+                    setEqAnchor(null);
+                  }}
+                  type="button"
+                  title="Close"
+                  aria-label="Close equalizer"
+                >
+                  <BiX />
+                </button>
+              </div>
+              <div className="eq-panel-toolbar">
+                <select
+                  className="eq-preset-select"
+                  value=""
+                  onChange={(event) => {
+                    if (event.target.value)
+                      void handleEqPreset(event.target.value);
+                  }}
+                  aria-label="EQ preset"
+                >
+                  <option value="" disabled>
+                    Presets
+                  </option>
+                  {EQ_PRESETS.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="btn-ghost btn-sm"
+                  onClick={handleEqReset}
+                  type="button"
+                >
+                  Reset
+                </button>
+              </div>
+              <div
+                className={`eq-bands ${eqSettings.enabled ? "" : "disabled"}`}
+              >
+                {EQ_BAND_LABELS.map((label, index) => (
+                  <div className="eq-band" key={label}>
+                    <span className="eq-band-gain">
+                      {(eqSettings.bands[index] ?? 0) > 0 ? "+" : ""}
+                      {(eqSettings.bands[index] ?? 0).toFixed(0)}
+                    </span>
+                    <input
+                      type="range"
+                      min={-12}
+                      max={12}
+                      step={0.5}
+                      value={eqSettings.bands[index] ?? 0}
+                      onChange={(event) =>
+                        handleEqBandChange(index, Number(event.target.value))
+                      }
+                      aria-label={`${label} Hz`}
+                      title={`${label} Hz`}
+                    />
+                    <span className="eq-band-label">{label}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="eq-scale">
+                <span>+12 dB</span>
+                <span>0</span>
+                <span>−12 dB</span>
+              </div>
             </div>
-            <div className="eq-scale">
-              <span>+12 dB</span>
-              <span>0</span>
-              <span>−12 dB</span>
-            </div>
-          </div>
-        </>,
-        document.body
+          </>,
+          document.body,
+        )}
+
+      {error && (
+        <div className="error-toast" role="alert" aria-live="assertive">
+          {error}
+          <button onClick={() => setError(null)} type="button">
+            <BiX />
+          </button>
+        </div>
       )}
 
       {lyricsFetchPath && (
-        <div className="loading-indicator lyrics-fetch-indicator" role="status" aria-live="polite">
+        <div
+          className="loading-indicator lyrics-fetch-indicator"
+          role="status"
+          aria-live="polite"
+        >
           <div className="spinner" /> Fetching lyrics…
-          <button className="loading-cancel-btn" onClick={cancelLyricsFetch} type="button">Cancel</button>
+          <button
+            className="loading-cancel-btn"
+            onClick={cancelLyricsFetch}
+            type="button"
+          >
+            Cancel
+          </button>
         </div>
       )}
 
