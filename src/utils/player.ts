@@ -605,6 +605,10 @@ export interface MediaControlHandlers {
   onSeekRelative?: (direction: "forward" | "backward") => void;
   onSeekBy?: (seconds: number) => void;
   onSetPosition?: (seconds: number) => void;
+  /** Android notification "shuffle" button tapped. */
+  onShuffle?: () => void;
+  /** Android notification "repeat" button tapped. */
+  onRepeat?: () => void;
 }
 
 export const listenToMediaControls = async (
@@ -662,6 +666,12 @@ export const listenToMediaControls = async (
             if (typeof event.seekPosition === "number") {
               handlers.onSetPosition?.(event.seekPosition);
             }
+            break;
+          case "shuffle":
+            handlers.onShuffle?.();
+            break;
+          case "repeat":
+            handlers.onRepeat?.();
             break;
         }
       });

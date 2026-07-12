@@ -7,7 +7,15 @@
 
 import type { PluginListener } from "@tauri-apps/api/core";
 
-export type MediaAction = "play" | "pause" | "stop" | "next" | "previous" | "seek";
+export type MediaAction =
+  | "play"
+  | "pause"
+  | "stop"
+  | "next"
+  | "previous"
+  | "seek"
+  | "shuffle"
+  | "repeat";
 
 export interface MediaActionEvent {
   action: MediaAction;

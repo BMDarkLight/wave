@@ -236,7 +236,7 @@ function App() {
 
   // Lyrics panel
   const [lyricsPanelTrack, setLyricsPanelTrack] = useState<Track | null>(null);
-  const activeLyricLineRef = useRef<HTMLParagraphElement>(null);
+  const activeLyricLineRef = useRef<HTMLButtonElement>(null);
 
   // Audio output device selection
   const [outputDevices, setOutputDevices] = useState<string[]>([]);
@@ -893,6 +893,18 @@ function App() {
             await seekTrack(seconds);
             await updatePlaybackState();
           }
+        },
+        onShuffle: async () => {
+          const mode = await getPlaybackMode();
+          await setShuffle(!mode.shuffle);
+          await loadPlaybackMode();
+        },
+        onRepeat: async () => {
+          const mode = await getPlaybackMode();
+          const next =
+            mode.repeat === "off" ? "all" : mode.repeat === "all" ? "one" : "off";
+          await setRepeat(next);
+          await loadPlaybackMode();
         },
       });
     };
@@ -1676,6 +1688,130 @@ function App() {
     }
   };
 
+  // ── Hardware/OS back button ─────────────────────────────────────────────
+  // Whenever a modal, popover, or the mobile sidebar/right panel is open, a
+  // browser history "sentinel" entry is pushed. Pressing back then just
+  // navigates that sentinel (dismissing the topmost overlay) instead of
+  // letting the WebView fall through to its default behaviour of exiting
+  // the app. Kept fresh on every render so the popstate handler (registered
+  // once) always sees the latest overlay state via the ref.
+  const overlaySnapshotRef = useRef({
+    menuTrackPath,
+    queueMenuIndex,
+    showAddTrackMenu,
+    showEqPanel,
+    playlistDialog,
+    showClearConfirm,
+    deletePlaylistConfirm,
+    addToPlaylistTrack,
+    mobileNavOpen,
+    rightPanelOpen,
+  });
+  overlaySnapshotRef.current = {
+    menuTrackPath,
+    queueMenuIndex,
+    showAddTrackMenu,
+    showEqPanel,
+    playlistDialog,
+    showClearConfirm,
+    deletePlaylistConfirm,
+    addToPlaylistTrack,
+    mobileNavOpen,
+    rightPanelOpen,
+  };
+
+  const isAnyOverlayOpen = () => {
+    const s = overlaySnapshotRef.current;
+    return !!(
+      s.menuTrackPath ||
+      s.queueMenuIndex != null ||
+      s.showAddTrackMenu ||
+      s.showEqPanel ||
+      s.playlistDialog ||
+      s.showClearConfirm ||
+      s.deletePlaylistConfirm ||
+      s.addToPlaylistTrack ||
+      s.mobileNavOpen ||
+      s.rightPanelOpen
+    );
+  };
+
+  // Closes whichever overlay is "on top" — small popovers/context menus
+  // first, then modals, then the mobile sidebar/right panel — and reports
+  // whether anything was actually closed.
+  const closeTopOverlay = (): boolean => {
+    const s = overlaySnapshotRef.current;
+    if (s.menuTrackPath || s.queueMenuIndex != null) {
+      closeTrackContextMenu();
+      closeQueueContextMenu();
+      return true;
+    }
+    if (s.showAddTrackMenu) {
+      setShowAddTrackMenu(false);
+      setAddTrackMenuAnchor(null);
+      return true;
+    }
+    if (s.showEqPanel) {
+      setShowEqPanel(false);
+      setEqAnchor(null);
+      return true;
+    }
+    if (s.playlistDialog) {
+      closePlaylistDialog();
+      return true;
+    }
+    if (s.showClearConfirm) {
+      setShowClearConfirm(false);
+      return true;
+    }
+    if (s.deletePlaylistConfirm) {
+      setDeletePlaylistConfirm(null);
+      return true;
+    }
+    if (s.addToPlaylistTrack) {
+      setAddToPlaylistTrack(null);
+      return true;
+    }
+    if (s.mobileNavOpen) {
+      setMobileNavOpen(false);
+      return true;
+    }
+    if (s.rightPanelOpen) {
+      closeRightPanelDelayed();
+      return true;
+    }
+    return false;
+  };
+
+  const historyPushedRef = useRef(false);
+
+  // Keep the history sentinel in sync with overlay state on every render.
+  // This naturally also handles nested overlays (e.g. a context menu on top
+  // of a modal): once the top layer closes, this re-runs and pushes a fresh
+  // sentinel for whatever is still open.
+  useEffect(() => {
+    if (isAnyOverlayOpen() && !historyPushedRef.current) {
+      window.history.pushState({ waveOverlay: true }, "");
+      historyPushedRef.current = true;
+    } else if (!isAnyOverlayOpen() && historyPushedRef.current) {
+      historyPushedRef.current = false;
+      if ((window.history.state as { waveOverlay?: boolean } | null)?.waveOverlay) {
+        window.history.back();
+      }
+    }
+  });
+
+  useEffect(() => {
+    const onPopState = () => {
+      const closed = closeTopOverlay();
+      // The sentinel (if any) has just been consumed by this navigation.
+      historyPushedRef.current = false;
+      if (!closed) return;
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
   const isCurrentTrack = (track: Track) =>
     track.path === playbackState.current_path;
   const coverLetters = getTrackTitle(currentTrack, playbackState.current_path)
@@ -2315,15 +2451,26 @@ function App() {
                 {timedLyrics ? (
                   <div className="lyrics-lines">
                     {timedLyrics.map((line, index) => (
-                      <p
+                      <button
                         key={`${line.time}-${index}`}
                         ref={
                           index === activeLyricIndex ? activeLyricLineRef : null
                         }
+                        type="button"
                         className={`lyrics-line ${index === activeLyricIndex ? "active" : ""}`}
+                        onClick={() => {
+                          if (!isLyricsPanelOnCurrentTrack) return;
+                          void handleSeek(line.time);
+                        }}
+                        disabled={!isLyricsPanelOnCurrentTrack}
+                        title={
+                          isLyricsPanelOnCurrentTrack
+                            ? "Jump to this line"
+                            : undefined
+                        }
                       >
                         {line.text || "\u00A0"}
-                      </p>
+                      </button>
                     ))}
                   </div>
                 ) : lyricsPanelTrack.lyrics ? (

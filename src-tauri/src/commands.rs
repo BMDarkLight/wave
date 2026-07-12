@@ -198,8 +198,9 @@ fn resolve_track(library: &Library, path: &str) -> Track {
     }
 }
 
-/// Push track metadata to the OS media bridge.
-fn sync_bridge_now_playing(bridge: &tauri::State<MediaBridgeState>, track: &Track) {
+/// Push track metadata (and current shuffle/repeat mode) to the OS media bridge.
+fn sync_bridge_now_playing(app: &tauri::AppHandle, track: &Track) {
+    let bridge = app.state::<MediaBridgeState>();
     bridge.0.now_playing(TrackMetadata {
         title: Some(track.title.clone()),
         artist: Some(track.artist.clone()),
@@ -207,6 +208,30 @@ fn sync_bridge_now_playing(bridge: &tauri::State<MediaBridgeState>, track: &Trac
         duration_seconds: track.duration_seconds,
         cover_url: track.cover_art_data_url.clone(),
     });
+    sync_bridge_playback_mode(app, &bridge);
+}
+
+/// Push the current shuffle/repeat mode to the OS media bridge (e.g. so the
+/// Android notification's shuffle/repeat buttons reflect the right state).
+fn sync_bridge_playback_mode(app: &tauri::AppHandle, bridge: &tauri::State<MediaBridgeState>) {
+    let state = app.state::<PlayerState>();
+    let (shuffle, repeat) = {
+        let guard = lock_player_state(&state);
+        match guard.as_ref() {
+            Some(player) => (player.queue.is_shuffled(), player.repeat.clone()),
+            None => (false, crate::audio::player::RepeatMode::default()),
+        }
+    };
+    bridge.0.set_playback_mode(shuffle, repeat_mode_str(&repeat).to_string());
+}
+
+fn repeat_mode_str(mode: &crate::audio::player::RepeatMode) -> &'static str {
+    use crate::audio::player::RepeatMode;
+    match mode {
+        RepeatMode::Off => "off",
+        RepeatMode::One => "one",
+        RepeatMode::All => "all",
+    }
 }
 
 // ── Platform / import helpers ─────────────────────────────────────────────────
@@ -242,7 +267,6 @@ pub async fn import_audio_sources(
 pub async fn play_track(
     path: String,
     app: tauri::AppHandle,
-    bridge: tauri::State<'_, MediaBridgeState>,
 ) -> Result<(), String> {
     validate_audio_path(&path)?;
     let app_clone = app.clone();
@@ -271,7 +295,7 @@ pub async fn play_track(
         Ok::<_, String>(resolve_track(&lib, &lookup_path))
     })
     .await?;
-    sync_bridge_now_playing(&bridge, &track);
+    sync_bridge_now_playing(&app, &track);
 
     Ok(())
 }
@@ -608,14 +632,7 @@ pub async fn play_track_from_playlist(
     })
     .await?;
 
-    let bridge = app.state::<MediaBridgeState>();
-    bridge.0.now_playing(TrackMetadata {
-        title: Some(track.title),
-        artist: Some(track.artist),
-        album: Some(track.album),
-        duration_seconds: track.duration_seconds,
-        cover_url: track.cover_art_data_url,
-    });
+    sync_bridge_now_playing(&app, &track);
     Ok(())
 }
 
@@ -714,7 +731,7 @@ pub async fn play_next(
             Ok::<_, String>(resolve_track(&lib, &p))
         })
         .await?;
-        sync_bridge_now_playing(&app.state::<MediaBridgeState>(), &track);
+        sync_bridge_now_playing(&app, &track);
     }
 
     Ok(path)
@@ -741,7 +758,7 @@ pub async fn play_previous(
             Ok::<_, String>(resolve_track(&lib, &p))
         })
         .await?;
-        sync_bridge_now_playing(&app.state::<MediaBridgeState>(), &track);
+        sync_bridge_now_playing(&app, &track);
     }
 
     Ok(path)
@@ -751,8 +768,11 @@ pub async fn play_previous(
 pub async fn set_shuffle(
     enabled: bool,
     state: tauri::State<'_, PlayerState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     lock_player(&state)?.queue.set_shuffle(enabled);
+    let bridge = app.state::<MediaBridgeState>();
+    sync_bridge_playback_mode(&app, &bridge);
     Ok(())
 }
 
@@ -760,6 +780,7 @@ pub async fn set_shuffle(
 pub async fn set_repeat(
     mode: String,
     state: tauri::State<'_, PlayerState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     use crate::audio::player::RepeatMode;
 
@@ -770,6 +791,8 @@ pub async fn set_repeat(
         _ => return Err(format!("Invalid repeat mode: {mode}")),
     };
     lock_player(&state)?.repeat = repeat;
+    let bridge = app.state::<MediaBridgeState>();
+    sync_bridge_playback_mode(&app, &bridge);
     Ok(())
 }
 
@@ -1036,7 +1059,7 @@ pub async fn play_track_from_specific_playlist(
     })
     .await?;
 
-    sync_bridge_now_playing(&app.state::<MediaBridgeState>(), &track);
+    sync_bridge_now_playing(&app, &track);
     Ok(())
 }
 
@@ -1148,7 +1171,7 @@ pub async fn play_track_from_queue(
             Ok::<_, String>(resolve_track(&lib, &p))
         })
         .await?;
-        sync_bridge_now_playing(&app.state::<MediaBridgeState>(), &track);
+        sync_bridge_now_playing(&app, &track);
     }
 
     Ok(())

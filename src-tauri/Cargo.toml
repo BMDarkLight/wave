@@ -22,7 +22,9 @@ tauri = { version = "2.11", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 # No-op on desktop; Android/iOS MediaSession + media notification.
-tauri-plugin-media-session = "0.2"
+# Vendored locally (vendor/tauri-plugin-media-session) to add shuffle/repeat
+# notification buttons on top of upstream 0.2.4.
+tauri-plugin-media-session = { path = "vendor/tauri-plugin-media-session" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rodio = { version = "0.19", features = ["symphonia-all"] }

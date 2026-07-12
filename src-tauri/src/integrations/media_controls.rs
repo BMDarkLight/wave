@@ -62,61 +62,80 @@ mod cover_art {
 mod cover_art {
     #[cfg(target_os = "android")]
     use base64::{engine::general_purpose::STANDARD, Engine};
-    #[cfg(target_os = "android")]
-    use std::path::PathBuf;
 
-    pub struct Cache {
-        #[cfg(target_os = "android")]
-        path: Option<PathBuf>,
-    }
+    pub struct Cache;
 
     impl Cache {
         pub fn new() -> Self {
-            Self {
-                #[cfg(target_os = "android")]
-                path: None,
-            }
+            Self
         }
 
-        /// Resolve cover art to a URL the Android media-session plugin can load
-        /// (`http(s):` or `file:`). Data URLs are written to a temp file.
+        /// Resolve cover art to a URL the Android media-session plugin can
+        /// load. The plugin only fetches artwork over `http(s)` via
+        /// `HttpURLConnection` — it cannot read `file://` URIs or `data:`
+        /// URLs, so anything besides a real http(s) URL is decoded here and
+        /// re-served over a local loopback HTTP server.
         #[cfg(target_os = "android")]
         pub fn resolve_artwork_url(&mut self, cover_url: Option<&str>) -> Option<String> {
             let url = cover_url?;
+
             if url.starts_with("http://") || url.starts_with("https://") {
                 return Some(url.to_string());
             }
-            if url.starts_with("file://") {
-                return Some(url.to_string());
-            }
-            if url.starts_with("data:") {
-                let (header, data) = url.split_once(',')?;
-                let mime = header.strip_prefix("data:")?.split(';').next()?;
-                let ext = match mime {
-                    "image/jpeg" | "image/jpg" => "jpg",
-                    "image/png" => "png",
-                    "image/gif" => "gif",
-                    "image/webp" => "webp",
-                    "image/bmp" => "bmp",
-                    _ => return None,
-                };
+
+            let (bytes, ext, content_type) = if let Some(rest) = url.strip_prefix("data:") {
+                let (header, data) = rest.split_once(',')?;
+                let mime = header.split(';').next().unwrap_or("");
+                let (ext, content_type) = mime_to_ext(mime)?;
                 let bytes = STANDARD.decode(data).ok()?;
-                let dir = crate::app_paths::data_dir();
-                let _ = std::fs::create_dir_all(&dir);
-                let path = dir.join(format!("wave-cover.{ext}"));
-                std::fs::write(&path, bytes).ok()?;
-                self.path = Some(path.clone());
-                return Some(format!("file://{}", path.display()));
-            }
-            if std::path::Path::new(url).exists() {
-                return Some(format!("file://{url}"));
-            }
-            None
+                (bytes, ext, content_type)
+            } else {
+                let path = url.strip_prefix("file://").unwrap_or(url);
+                let path = std::path::Path::new(path);
+                if !path.exists() {
+                    return None;
+                }
+                let bytes = std::fs::read(path).ok()?;
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_else(|| "jpg".to_string());
+                let content_type = ext_to_mime(&ext);
+                (bytes, ext, content_type.to_string())
+            };
+
+            crate::integrations::local_art_server::publish(bytes, &content_type, &ext)
         }
 
         #[cfg(not(target_os = "android"))]
         pub fn resolve_url(&mut self, cover_url: Option<&str>) -> Option<String> {
             cover_url.map(str::to_string)
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn mime_to_ext(mime: &str) -> Option<(String, String)> {
+        let ext = match mime {
+            "image/jpeg" | "image/jpg" => "jpg",
+            "image/png" => "png",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/bmp" => "bmp",
+            _ => return None,
+        };
+        Some((ext.to_string(), mime.to_string()))
+    }
+
+    #[cfg(target_os = "android")]
+    fn ext_to_mime(ext: &str) -> &'static str {
+        match ext {
+            "jpg" | "jpeg" => "image/jpeg",
+            "png" => "image/png",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            "bmp" => "image/bmp",
+            _ => "image/jpeg",
         }
     }
 }
@@ -277,6 +296,25 @@ impl MediaBridge {
                 cover_url: cover_url.as_deref(),
             }) {
                 tracing::warn!("Failed to update OS media metadata: {error:?}");
+            }
+        }
+    }
+
+    /// Push the shuffle/repeat state to the shuffle/repeat notification
+    /// buttons. No-op on platforms whose OS media widgets don't expose
+    /// shuffle/repeat controls.
+    #[allow(unused_variables)]
+    fn set_playback_mode(&mut self, shuffle_enabled: bool, repeat_mode: &str) {
+        #[cfg(target_os = "android")]
+        {
+            use tauri_plugin_media_session::{MediaSessionExt, MediaState};
+
+            if let Err(error) = self.app.media_session().update_state(MediaState {
+                shuffle_enabled: Some(shuffle_enabled),
+                repeat_mode: Some(repeat_mode.to_string()),
+                ..Default::default()
+            }) {
+                tracing::debug!("Android media playback-mode update skipped: {error}");
             }
         }
     }
@@ -550,6 +588,10 @@ impl MediaBridgeState {
 
     pub fn set_stopped(&self) {
         self.run_on_ui_thread(|bridge| bridge.set_stopped());
+    }
+
+    pub fn set_playback_mode(&self, shuffle_enabled: bool, repeat_mode: String) {
+        self.run_on_ui_thread(move |bridge| bridge.set_playback_mode(shuffle_enabled, &repeat_mode));
     }
 
     pub fn update_position(&self, position_secs: f64, playing: bool) {

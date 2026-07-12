@@ -1270,10 +1270,26 @@ img.queue-thumb {
 }
 
 .lyrics-line {
+  display: block;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: none;
   color: #8a8a8a;
   font: 600 16px/1.5 "Avenir Next", "Helvetica Neue", sans-serif;
+  text-align: left;
+  cursor: pointer;
   transition: color 0.2s ease, transform 0.2s ease;
   transform-origin: left center;
+}
+
+.lyrics-line:hover:not(:disabled) {
+  color: #d7d7d7;
+}
+
+.lyrics-line:disabled {
+  cursor: default;
+  opacity: 1;
 }
 
 .lyrics-line.active {
@@ -2524,10 +2540,10 @@ img.queue-thumb {
 
   .modal-backdrop {
     z-index: 200;
-    /* Center within the safe visible area, not the full screen behind the
-       status bar / home indicator, so the dialog doesn't look skewed. */
-    padding-top: calc(24px + env(safe-area-inset-top, 0px));
-    padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+    /* Use the same padding on every side (the larger of the two safe-area
+       insets) so the dialog stays visually centered instead of drifting
+       toward whichever edge (status bar vs. gesture bar) has a bigger inset. */
+    padding: max(24px, env(safe-area-inset-top, 0px), env(safe-area-inset-bottom, 0px));
   }
 
   .track-context-menu {
