@@ -1,10 +1,12 @@
 use tauri::{
     plugin::{Builder, TauriPlugin},
-    Manager, Runtime,
+    Runtime,
 };
 
 #[cfg(mobile)]
 use serde::Serialize;
+#[cfg(mobile)]
+use tauri::Manager;
 
 #[cfg(target_os = "android")]
 const PLUGIN_IDENTIFIER: &str = "app.tauri.mediasession";

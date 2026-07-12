@@ -60,9 +60,6 @@ mod cover_art {
 
 #[cfg(not(target_os = "windows"))]
 mod cover_art {
-    #[cfg(target_os = "android")]
-    use base64::{engine::general_purpose::STANDARD, Engine};
-
     pub struct Cache;
 
     impl Cache {
@@ -70,42 +67,24 @@ mod cover_art {
             Self
         }
 
-        /// Resolve cover art to a URL the Android media-session plugin can
-        /// load. The plugin only fetches artwork over `http(s)` via
-        /// `HttpURLConnection` — it cannot read `file://` URIs or `data:`
-        /// URLs, so anything besides a real http(s) URL is decoded here and
-        /// re-served over a local loopback HTTP server.
+        /// Preserve embedded artwork as a data URL so the native Android
+        /// plugin can decode it directly. This avoids Android's cleartext
+        /// HTTP restrictions, which can block loopback artwork servers.
         #[cfg(target_os = "android")]
         pub fn resolve_artwork_url(&mut self, cover_url: Option<&str>) -> Option<String> {
             let url = cover_url?;
 
-            if url.starts_with("http://") || url.starts_with("https://") {
+            if url.starts_with("http://")
+                || url.starts_with("https://")
+                || url.starts_with("data:")
+                || url.starts_with("file://")
+            {
                 return Some(url.to_string());
             }
 
-            let (bytes, ext, content_type) = if let Some(rest) = url.strip_prefix("data:") {
-                let (header, data) = rest.split_once(',')?;
-                let mime = header.split(';').next().unwrap_or("");
-                let (ext, content_type) = mime_to_ext(mime)?;
-                let bytes = STANDARD.decode(data).ok()?;
-                (bytes, ext, content_type)
-            } else {
-                let path = url.strip_prefix("file://").unwrap_or(url);
-                let path = std::path::Path::new(path);
-                if !path.exists() {
-                    return None;
-                }
-                let bytes = std::fs::read(path).ok()?;
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map(str::to_ascii_lowercase)
-                    .unwrap_or_else(|| "jpg".to_string());
-                let content_type = ext_to_mime(&ext);
-                (bytes, ext, content_type.to_string())
-            };
-
-            crate::integrations::local_art_server::publish(bytes, &content_type, &ext)
+            std::path::Path::new(url)
+                .exists()
+                .then(|| format!("file://{url}"))
         }
 
         #[cfg(not(target_os = "android"))]
@@ -114,30 +93,6 @@ mod cover_art {
         }
     }
 
-    #[cfg(target_os = "android")]
-    fn mime_to_ext(mime: &str) -> Option<(String, String)> {
-        let ext = match mime {
-            "image/jpeg" | "image/jpg" => "jpg",
-            "image/png" => "png",
-            "image/gif" => "gif",
-            "image/webp" => "webp",
-            "image/bmp" => "bmp",
-            _ => return None,
-        };
-        Some((ext.to_string(), mime.to_string()))
-    }
-
-    #[cfg(target_os = "android")]
-    fn ext_to_mime(ext: &str) -> &'static str {
-        match ext {
-            "jpg" | "jpeg" => "image/jpeg",
-            "png" => "image/png",
-            "gif" => "image/gif",
-            "webp" => "image/webp",
-            "bmp" => "image/bmp",
-            _ => "image/jpeg",
-        }
-    }
 }
 
 #[cfg(target_os = "windows")]

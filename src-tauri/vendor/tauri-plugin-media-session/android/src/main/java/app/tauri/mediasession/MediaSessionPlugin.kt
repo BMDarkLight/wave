@@ -14,11 +14,13 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
+import android.util.Base64
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
@@ -31,6 +33,7 @@ import app.tauri.annotation.TauriPlugin
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -173,6 +176,17 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
         val metadata = buildMetadata()
         session.setMetadata(metadata)
         session.setPlaybackState(buildPlaybackState())
+        session.setShuffleMode(
+            if (currentShuffleEnabled) PlaybackStateCompat.SHUFFLE_MODE_ALL
+            else PlaybackStateCompat.SHUFFLE_MODE_NONE
+        )
+        session.setRepeatMode(
+            when (currentRepeatMode) {
+                "one" -> PlaybackStateCompat.REPEAT_MODE_ONE
+                "all" -> PlaybackStateCompat.REPEAT_MODE_ALL
+                else -> PlaybackStateCompat.REPEAT_MODE_NONE
+            }
+        )
         session.isActive = true
         val notification = updateNotification(metadata)
 
@@ -228,17 +242,38 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
                     else PlaybackStateCompat.STATE_PAUSED
         val speed = if (currentIsPlaying) currentPlaybackSpeed.toFloat() else 0.0f
 
-        return PlaybackStateCompat.Builder()
+        val builder = PlaybackStateCompat.Builder()
             .setActions(buildAvailableActions())
             .setState(state, positionMs, speed, SystemClock.elapsedRealtime())
-            .build()
+            .addCustomAction(
+                ACTION_SHUFFLE,
+                if (currentShuffleEnabled) "Shuffle on" else "Shuffle off",
+                if (currentShuffleEnabled) R.drawable.ic_media_shuffle_on
+                else R.drawable.ic_media_shuffle
+            )
+            .addCustomAction(
+                ACTION_REPEAT,
+                when (currentRepeatMode) {
+                    "one" -> "Repeat one"
+                    "all" -> "Repeat all"
+                    else -> "Repeat off"
+                },
+                when (currentRepeatMode) {
+                    "one" -> R.drawable.ic_media_repeat_one
+                    "all" -> R.drawable.ic_media_repeat_on
+                    else -> R.drawable.ic_media_repeat
+                }
+            )
+        return builder.build()
     }
 
     private fun buildAvailableActions(): Long {
         var actions = PlaybackStateCompat.ACTION_PLAY_PAUSE or
             PlaybackStateCompat.ACTION_PLAY or
             PlaybackStateCompat.ACTION_PAUSE or
-            PlaybackStateCompat.ACTION_STOP
+            PlaybackStateCompat.ACTION_STOP or
+            PlaybackStateCompat.ACTION_SET_SHUFFLE_MODE or
+            PlaybackStateCompat.ACTION_SET_REPEAT_MODE
         if (currentCanSeek) actions = actions or PlaybackStateCompat.ACTION_SEEK_TO
         if (currentCanPrev) actions = actions or PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
         if (currentCanNext) actions = actions or PlaybackStateCompat.ACTION_SKIP_TO_NEXT
@@ -262,6 +297,8 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
         }
         cachedArtworkBitmap?.let {
             builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, it)
+            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, it)
+            builder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, it)
         }
         return builder.build()
     }
@@ -382,6 +419,19 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private fun fetchBitmapFromImageUrl(url: String): Bitmap? {
+        if (url.startsWith("data:")) {
+            val comma = url.indexOf(',')
+            if (comma < 0) return null
+            val bytes = Base64.decode(url.substring(comma + 1), Base64.DEFAULT)
+            return decodeSampledBitmap(bytes, MAX_ARTWORK_SIZE)
+        }
+
+        if (url.startsWith("file://")) {
+            val path = Uri.parse(url).path ?: return null
+            val bytes = File(path).readBytes()
+            return decodeSampledBitmap(bytes, MAX_ARTWORK_SIZE)
+        }
+
         var connection: HttpURLConnection? = null
         return try {
             connection = URL(url).openConnection() as HttpURLConnection
@@ -625,6 +675,14 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
         override fun onSkipToNext() = emitAction("next")
         override fun onSkipToPrevious() = emitAction("previous")
         override fun onSeekTo(pos: Long) = emitSeek(pos)
+        override fun onCustomAction(action: String?, extras: android.os.Bundle?) {
+            when (action) {
+                ACTION_SHUFFLE -> emitAction("shuffle")
+                ACTION_REPEAT -> emitAction("repeat")
+            }
+        }
+        override fun onSetShuffleMode(shuffleMode: Int) = emitAction("shuffle")
+        override fun onSetRepeatMode(repeatMode: Int) = emitAction("repeat")
     }
 
     // ── Bitmap helpers ──────────────────────────────────────────────────
@@ -654,6 +712,8 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
         private const val RC_PREV = 4
         private const val RC_SHUFFLE = 5
         private const val RC_REPEAT = 6
+        private const val ACTION_SHUFFLE = "app.tauri.mediasession.SHUFFLE"
+        private const val ACTION_REPEAT = "app.tauri.mediasession.REPEAT"
 
         @Volatile
         internal var activeInstance: MediaSessionPlugin? = null

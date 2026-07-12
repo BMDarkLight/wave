@@ -2535,15 +2535,18 @@ img.queue-thumb {
   }
 
   .modal-dialog {
-    width: min(100vw - 24px, 420px);
+    width: min(420px, calc(100dvw - 32px));
+    max-width: calc(100dvw - 32px);
+    justify-self: center;
   }
 
   .modal-backdrop {
+    top: 0;
+    left: 0;
+    width: 100dvw;
+    height: 100dvh;
+    padding: 16px;
     z-index: 200;
-    /* Use the same padding on every side (the larger of the two safe-area
-       insets) so the dialog stays visually centered instead of drifting
-       toward whichever edge (status bar vs. gesture bar) has a bigger inset. */
-    padding: max(24px, env(safe-area-inset-top, 0px), env(safe-area-inset-bottom, 0px));
   }
 
   .track-context-menu {
