@@ -23,6 +23,21 @@ pub struct MediaBridgeState(pub crate::media_controls::MediaBridgeState);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// Returns true if the lyrics text contains LRC-style timestamps like [01:23.45].
+fn has_lrc_timestamps(lyrics: &str) -> bool {
+    lyrics
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(20)
+        .any(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with('[')
+                && trimmed.len() > 5
+                && trimmed.as_bytes()[1].is_ascii_digit()
+                && trimmed.as_bytes()[2] == b':'
+        })
+}
+
 fn lock_poisoned<T>(e: std::sync::PoisonError<T>) -> String {
     tracing::warn!("Mutex was poisoned, recovering: {e}");
     "State lock poisoned".to_string()
@@ -1003,7 +1018,10 @@ pub async fn fetch_lyrics_for_track(
     })
     .await?;
 
-    if track.lyrics.is_some() {
+    if track.lyrics.is_some()
+        && (track.lyrics_source.as_deref() == Some("lrclib")
+            || has_lrc_timestamps(track.lyrics.as_deref().unwrap_or("")))
+    {
         return Ok(track);
     }
 

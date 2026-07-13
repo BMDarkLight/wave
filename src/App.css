@@ -1267,6 +1267,13 @@ img.queue-thumb {
   white-space: pre-wrap;
 }
 
+.lyrics-source {
+  color: #666;
+  font-size: 11px;
+  margin-top: 24px;
+  text-align: center;
+}
+
 .lyrics-lines {
   display: flex;
   flex-direction: column;

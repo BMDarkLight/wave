@@ -557,7 +557,10 @@ function App() {
       return;
     }
     setLyricsPanelTrack(null);
-    if (currentTrack.lyrics) {
+    if (
+      currentTrack.lyrics &&
+      (parseTimedLyrics(currentTrack.lyrics) || currentTrack.lyrics_source === "lrclib")
+    ) {
       setLyricsFetchPath(null);
       return;
     }
@@ -595,6 +598,11 @@ function App() {
               : t,
           ),
         }));
+        setLyricsPanelTrack((prev) =>
+          prev && prev.path === path
+            ? { ...prev, lyrics: updated.lyrics, lyrics_source: updated.lyrics_source }
+            : prev,
+        );
       })
       .catch(() => {
         if (!cancelled && lyricsFetchIdRef.current === fetchId) {
@@ -2587,6 +2595,13 @@ function App() {
                   <pre>{lyricsPanelTrack.lyrics}</pre>
                 ) : (
                   <p className="lyrics-empty">No lyrics available</p>
+                )}
+                {lyricsPanelTrack.lyrics && (
+                  <p className="lyrics-source">
+                    {lyricsPanelTrack.lyrics_source === "lrclib"
+                      ? "Lyrics provided by LRCLIB"
+                      : "Lyrics pulled from the file"}
+                  </p>
                 )}
               </div>
             </div>
