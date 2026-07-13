@@ -167,6 +167,7 @@ pub fn run() {
             commands::list_artists,
             commands::get_album_tracks,
             commands::get_artist_tracks,
+            commands::get_artist_albums,
             commands::add_to_queue,
             commands::queue_insert_next,
             commands::remove_from_queue,

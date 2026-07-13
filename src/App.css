@@ -1594,12 +1594,6 @@ img.queue-thumb {
   opacity: 1;
 }
 
-.now-playing-artist,
-.now-playing-path {
-  color: var(--muted);
-  font-size: 12px;
-}
-
 .player-controls {
   grid-column: 2;
   grid-row: 1;
@@ -2056,6 +2050,308 @@ img.queue-thumb {
   .track-item {
     column-gap: 12px;
   }
+}
+
+/* ── Album page ─────────────────────────────────────────────────────────── */
+
+.page-header {
+  padding: 16px 24px 0;
+}
+
+.page-back-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.page-back-btn:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.album-hero {
+  display: flex;
+  align-items: flex-end;
+  gap: 24px;
+  padding: 24px 24px 32px;
+}
+
+.album-hero-cover {
+  width: 200px;
+  height: 200px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--panel-raised);
+  color: transparent;
+  flex-shrink: 0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+}
+
+.album-hero-info {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.album-hero-type {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.album-hero-title {
+  margin: 0;
+  font-size: clamp(24px, 4vw, 48px);
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-hero-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.album-hero-artist-btn {
+  border: none;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  transition: text-decoration-color 0.15s;
+}
+
+.album-hero-artist-btn:hover {
+  text-decoration-color: var(--text);
+}
+
+/* ── Artist page ────────────────────────────────────────────────────────── */
+
+.artist-hero {
+  padding: 24px 24px 16px;
+}
+
+.artist-hero-title {
+  margin: 0 0 8px;
+  font-size: clamp(28px, 4.5vw, 56px);
+  line-height: 1.1;
+  letter-spacing: -0.04em;
+}
+
+.artist-hero-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.artist-section {
+  padding: 0 24px 24px;
+}
+
+.artist-section-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 16px;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text);
+  border: none;
+  background: none;
+  cursor: default;
+  padding: 0;
+}
+
+.artist-collapsible-header {
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.artist-collapsible-header:hover {
+  color: var(--muted);
+}
+
+.artist-album-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 20px;
+}
+
+.artist-album-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  color: inherit;
+  transition: transform 0.15s;
+}
+
+.artist-album-card:hover {
+  transform: scale(1.02);
+}
+
+.artist-album-card-cover {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--panel-raised);
+  color: transparent;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.artist-album-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artist-album-card-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.artist-discography-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.artist-discography-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: 6px;
+  text-align: left;
+  color: inherit;
+  transition: background 0.15s;
+}
+
+.artist-discography-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.artist-discography-item-cover {
+  width: 48px;
+  height: 48px;
+  border-radius: 4px;
+  object-fit: cover;
+  background: var(--panel-raised);
+  color: transparent;
+  flex-shrink: 0;
+}
+
+.artist-discography-item-info {
+  min-width: 0;
+}
+
+.artist-discography-item-name {
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artist-discography-item-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.lyrics-link {
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  transition: text-decoration-color 0.15s;
+}
+
+.lyrics-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.track-meta-link {
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  transition: text-decoration-color 0.15s;
+}
+
+.track-meta-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.now-playing-artist,
+.now-playing-path {
+  display: block;
+  width: 100%;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  transition: text-decoration-color 0.15s;
+}
+
+.now-playing-artist:hover,
+.now-playing-path:hover {
+  text-decoration-color: currentColor;
+}
+
+.now-playing-artist:disabled,
+.now-playing-path:disabled {
+  cursor: default;
+  text-decoration: none;
 }
 
 @media (max-width: 900px) {
@@ -2549,6 +2845,40 @@ img.queue-thumb {
 
   .context-menu-backdrop {
     z-index: 220;
+  }
+
+  .album-hero {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 16px;
+  }
+
+  .album-hero-cover {
+    width: 160px;
+    height: 160px;
+  }
+
+  .album-hero-meta {
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+
+  .page-header {
+    padding: 12px 16px 0;
+  }
+
+  .artist-hero {
+    padding: 16px;
+  }
+
+  .artist-section {
+    padding: 0 16px 20px;
+  }
+
+  .artist-album-grid {
+    grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+    gap: 14px;
   }
 }
 

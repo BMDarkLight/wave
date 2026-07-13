@@ -976,6 +976,15 @@ pub async fn get_artist_tracks(
     lock_library(&library)?.get_tracks_by_artist(&artist)
 }
 
+/// Return distinct albums by an artist, with aggregate info for an artist page.
+#[tauri::command]
+pub async fn get_artist_albums(
+    artist: String,
+    library: tauri::State<'_, LibraryState>,
+) -> Result<Vec<AlbumSummaryDto>, String> {
+    lock_library(&library)?.get_artist_albums(&artist)
+}
+
 #[tauri::command]
 pub async fn fetch_lyrics_for_track(
     path: String,

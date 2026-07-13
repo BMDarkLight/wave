@@ -1114,6 +1114,38 @@ impl Library {
         Self::get_tracks_by_column(&connection, "artist", artist)
     }
 
+    /// Return distinct albums by an artist, with aggregate info suitable for
+    /// an artist page (album grid / discography list).
+    pub fn get_artist_albums(&self, artist: &str) -> Result<Vec<AlbumSummaryDto>, String> {
+        let artist = artist.trim();
+        if artist.is_empty() {
+            return Err("Artist name cannot be empty".to_string());
+        }
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT
+                    t.album,
+                    COALESCE(NULLIF(t.album_artist, ''), t.artist) AS album_artist,
+                    MIN(t.artist) AS artist,
+                    COUNT(*) AS track_count,
+                    MIN(t.year) AS year,
+                    MIN(t.cover_art_data_url) AS cover_art_data_url,
+                    MIN(t.cover_art_mime) AS cover_art_mime
+                 FROM tracks t
+                 WHERE t.artist = ?1
+                 GROUP BY t.album, COALESCE(NULLIF(t.album_artist, ''), t.artist)
+                 ORDER BY MIN(COALESCE(t.year, 9999)), t.album",
+            )
+            .map_err(|error| format!("Failed to prepare artist albums query: {error}"))?;
+        let albums = statement
+            .query_map(params![artist], row_to_album_summary)
+            .map_err(|error| format!("Failed to query artist albums: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("Failed to read artist albums: {error}"))?;
+        Ok(albums)
+    }
+
     pub fn get_playlist_info(&self, playlist_id: &str) -> Result<Option<PlaylistInfo>, String> {
         let connection = self.lock_connection()?;
         self.playlist_info(&connection, playlist_id)
@@ -1832,6 +1864,8 @@ mod tests {
             .remove_track_from_playlist_by_path(&playlist_id, track_path)
             .expect("remove");
 
+        // After removing from "All Local Files", the track row is deleted entirely.
+        // Re-upserting creates a new track with the new id.
         {
             let connection = library.lock_connection().expect("connection");
             let refreshed = sample_track("track-b", track_path);
@@ -1844,7 +1878,7 @@ mod tests {
             .get_playlist_tracks(&playlist_id)
             .expect("playlist tracks");
         assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].id, "track-a");
+        assert_eq!(tracks[0].id, "track-b");
         assert_eq!(tracks[0].path, track_path);
     }
 
@@ -1898,7 +1932,7 @@ mod tests {
         let err = library
             .remove_track_from_playlist_by_path(&playlist_id, "/music/missing.mp3")
             .expect_err("missing track should fail");
-        assert!(err.contains("not in the playlist"));
+        assert!(err.contains("Track not found"));
     }
 
     #[test]

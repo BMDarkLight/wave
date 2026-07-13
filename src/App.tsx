@@ -30,6 +30,8 @@ import {
   BiMenu,
   BiChevronUp,
   BiChevronDown,
+  BiAlbum,
+  BiUser,
 } from "react-icons/bi";
 import {
   addTrackToPlaylistById,
@@ -91,6 +93,8 @@ import {
   type Track,
 } from "./utils/player";
 import { isAndroid } from "./utils/platform";
+import AlbumPage from "./components/AlbumPage";
+import ArtistPage from "./components/ArtistPage";
 import "./App.css";
 
 function formatInvokeError(err: unknown, fallback: string): string {
@@ -207,6 +211,13 @@ function App() {
   const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(
     null,
   );
+
+  // Album / artist page navigation
+  const [viewingAlbum, setViewingAlbum] = useState<{
+    name: string;
+    albumArtist: string | null;
+  } | null>(null);
+  const [viewingArtist, setViewingArtist] = useState<string | null>(null);
 
   // Favorited track paths (for heart toggle state in the track list)
   const [favoritePaths, setFavoritePaths] = useState<Set<string>>(new Set());
@@ -1456,6 +1467,8 @@ function App() {
   };
 
   const handleSelectPlaylist = async (id: string) => {
+    setViewingAlbum(null);
+    setViewingArtist(null);
     selectedPlaylistIdRef.current = id;
     setSelectedPlaylistId(id);
     setPlaylist([]);
@@ -1711,6 +1724,8 @@ function App() {
     addToPlaylistTrack,
     mobileNavOpen,
     rightPanelOpen,
+    viewingAlbum,
+    viewingArtist,
   });
   overlaySnapshotRef.current = {
     menuTrackPath,
@@ -1723,6 +1738,8 @@ function App() {
     addToPlaylistTrack,
     mobileNavOpen,
     rightPanelOpen,
+    viewingAlbum,
+    viewingArtist,
   };
 
   const isAnyOverlayOpen = () => {
@@ -1737,7 +1754,9 @@ function App() {
       s.deletePlaylistConfirm ||
       s.addToPlaylistTrack ||
       s.mobileNavOpen ||
-      s.rightPanelOpen
+      s.rightPanelOpen ||
+      s.viewingAlbum ||
+      s.viewingArtist
     );
   };
 
@@ -1779,6 +1798,14 @@ function App() {
     }
     if (s.mobileNavOpen) {
       setMobileNavOpen(false);
+      return true;
+    }
+    if (s.viewingAlbum) {
+      setViewingAlbum(null);
+      return true;
+    }
+    if (s.viewingArtist) {
+      setViewingArtist(null);
       return true;
     }
     if (s.rightPanelOpen) {
@@ -1917,7 +1944,7 @@ function App() {
               sortedPlaylists.map((pl) => (
                 <div
                   key={pl.id}
-                  className={`playlist-item ${selectedPlaylistId === pl.id ? "active" : ""}`}
+                  className={`playlist-item ${!viewingAlbum && !viewingArtist && selectedPlaylistId === pl.id ? "active" : ""}`}
                   onClick={() => handleSelectPlaylist(pl.id)}
                 >
                   <span className="playlist-item-name" title={pl.name}>
@@ -1980,6 +2007,34 @@ function App() {
         onMouseDown={onDragStart("sidebar")}
       />
 
+      {viewingAlbum ? (
+        <AlbumPage
+          album={viewingAlbum.name}
+          albumArtist={viewingAlbum.albumArtist}
+          onBack={() => setViewingAlbum(null)}
+          onPlayTrack={(path) => {
+            void playTrack(path).then(() => updatePlaybackState());
+          }}
+          onArtistClick={(name) => {
+            setViewingAlbum(null);
+            setViewingArtist(name);
+          }}
+          playbackState={playbackState}
+        />
+      ) : viewingArtist ? (
+        <ArtistPage
+          artist={viewingArtist}
+          onBack={() => setViewingArtist(null)}
+          onPlayTrack={(path) => {
+            void playTrack(path).then(() => updatePlaybackState());
+          }}
+          onAlbumClick={(name, albumArtist) => {
+            setViewingArtist(null);
+            setViewingAlbum({ name, albumArtist });
+          }}
+          playbackState={playbackState}
+        />
+      ) : (
       <main className="main-content">
         <div className="hero-copy">
           <h1>{selectedPlaylist?.name ?? "All Local Files"}</h1>
@@ -2169,7 +2224,16 @@ function App() {
                     <div>
                       <div className="track-name">{getTrackTitle(track)}</div>
                       <div className="track-meta">
-                        {track.artist}
+                        <button
+                          className="track-meta-link"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setViewingArtist(track.artist);
+                          }}
+                          type="button"
+                        >
+                          {track.artist}
+                        </button>
                         {track.lyrics ? " · lyrics" : ""}
                         {track.cover_art_source === "cover-art-archive"
                           ? " · online cover"
@@ -2177,7 +2241,18 @@ function App() {
                       </div>
                     </div>
                   </div>
-                  <div className="track-album">{track.album}</div>
+                  <div
+                    className="track-album"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setViewingAlbum({
+                        name: track.album,
+                        albumArtist: track.album_artist || track.artist,
+                      });
+                    }}
+                  >
+                    {track.album}
+                  </div>
                   <div className="track-duration">
                     {formatTime(track.duration_seconds)}
                   </div>
@@ -2243,6 +2318,7 @@ function App() {
           )}
         </section>
       </main>
+      )}
 
       {(rightPanelOpen || rightPanelClosing) && (
         <div
@@ -2446,10 +2522,39 @@ function App() {
                   </button>
                 </div>
                 {lyricsPanelTrack.artist && (
-                  <p className="lyrics-artist">by {lyricsPanelTrack.artist}</p>
+                  <p className="lyrics-artist">
+                    by{" "}
+                    <button
+                      className="lyrics-link"
+                      onClick={() => {
+                        setViewingArtist(lyricsPanelTrack.artist);
+                        closeRightPanelDelayed();
+                      }}
+                      type="button"
+                    >
+                      {lyricsPanelTrack.artist}
+                    </button>
+                  </p>
                 )}
                 {lyricsPanelTrack.album && (
-                  <p className="lyrics-album">From {lyricsPanelTrack.album}</p>
+                  <p className="lyrics-album">
+                    From{" "}
+                    <button
+                      className="lyrics-link"
+                      onClick={() => {
+                        setViewingAlbum({
+                          name: lyricsPanelTrack.album,
+                          albumArtist:
+                            lyricsPanelTrack.album_artist ||
+                            lyricsPanelTrack.artist,
+                        });
+                        closeRightPanelDelayed();
+                      }}
+                      type="button"
+                    >
+                      {lyricsPanelTrack.album}
+                    </button>
+                  </p>
                 )}
               </div>
               <div className="lyrics-panel-body">
@@ -2625,6 +2730,31 @@ function App() {
                   }}
                 >
                   <BiListUl /> Add to Playlist...
+                </button>
+              )}
+              {menuTrack.album && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeTrackContextMenu();
+                    setViewingAlbum({
+                      name: menuTrack.album,
+                      albumArtist: menuTrack.album_artist || menuTrack.artist,
+                    });
+                  }}
+                >
+                  <BiAlbum /> Go to Album
+                </button>
+              )}
+              {menuTrack.artist && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    closeTrackContextMenu();
+                    setViewingArtist(menuTrack.artist);
+                  }}
+                >
+                  <BiUser /> Go to Artist
                 </button>
               )}
               <button
@@ -2921,17 +3051,35 @@ function App() {
             >
               {getTrackTitle(currentTrack, playbackState.current_path)}
             </button>
-            <div className="now-playing-artist">
+            <button
+              className="now-playing-artist"
+              onClick={() => {
+                if (currentTrack?.artist) setViewingArtist(currentTrack.artist);
+              }}
+              type="button"
+              disabled={!currentTrack?.artist}
+            >
               {currentTrack?.artist ??
                 (playbackState.current_path
                   ? "Local file"
                   : "No track selected")}
-            </div>
-            <div className="now-playing-path">
+            </button>
+            <button
+              className="now-playing-path"
+              onClick={() => {
+                if (currentTrack?.album)
+                  setViewingAlbum({
+                    name: currentTrack.album,
+                    albumArtist: currentTrack.album_artist || currentTrack.artist,
+                  });
+              }}
+              type="button"
+              disabled={!currentTrack?.album}
+            >
               {currentTrack?.album ??
                 playbackState.current_path ??
                 "Add music to your playlist"}
-            </div>
+            </button>
           </div>
         </div>
 

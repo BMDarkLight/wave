@@ -414,6 +414,11 @@ export const getArtistTracks = (artist: string): Promise<Track[]> => {
   return safeInvoke<Track[]>("get_artist_tracks", { artist });
 };
 
+/** Return distinct albums by an artist with aggregate info. */
+export const getArtistAlbums = (artist: string): Promise<AlbumSummary[]> => {
+  return safeInvoke<AlbumSummary[]>("get_artist_albums", { artist });
+};
+
 // ── Queue manipulation ──────────────────────────────────────────────────────
 
 export const addToQueue = (path: string): Promise<void> => {
