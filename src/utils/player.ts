@@ -361,8 +361,16 @@ export const clearPlaylistById = (id: string): Promise<void> => {
   return safeInvoke("clear_playlist_by_id", { id });
 };
 
-export const playTrackFromSpecificPlaylist = (playlistId: string, index: number): Promise<void> => {
-  return safeInvoke("play_track_from_specific_playlist", { playlistId, index });
+export const playTrackFromSpecificPlaylist = (
+  playlistId: string,
+  index: number,
+  orderedPaths?: string[],
+): Promise<void> => {
+  return safeInvoke("play_track_from_specific_playlist", {
+    playlistId,
+    index,
+    orderedPaths: orderedPaths ?? null,
+  });
 };
 
 // ── Albums & artists (browse / query) ─────────────────────────────────────────

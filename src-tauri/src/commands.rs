@@ -1024,64 +1024,77 @@ pub async fn fetch_lyrics_for_track(
 pub async fn play_track_from_specific_playlist(
     playlist_id: String,
     index: usize,
+    ordered_paths: Option<Vec<String>>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let app_clone = app.clone();
-    let (raw_tracks, track) = blocking(move || {
+    let raw_tracks = blocking(move || {
         let library = app_clone.state::<LibraryState>();
         let lib = library.0.lock().map_err(|e| e.to_string())?;
-        let tracks = lib.get_playlist_tracks(&playlist_id)?;
-        let track = tracks
-            .get(index)
-            .ok_or_else(|| format!("Track not found at index {index}"))?
-            .clone();
-        Ok((tracks, track))
+        lib.get_playlist_tracks(&playlist_id)
     })
     .await?;
+
+    let queue_paths: Vec<String> = if let Some(ref paths) = ordered_paths {
+        paths.clone()
+    } else {
+        raw_tracks.iter().map(|t| t.path.clone()).collect()
+    };
 
     let app_clone = app.clone();
-    let raw_track_paths: Vec<String> = raw_tracks.iter().map(|t| t.path.clone()).collect();
-    let materialized_paths = blocking(move || {
-        Ok::<_, String>(raw_track_paths
-            .into_iter()
-            .map(|path| {
-                crate::android_import::materialize_audio_source(&app_clone, &path)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("Failed to materialize track {path}: {e}");
-                        path
-                    })
-            })
-            .collect::<Vec<_>>())
-    })
-    .await?;
-
-    let local_path = materialized_paths
-        .get(index)
-        .cloned()
-        .unwrap_or_default();
+    let queue_clone = queue_paths.clone();
+    let local_path = {
+        let path = queue_paths
+            .get(index)
+            .cloned()
+            .ok_or_else(|| format!("Track not found at index {index}"))?;
+        let app2 = app_clone.clone();
+        blocking(move || {
+            Ok(crate::android_import::materialize_audio_source(&app2, &path)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to materialize track {path}: {e}");
+                    path
+                }))
+        })
+        .await?
+    };
 
     if local_path.is_empty() {
         return Err(format!("Audio file not found for track at index {index}"));
     }
 
-    let tracks: Vec<Track> = raw_tracks
-        .into_iter()
-        .zip(materialized_paths.into_iter())
-        .map(|(mut t, p)| { t.path = p; t })
-        .collect();
+    let track = raw_tracks
+        .iter()
+        .find(|t| t.path == queue_paths.get(index).map(|s| s.as_str()).unwrap_or(""))
+        .cloned()
+        .unwrap_or_else(|| placeholder_track(&queue_paths[index]));
 
+    let played_path = local_path.clone();
     let app_clone = app.clone();
-    let tracks_clone = tracks.clone();
+    let queue_for_sync = queue_clone.clone();
     blocking(move || {
         with_app_player(&app_clone, |player| {
-            sync_queue_from_tracks(player, &tracks_clone, index);
+            let old_paths: Vec<String> = player.queue.tracks().to_vec();
+            let manual: Vec<String> = old_paths
+                .into_iter()
+                .filter(|p| !queue_for_sync.contains(p))
+                .collect();
+            player.queue.set_tracks(queue_for_sync);
+            if player.queue.jump(index).is_none() {
+                tracing::warn!("Failed to align playback queue with playlist index {index}");
+            }
+            for path in manual {
+                player.queue.enqueue(path);
+            }
             player.play(&local_path).map_err(|e| format!("Playback failed: {e}"))
         })
     })
     .await?;
 
-    sync_bridge_now_playing(&app, &track);
+    let mut played_track = track;
+    played_track.path = played_path;
+    sync_bridge_now_playing(&app, &played_track);
     Ok(())
 }
 

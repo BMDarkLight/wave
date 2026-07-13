@@ -1054,11 +1054,16 @@ function App() {
     }
   };
 
-  const handlePlayTrack = async (index: number) => {
+  const handlePlayTrack = async (sortedIndex: number) => {
     try {
       setError(null);
       if (!selectedPlaylistId) return;
-      await playTrackFromSpecificPlaylist(selectedPlaylistId, index);
+      const sortedPaths = sortedPlaylist.map((t) => t.path);
+      await playTrackFromSpecificPlaylist(
+        selectedPlaylistId,
+        sortedIndex,
+        sortDirection !== "none" ? sortedPaths : undefined,
+      );
       await updatePlaybackState();
       await loadQueueTracks();
     } catch (err) {
@@ -2132,7 +2137,7 @@ function App() {
                   className={`track-item ${isCurrentTrack(track) ? "active" : ""}`}
                   onClick={() =>
                     handlePlayTrack(
-                      playlist.findIndex((t) => t.path === track.path),
+                      sortedPlaylist.findIndex((t) => t.path === track.path),
                     )
                   }
                   onContextMenu={(event) => {
