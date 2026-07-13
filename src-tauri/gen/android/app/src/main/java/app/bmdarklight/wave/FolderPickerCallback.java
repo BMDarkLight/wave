@@ -2,7 +2,6 @@ package app.bmdarklight.wave;
 
 import android.content.ContentResolver;
 import android.content.Context;
-import android.content.Intent;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.DocumentsContract;
@@ -24,7 +23,7 @@ public class FolderPickerCallback implements ActivityResultCallback<Uri> {
     private static final String TAG = "FolderPickerCallback";
     
     private final CompletableFuture<FolderPickerResult> future = new CompletableFuture<>();
-    private ActivityResultLauncher<Intent> launcher;
+    private ActivityResultLauncher<Uri> launcher;
     private final ComponentActivity activity;
 
     public static class FolderPickerResult {
@@ -53,8 +52,8 @@ public class FolderPickerCallback implements ActivityResultCallback<Uri> {
             );
         }
         
-        // Launch the picker
-        launcher.launch(new Intent());
+        // OpenDocumentTree takes an optional initial Uri; null = default location
+        launcher.launch(null);
         
         return future;
     }
