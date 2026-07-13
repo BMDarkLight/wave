@@ -346,6 +346,26 @@ pub async fn import_audio_sources(
     .await
 }
 
+/// Pick a folder using Android Storage Access Framework (SAF).
+/// Returns a content:// URI with persistable URI permission.
+#[tauri::command]
+#[cfg(target_os = "android")]
+pub async fn pick_media_folder(
+    app: tauri::AppHandle,
+) -> Result<crate::android_folder_picker::FolderPickerResult, String> {
+    crate::android_folder_picker::pick_folder(&app)
+}
+
+/// Pick a folder using Android Storage Access Framework (SAF).
+/// Returns a content:// URI with persistable URI permission.
+#[tauri::command]
+#[cfg(not(target_os = "android"))]
+pub async fn pick_media_folder(
+    _app: tauri::AppHandle,
+) -> Result<crate::android_folder_picker::FolderPickerResult, String> {
+    Err("Folder picker is only available on Android".to_string())
+}
+
 // ── Playback commands ─────────────────────────────────────────────────────────
 
 #[tauri::command]

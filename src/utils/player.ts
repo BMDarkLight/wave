@@ -240,6 +240,22 @@ export const selectAudioFolder = async (): Promise<string | null> => {
   return null;
 };
 
+export const selectMediaFolder = async (): Promise<{ uri: string; displayName?: string } | null> => {
+  await tauriInitialized;
+
+  if (!invokeFn) {
+    throw new Error(TAURI_UNAVAILABLE);
+  }
+
+  try {
+    const result = await invokeFn<{ uri: string; display_name?: string }>("pick_media_folder");
+    return { uri: result.uri, displayName: result.display_name };
+  } catch (err) {
+    console.error("Failed to pick media folder:", err);
+    return null;
+  }
+};
+
 export const getFileName = (path: string | null): string => {
   if (!path) return "No track selected";
   // content://.../document/primary:Music/song.mp3 or plain paths
