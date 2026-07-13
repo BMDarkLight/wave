@@ -12,6 +12,7 @@ pub mod playback_daemon;
 mod os_media;
 mod android_import;
 mod android_jni;
+mod android_folder_picker;
 
 pub use app::paths as app_paths;
 pub use app::settings as app_settings;
@@ -248,6 +249,7 @@ pub fn run() {
             commands::sync_playlist_folder,
             commands::is_folder_setup_dismissed,
             commands::dismiss_folder_setup,
+            commands::pick_media_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -51,7 +51,7 @@ import {
   getPlaylistTracksById,
   getQueueTracks,
   importPlaylist,
-  isTrackInPlaylist,
+isTrackInPlaylist,
   scanDirectory,
   listPlaylists,
   listenToMediaControls,
@@ -74,6 +74,7 @@ import {
   seekTrack,
   selectAudioFile,
   selectAudioFolder,
+  selectMediaFolder,
   setPlayerVolume,
   setRepeat,
   setShuffle,
@@ -1090,9 +1091,11 @@ function App() {
     try {
       setError(null);
       // Keep the user-gesture chain intact for the SAF folder picker.
-      const directory = await selectAudioFolder();
+      const result = await selectMediaFolder();
       setShowFolderSetup(false);
-      if (!directory) return;
+      if (!result?.uri) return;
+
+      const directory = result.uri;
 
       setIsScanningFolder(true);
       setFolderScanIsSync(false);
