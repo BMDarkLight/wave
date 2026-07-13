@@ -6,6 +6,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.util.Log
+import androidx.activity.result.ActivityResult
 import androidx.activity.result.ActivityResultCallback
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
@@ -15,7 +16,7 @@ import java.util.concurrent.CompletableFuture
  * Folder picker callback for Android Storage Access Framework (SAF).
  * Uses ACTION_OPEN_DOCUMENT_TREE to let user select a directory.
  */
-class FolderPickerCallback(private val activity: Activity) : ActivityResultCallback<Uri?> {
+class FolderPickerCallback(private val activity: Activity) : ActivityResultCallback<ActivityResult> {
 
     private var launcher: ActivityResultLauncher<Intent>? = null
     private var currentFuture: CompletableFuture<FolderPickerResult?>? = null
@@ -85,7 +86,7 @@ class FolderPickerCallback(private val activity: Activity) : ActivityResultCallb
         return currentFuture!!
     }
 
-    override fun onActivityResult(result: Uri?) {
+    override fun onActivityResult(result: ActivityResult) {
         // This is called by the ActivityResultCallback interface
         // The actual handling is done in the lambda above
     }
