@@ -53,7 +53,7 @@ public class FolderPickerCallback implements ActivityResultCallback<Uri> {
             );
         }
         
-        // Launch the picker
+        // Launch the picker with an empty intent
         launcher.launch(new Intent());
         
         return future;
