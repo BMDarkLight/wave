@@ -9,21 +9,18 @@ import android.provider.DocumentsContract;
 import android.util.Log;
 
 import androidx.activity.ComponentActivity;
-import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultCallback;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 
 /**
  * Folder picker callback using Storage Access Framework (SAF) on Android.
  * Uses ActivityResultContracts.OpenDocumentTree for picking directories.
  */
-public class FolderPickerCallback implements ActivityResultCallback<ActivityResult> {
+public class FolderPickerCallback implements ActivityResultCallback<Uri> {
     private static final String TAG = "FolderPickerCallback";
     
     private final CompletableFuture<FolderPickerResult> future = new CompletableFuture<>();
@@ -63,24 +60,21 @@ public class FolderPickerCallback implements ActivityResultCallback<ActivityResu
     }
 
     @Override
-    public void onActivityResult(ActivityResult result) {
-        if (result.getResultCode() == ComponentActivity.RESULT_OK && result.getData() != null) {
-            Uri treeUri = result.getData().getData();
-            if (treeUri != null) {
-                // Persist the URI permission
-                persistUriPermission(treeUri);
-                
-                // Get display name
-                String displayName = getDisplayName(treeUri);
-                
-                FolderPickerResult pickerResult = new FolderPickerResult(
-                    treeUri.toString(),
-                    displayName
-                );
-                
-                future.complete(pickerResult);
-                return;
-            }
+    public void onActivityResult(Uri treeUri) {
+        if (treeUri != null) {
+            // Persist the URI permission
+            persistUriPermission(treeUri);
+            
+            // Get display name
+            String displayName = getDisplayName(treeUri);
+            
+            FolderPickerResult pickerResult = new FolderPickerResult(
+                treeUri.toString(),
+                displayName
+            );
+            
+            future.complete(pickerResult);
+            return;
         }
         
         // User cancelled or error
