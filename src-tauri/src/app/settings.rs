@@ -25,6 +25,8 @@ pub struct AppSettings {
     pub repeat: RepeatMode,
     // Media folders scanned for music (content:// URIs on Android, paths on desktop).
     pub media_folders: Vec<String>,
+    /// User dismissed the Android first-run "select music folder" prompt.
+    pub folder_setup_dismissed: bool,
 }
 
 impl Default for AppSettings {
@@ -39,6 +41,7 @@ impl Default for AppSettings {
             shuffle: false,
             repeat: RepeatMode::Off,
             media_folders: Vec::new(),
+            folder_setup_dismissed: false,
         }
     }
 }

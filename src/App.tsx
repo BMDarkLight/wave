@@ -33,6 +33,7 @@ import {
   BiAlbum,
   BiUser,
   BiSync,
+  BiMinus,
 } from "react-icons/bi";
 import {
   addTrackToPlaylistById,
@@ -64,6 +65,7 @@ import {
   playTrackFromSpecificPlaylist,
   queueInsertNext,
   removeTrackFromPlaylistById,
+  removeTrackFromLibrary,
   removeFromQueue,
   moveQueueTrack,
   renamePlaylist,
@@ -92,6 +94,9 @@ import {
   scanDirectoryRecursive,
   importScannedAudio,
   setPlaylistSyncFolder,
+  syncPlaylistFolder,
+  isFolderSetupDismissed,
+  dismissFolderSetup,
   type EqSettings,
   type PlaybackMode,
   type PlaybackState,
@@ -128,6 +133,11 @@ const formatTime = (seconds?: number | null) => {
     .padStart(2, "0");
   return `${minutes}:${remaining}`;
 };
+
+const LIBRARY_PLAYLIST_NAME = "Library";
+
+const isLibraryPlaylistName = (name?: string | null) =>
+  name === LIBRARY_PLAYLIST_NAME || name === "All Local Files";
 
 const getTrackTitle = (track?: Track | null, fallbackPath?: string | null) => {
   if (track?.title) return track.title;
@@ -318,7 +328,7 @@ function App() {
   const [androidHost, setAndroidHost] = useState(false);
   const [showFolderSetup, setShowFolderSetup] = useState(false);
   const [isScanningFolder, setIsScanningFolder] = useState(false);
-  const [scanProgress, setScanProgress] = useState(0);
+  const [folderScanIsSync, setFolderScanIsSync] = useState(false);
 
   const clampRightPanelWidth = (width: number, sidebar = sidebarWidth) => {
     const reserved = sidebar + 8 + 340; // handles + minimum main column
@@ -471,6 +481,13 @@ function App() {
   const playlistNameInputRef = useRef<HTMLInputElement>(null);
   const addTrackBtnRef = useRef<HTMLButtonElement>(null);
   const selectedPlaylistIdRef = useRef<string | null>(null);
+  /** Monotonic id so stale playlist fetches never overwrite a newer selection. */
+  const playlistLoadSeqRef = useRef(0);
+
+  const setActivePlaylistId = (id: string | null) => {
+    selectedPlaylistIdRef.current = id;
+    setSelectedPlaylistId(id);
+  };
 
   const currentTrack = useMemo(() => {
     if (!playbackState.current_path) return null;
@@ -502,18 +519,73 @@ function App() {
     void isAndroid().then(setAndroidHost);
   }, []);
 
-  // On Android, prompt for a music folder if All Local Files isn't synced yet.
+  // On Android, prompt for a music folder if Library isn't synced yet
+  // and the user hasn't dismissed the welcome prompt.
   useEffect(() => {
     if (!androidHost || playlists.length === 0) return;
-    const allLocal = playlists.find((p) => p.name === "All Local Files");
+    const allLocal = playlists.find((p) => isLibraryPlaylistName(p.name));
     if (allLocal && !allLocal.sync_folder) {
-      listMediaFolders()
-        .then((folders) => {
-          if (folders.length === 0) setShowFolderSetup(true);
+      void Promise.all([listMediaFolders(), isFolderSetupDismissed()])
+        .then(([folders, dismissed]) => {
+          if (folders.length === 0 && !dismissed) setShowFolderSetup(true);
         })
         .catch(() => setShowFolderSetup(true));
     }
   }, [androidHost, playlists]);
+
+  const skipFolderSetup = async () => {
+    setShowFolderSetup(false);
+    try {
+      await dismissFolderSetup();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  /** Reconcile every playlist that has a sync_folder with its folder on disk. */
+  const syncFolderPlaylists = async (
+    list: PlaylistInfo[],
+    isAndroidDevice: boolean,
+  ) => {
+    const synced = list.filter((p) => p.sync_folder);
+    if (!synced.length) return;
+
+    setIsScanningFolder(true);
+    setFolderScanIsSync(true);
+    let failed = 0;
+    for (const [i, pl] of synced.entries()) {
+      try {
+        const folder = pl.sync_folder!;
+        const paths = isAndroidDevice
+          ? await scanDirectoryRecursive(folder)
+          : null; // desktop: Rust walks sync_folder itself
+        await syncPlaylistFolder(pl.id, paths);
+        // Soft-refresh the open playlist without clearing the list first.
+        const viewId = selectedPlaylistIdRef.current;
+        if (viewId === pl.id || (!viewId && i === 0)) {
+          const id = viewId ?? pl.id;
+          getPlaylistTracksById(id)
+            .then((tracks) => {
+              if (selectedPlaylistIdRef.current === id) {
+                setPlaylist(tracks);
+              }
+            })
+            .catch(() => {});
+        }
+        loadPlaylists().catch(() => {});
+      } catch (err) {
+        failed++;
+        console.warn(`Failed to sync playlist "${pl.name}":`, err);
+      }
+      // Let the UI process clicks between playlists.
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    setIsScanningFolder(false);
+    setFolderScanIsSync(false);
+    if (failed > 0) {
+      setError(`Folder sync finished with ${failed} issue(s).`);
+    }
+  };
 
   useEffect(() => {
     const clamp = () =>
@@ -688,7 +760,7 @@ function App() {
     playlists.find((p) => p.id === selectedPlaylistId) ?? null;
 
   const sortedPlaylists = useMemo(() => {
-    const priority = ["All Local Files", "Favorites"];
+    const priority = [LIBRARY_PLAYLIST_NAME, "Favorites"];
     return [...playlists].sort((a, b) => {
       const ai = priority.indexOf(a.name);
       const bi = priority.indexOf(b.name);
@@ -720,9 +792,18 @@ function App() {
   };
 
   const loadPlaylistTracks = async (playlistId: string) => {
+    const seq = ++playlistLoadSeqRef.current;
     const tracks = await getPlaylistTracksById(playlistId);
+    // Ignore stale responses from a prior playlist selection.
+    if (
+      seq !== playlistLoadSeqRef.current ||
+      selectedPlaylistIdRef.current !== playlistId
+    ) {
+      return false;
+    }
     setPlaylist(tracks);
     await loadFavoritePaths();
+    return true;
   };
 
   const loadPlaybackMode = async () => {
@@ -753,7 +834,7 @@ function App() {
   // Resolve the default playlist ID from the playlists list.
   const getDefaultPlaylistId = (list: PlaylistInfo[]): string | null => {
     return (
-      (list.find((p) => p.name === "All Local Files") ?? list[0])?.id ?? null
+      (list.find((p) => isLibraryPlaylistName(p.name)) ?? list[0])?.id ?? null
     );
   };
 
@@ -765,7 +846,7 @@ function App() {
         const list = await loadPlaylists();
         const defaultId = getDefaultPlaylistId(list);
         if (defaultId) {
-          setSelectedPlaylistId(defaultId);
+          setActivePlaylistId(defaultId);
           await loadPlaylistTracks(defaultId);
         }
         await updatePlaybackState();
@@ -774,6 +855,10 @@ function App() {
         await loadEqSettings();
         await loadFavoritePaths();
         listOutputDevices().then(setOutputDevices).catch(console.error);
+
+        // Reconcile synced playlists in the background — UI stays interactive.
+        const android = await isAndroid().catch(() => false);
+        void syncFolderPlaylists(list, android);
       } catch (err: any) {
         if (
           err?.message?.includes("not available") ||
@@ -856,7 +941,7 @@ function App() {
       } else {
         const list = await listPlaylists();
         const defaultId =
-          list.find((p) => p.name === "All Local Files")?.id ??
+          list.find((p) => isLibraryPlaylistName(p.name))?.id ??
           list[0]?.id ??
           null;
         if (defaultId) {
@@ -1010,7 +1095,7 @@ function App() {
       if (!directory) return;
 
       setIsScanningFolder(true);
-      setScanProgress(0);
+      setFolderScanIsSync(false);
 
       const paths = await scanDirectoryRecursive(directory);
       if (!paths.length) {
@@ -1019,10 +1104,10 @@ function App() {
         return;
       }
 
-      // Android media scan always targets All Local Files.
+      // Android media scan always targets Library.
       const list = playlists.length > 0 ? playlists : await loadPlaylists();
       const playlistId =
-        list.find((p) => p.name === "All Local Files")?.id ??
+        list.find((p) => isLibraryPlaylistName(p.name))?.id ??
         getDefaultPlaylistId(list);
       if (!playlistId) {
         setError("No playlist selected.");
@@ -1044,14 +1129,13 @@ function App() {
         } catch {
           failCount += batch.length;
         }
-        setScanProgress(Math.min(i + BATCH, paths.length));
       }
 
       setIsScanningFolder(false);
       if (failCount > 0) {
         setError(`Imported with ${failCount} error(s).`);
       }
-      setSelectedPlaylistId(playlistId);
+      setActivePlaylistId(playlistId);
       await loadPlaylistTracks(playlistId);
       await loadPlaylists();
     } catch (err) {
@@ -1073,7 +1157,7 @@ function App() {
       setIsAddingTracks(true);
       const folderName = getFileName(directory);
       const info = await createPlaylist(folderName, directory);
-      setSelectedPlaylistId(info.id);
+      setActivePlaylistId(info.id);
       await loadPlaylists();
       await loadPlaylistTracks(info.id);
       const paths = await scanDirectory(directory);
@@ -1118,20 +1202,40 @@ function App() {
     await loadPlaylists();
   };
 
-  const handleRemoveTrack = async (path: string) => {
+  const handleRemoveFromLibrary = async (path: string) => {
     try {
       setError(null);
-      if (!selectedPlaylistId) return;
-      await removeTrackFromPlaylistById(selectedPlaylistId, path);
+      await removeTrackFromLibrary(path);
       if (playbackState.current_path === path) {
         await stopTrack();
         setSeekValue(0);
       }
-      await loadPlaylistTracks(selectedPlaylistId);
+      if (selectedPlaylistId) {
+        await loadPlaylistTracks(selectedPlaylistId);
+      }
       await loadPlaylists();
+      await loadFavoritePaths();
+      await loadQueueTracks();
       await updatePlaybackState();
     } catch (err) {
-      setError(formatInvokeError(err, "Failed to remove track"));
+      setError(formatInvokeError(err, "Failed to remove from library"));
+    }
+  };
+
+  const handleRemoveFromPlaylist = async (path: string) => {
+    try {
+      setError(null);
+      if (!selectedPlaylistId) return;
+      if (isLibraryPlaylistName(selectedPlaylist?.name)) {
+        await handleRemoveFromLibrary(path);
+        return;
+      }
+      await removeTrackFromPlaylistById(selectedPlaylistId, path);
+      await loadPlaylistTracks(selectedPlaylistId);
+      await loadPlaylists();
+      await loadFavoritePaths();
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to remove from playlist"));
     }
   };
 
@@ -1439,6 +1543,10 @@ function App() {
   };
 
   const handleClearPlaylist = async () => {
+    if (selectedPlaylist?.sync_folder) {
+      setError("Synced playlists cannot be cleared.");
+      return;
+    }
     setShowClearConfirm(true);
   };
 
@@ -1516,7 +1624,7 @@ function App() {
       if (playlistDialog.mode === "create") {
         const info = await createPlaylist(name, playlistSyncFolder);
         await loadPlaylists();
-        setSelectedPlaylistId(info.id);
+        setActivePlaylistId(info.id);
         await loadPlaylistTracks(info.id);
         if (playlistSyncFolder) {
           closePlaylistDialog();
@@ -1529,7 +1637,7 @@ function App() {
           }
           if (androidHost) {
             setIsScanningFolder(true);
-            setScanProgress(0);
+            setFolderScanIsSync(false);
             const BATCH = 10;
             let failCount = 0;
             for (let i = 0; i < paths.length; i += BATCH) {
@@ -1540,7 +1648,6 @@ function App() {
               } catch {
                 failCount += batch.length;
               }
-              setScanProgress(Math.min(i + BATCH, paths.length));
             }
             setIsScanningFolder(false);
             if (failCount > 0) {
@@ -1580,8 +1687,16 @@ function App() {
       if (selectedPlaylistId === id) {
         const defaultId = getDefaultPlaylistId(list);
         if (defaultId) {
-          setSelectedPlaylistId(defaultId);
-          await loadPlaylistTracks(defaultId);
+          setActivePlaylistId(defaultId);
+          setPlaylist([]);
+          setIsLoadingPlaylist(true);
+          try {
+            await loadPlaylistTracks(defaultId);
+          } finally {
+            if (selectedPlaylistIdRef.current === defaultId) {
+              setIsLoadingPlaylist(false);
+            }
+          }
         }
       }
     } catch (err) {
@@ -1589,23 +1704,37 @@ function App() {
     }
   };
 
-  const handleSelectPlaylist = async (id: string) => {
+  const handleSelectPlaylist = (id: string) => {
+    const samePlaylist = selectedPlaylistIdRef.current === id;
     setViewingAlbum(null);
     setViewingArtist(null);
-    selectedPlaylistIdRef.current = id;
-    setSelectedPlaylistId(id);
-    setPlaylist([]);
     setMenuTrackPath(null);
     setMobileNavOpen(false);
     setIsImporting(false);
-    setIsLoadingPlaylist(true);
-    try {
-      await loadPlaylistTracks(id);
-    } catch (err) {
-      setError(formatInvokeError(err, "Failed to load playlist"));
-    } finally {
-      setIsLoadingPlaylist(false);
+
+    // Already showing this playlist (e.g. leaving an album view) — no refetch flash.
+    if (samePlaylist) {
+      return;
     }
+
+    setActivePlaylistId(id);
+    // Clear immediately so the title and list never disagree while loading.
+    setPlaylist([]);
+    setIsLoadingPlaylist(true);
+
+    void (async () => {
+      try {
+        await loadPlaylistTracks(id);
+      } catch (err) {
+        if (selectedPlaylistIdRef.current === id) {
+          setError(formatInvokeError(err, "Failed to load playlist"));
+        }
+      } finally {
+        if (selectedPlaylistIdRef.current === id) {
+          setIsLoadingPlaylist(false);
+        }
+      }
+    })();
   };
 
   // ── Queue operations ───────────────────────────────────────────────────────
@@ -1822,7 +1951,7 @@ function App() {
       if (!path) return;
       const result = await importPlaylist(path);
       await loadPlaylists();
-      setSelectedPlaylistId(result.playlist_id);
+      setActivePlaylistId(result.playlist_id);
       await loadPlaylistTracks(result.playlist_id);
     } catch (err) {
       setError(formatInvokeError(err, "Failed to import playlist"));
@@ -2005,6 +2134,14 @@ function App() {
         </button>
         <div className="mobile-topbar-title">
           <img src={trayTemplate} alt="Wave" className="mobile-topbar-logo" />
+          {isScanningFolder ? (
+            <span
+              className="brand-sync-spinner"
+              title={folderScanIsSync ? "Syncing folders…" : "Importing…"}
+              aria-label={folderScanIsSync ? "Syncing folders" : "Importing"}
+              role="status"
+            />
+          ) : null}
         </div>
         <button
           className={`mobile-topbar-btn ${showQueue ? "active" : ""}`}
@@ -2028,8 +2165,16 @@ function App() {
       />
 
       <aside className="sidebar">
-        <div className="brand-mark" style={{ textAlign: "center" }}>
+        <div className="brand-mark">
           <img src={trayTemplate} alt="Wave" className="brand-logo" />
+          {isScanningFolder ? (
+            <span
+              className="brand-sync-spinner"
+              title={folderScanIsSync ? "Syncing folders…" : "Importing…"}
+              aria-label={folderScanIsSync ? "Syncing folders" : "Importing"}
+              role="status"
+            />
+          ) : null}
         </div>
         <div className="playlist-section">
           <div className="playlist-section-header">
@@ -2072,9 +2217,9 @@ function App() {
                 >
                   <span className="playlist-item-name" title={pl.name}>
                     {(isScanningFolder &&
-                      (pl.sync_folder || pl.name === "All Local Files") &&
+                      (pl.sync_folder || isLibraryPlaylistName(pl.name)) &&
                       (selectedPlaylistId === pl.id ||
-                        pl.name === "All Local Files")) ||
+                        isLibraryPlaylistName(pl.name))) ||
                     (isImporting &&
                       pl.sync_folder &&
                       selectedPlaylistId === pl.id) ? (
@@ -2092,7 +2237,7 @@ function App() {
                     ) : null}
                     {pl.name}
                   </span>
-                  {pl.name !== "All Local Files" && (
+                  {!isLibraryPlaylistName(pl.name) && (
                     <span className="playlist-item-count">
                       {pl.track_count}
                     </span>
@@ -2109,7 +2254,7 @@ function App() {
                     >
                       <BiExport />
                     </button>
-                    {pl.name !== "All Local Files" &&
+                    {!isLibraryPlaylistName(pl.name) &&
                       pl.name !== "Favorites" && (
                         <>
                           <button
@@ -2199,7 +2344,7 @@ function App() {
       ) : (
       <main className="main-content">
         <div className="hero-copy">
-          <h1>{selectedPlaylist?.name ?? "All Local Files"}</h1>
+          <h1>{selectedPlaylist?.name ?? LIBRARY_PLAYLIST_NAME}</h1>
           <p>
             {playlist.length
               ? `${playlist.length} tracks in this playlist`
@@ -2208,7 +2353,7 @@ function App() {
                 : "No tracks in this playlist"}
             {(isScanningFolder &&
               (selectedPlaylist?.sync_folder ||
-                selectedPlaylist?.name === "All Local Files")) ||
+                isLibraryPlaylistName(selectedPlaylist?.name))) ||
             (isImporting && selectedPlaylist?.sync_folder) ? (
               <>
                 {" · "}
@@ -2267,8 +2412,9 @@ function App() {
               </div>
             )}
             {playlist.length > 0 &&
-              selectedPlaylist?.name !== "All Local Files" &&
-              selectedPlaylist?.name !== "Favorites" && (
+              !isLibraryPlaylistName(selectedPlaylist?.name) &&
+              selectedPlaylist?.name !== "Favorites" &&
+              !selectedPlaylist?.sync_folder && (
                 <button
                   className="btn-ghost"
                   onClick={handleClearPlaylist}
@@ -2307,7 +2453,7 @@ function App() {
                 <BiMusic />
               </div>
               <h2>Your playlist is empty</h2>
-              {selectedPlaylist?.name !== "All Local Files" &&
+              {!isLibraryPlaylistName(selectedPlaylist?.name) &&
                 selectedPlaylist?.name !== "Favorites" && (
                   <button
                     className="btn-primary"
@@ -2465,16 +2611,29 @@ function App() {
                       >
                         <BiDotsHorizontalRounded />
                       </button>
+                      {!isLibraryPlaylistName(selectedPlaylist?.name) && (
+                        <button
+                          className="track-action-btn track-remove-action"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            void handleRemoveFromPlaylist(track.path);
+                          }}
+                          title="Remove from playlist"
+                          type="button"
+                        >
+                          <BiMinus />
+                        </button>
+                      )}
                       <button
-                        className="track-action-btn"
+                        className="track-action-btn track-remove-action"
                         onClick={(event) => {
                           event.stopPropagation();
-                          handleRemoveTrack(track.path);
+                          void handleRemoveFromLibrary(track.path);
                         }}
-                        title="Remove"
+                        title="Remove from library"
                         type="button"
                       >
-                        <BiX />
+                        <BiTrash />
                       </button>
                     </div>
                     <button
@@ -2876,8 +3035,8 @@ function App() {
               )}
               {androidHost && (
                 <p className="add-track-menu-hint">
-                  On Android, tap the + button to scan a music folder into All
-                  Local Files.
+                  On Android, tap the + button to scan a music folder into
+                  Library.
                 </p>
               )}
             </div>
@@ -2959,15 +3118,27 @@ function App() {
                   <BiUser /> Go to Artist
                 </button>
               )}
+              {!isLibraryPlaylistName(selectedPlaylist?.name) && (
+                <button
+                  className="delete-action"
+                  type="button"
+                  onClick={() => {
+                    closeTrackContextMenu();
+                    void handleRemoveFromPlaylist(menuTrack.path);
+                  }}
+                >
+                  <BiMinus /> Remove from Playlist
+                </button>
+              )}
               <button
                 className="delete-action"
                 type="button"
                 onClick={() => {
                   closeTrackContextMenu();
-                  handleRemoveTrack(menuTrack.path);
+                  void handleRemoveFromLibrary(menuTrack.path);
                 }}
               >
-                <BiTrash /> Remove from Playlist
+                <BiTrash /> Remove from Library
               </button>
             </div>,
             document.body,
@@ -3587,31 +3758,19 @@ function App() {
             </p>
             <div className="modal-actions">
               <button
+                className="btn-ghost"
+                onClick={() => void skipFolderSetup()}
+                type="button"
+              >
+                Skip for now
+              </button>
+              <button
                 className="btn-primary"
                 onClick={() => void handleAddFolderAndroid()}
                 type="button"
               >
                 <BiFolderOpen /> Select Music Folder
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {isScanningFolder && (
-        <div className="modal-backdrop">
-          <div
-            className="modal-dialog"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2>Scanning & Importing</h2>
-            <p className="modal-desc">
-              {scanProgress > 0
-                ? `${scanProgress} files processed so far…`
-                : "Scanning folder for audio files…"}
-            </p>
-            <div className="scan-progress-bar">
-              <div className="scan-progress-fill" />
             </div>
           </div>
         </div>

@@ -1063,6 +1063,14 @@ pub async fn remove_track_from_playlist_by_id(
 }
 
 #[tauri::command]
+pub async fn remove_track_from_library(
+    path: String,
+    library: tauri::State<'_, LibraryState>,
+) -> Result<(), String> {
+    lock_library(&library)?.remove_track_from_library(&path)
+}
+
+#[tauri::command]
 pub async fn clear_playlist_by_id(
     id: String,
     library: tauri::State<'_, LibraryState>,
@@ -1699,4 +1707,150 @@ pub async fn import_scanned_audio(
         Ok(ScanImportResult { imported, errors })
     })
     .await
+}
+
+#[derive(serde::Serialize)]
+pub struct SyncPlaylistResult {
+    pub added: u32,
+    pub removed: u32,
+    pub errors: Vec<String>,
+}
+
+/// Reconcile a synced playlist with its folder contents.
+///
+/// `scanned_paths`: optional pre-scanned file list (required on Android SAF).
+/// When `None`, the playlist's `sync_folder` is walked on disk (desktop).
+///
+/// Locks the library only in short bursts so the UI can keep loading / switching
+/// playlists while a large sync runs. Metadata extraction for new files happens
+/// with the library unlocked.
+#[tauri::command]
+pub async fn sync_playlist_folder(
+    playlist_id: String,
+    scanned_paths: Option<Vec<String>>,
+    app: tauri::AppHandle,
+) -> Result<SyncPlaylistResult, String> {
+    let app_clone = app.clone();
+    let playlist_id_clone = playlist_id.clone();
+    blocking(move || {
+        let library = app_clone.state::<LibraryState>();
+
+        let sync_folder = {
+            let lib = library.0.lock().map_err(|e| e.to_string())?;
+            let playlists = lib.list_playlists(None)?;
+            playlists
+                .into_iter()
+                .find(|p| p.id == playlist_id_clone)
+                .and_then(|p| p.sync_folder)
+                .ok_or_else(|| "Playlist is not linked to a sync folder".to_string())?
+        };
+
+        let raw_paths = if let Some(paths) = scanned_paths {
+            paths
+        } else {
+            let dir_path = Path::new(&sync_folder);
+            if !dir_path.is_dir() {
+                return Err(format!(
+                    "Sync folder is missing or not a directory: {sync_folder}"
+                ));
+            }
+            WalkDir::new(dir_path)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| e.file_type().is_file())
+                .filter(|e| is_supported_audio_file(e.path()))
+                .filter_map(|e| e.path().to_str().map(str::to_string))
+                .collect()
+        };
+
+        let mut errors = Vec::new();
+        let mut desired = Vec::with_capacity(raw_paths.len());
+        let mut seen = std::collections::HashSet::new();
+        for path in &raw_paths {
+            match crate::android_import::materialize_audio_source(&app_clone, path) {
+                Ok(local) => {
+                    let local_str = local.to_string_lossy().into_owned();
+                    let key = Path::new(local_str.trim())
+                        .canonicalize()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| local_str.trim().to_string());
+                    if seen.insert(key.clone()) {
+                        // Prefer the canonical path so membership diffs stay stable.
+                        desired.push(key);
+                    }
+                }
+                Err(e) => errors.push(format!("{path}: {e}")),
+            }
+        }
+
+        let (to_remove, to_add) = {
+            let lib = library.0.lock().map_err(|e| e.to_string())?;
+            lib.diff_playlist_paths(&playlist_id_clone, &desired)?
+        };
+
+        if to_remove.is_empty() && to_add.is_empty() {
+            return Ok(SyncPlaylistResult {
+                added: 0,
+                removed: 0,
+                errors,
+            });
+        }
+
+        let existing_ids = {
+            let lib = library.0.lock().map_err(|e| e.to_string())?;
+            lib.track_ids_by_paths(&to_add)?
+        };
+
+        // Heavy work with the library unlocked so playlist browsing stays live.
+        let mut extracted = Vec::new();
+        let mut link_ids = Vec::new();
+        for path in &to_add {
+            let key = Path::new(path.trim())
+                .canonicalize()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| path.trim().to_string());
+            if let Some(id) = existing_ids.get(&key).cloned() {
+                link_ids.push(id);
+                continue;
+            }
+            match crate::metadata::extract_track(path) {
+                Ok(track) => extracted.push(track),
+                Err(e) => {
+                    tracing::warn!("Sync skip (metadata): {path}: {e}");
+                    errors.push(format!("{path}: {e}"));
+                }
+            }
+        }
+
+        let (added, removed) = {
+            let lib = library.0.lock().map_err(|e| e.to_string())?;
+            lib.apply_playlist_sync(&playlist_id_clone, &to_remove, &extracted, &link_ids)?
+        };
+
+        Ok(SyncPlaylistResult {
+            added,
+            removed,
+            errors,
+        })
+    })
+    .await
+}
+
+#[tauri::command]
+pub fn is_folder_setup_dismissed(
+    state: tauri::State<'_, AppSettingsState>,
+) -> Result<bool, String> {
+    Ok(lock_settings(&state)?.folder_setup_dismissed)
+}
+
+#[tauri::command]
+pub fn dismiss_folder_setup(
+    state: tauri::State<'_, AppSettingsState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut settings = lock_settings(&state)?;
+    settings.folder_setup_dismissed = true;
+    settings.save(&app)?;
+    Ok(())
 }

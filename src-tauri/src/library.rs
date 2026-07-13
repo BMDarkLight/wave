@@ -17,6 +17,14 @@ pub(crate) const TRACK_SELECT_COLUMNS: &str = "t.id, t.path, t.name, t.title, t.
                         t.fingerprint_sha256, t.acoustid_fingerprint, t.musicbrainz_recording_id,
                         t.file_size, t.modified_at, t.indexed_at";
 
+/// Default virtual playlist that mirrors the full track table.
+pub const LIBRARY_PLAYLIST_NAME: &str = "Library";
+const LEGACY_LIBRARY_PLAYLIST_NAME: &str = "All Local Files";
+
+fn is_library_playlist_name(name: &str) -> bool {
+    name == LIBRARY_PLAYLIST_NAME || name == LEGACY_LIBRARY_PLAYLIST_NAME
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlaylistInfo {
     pub id: String,
@@ -48,7 +56,7 @@ struct TrackExportJson {
     duration_seconds: Option<f64>,
 }
 
-/// Cached ID for the "All Local Files" playlist, so we don't need to hit the
+/// Cached ID for the default Library playlist, so we don't need to hit the
 /// database on every single read operation.
 pub struct Library {
     db_path: PathBuf,
@@ -194,8 +202,13 @@ impl Library {
 
         // Seed the default profile and playlist. We do this once at startup.
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
+        // Migrate legacy default playlist name before ensuring the current one.
+        let _ = connection.execute(
+            "UPDATE playlists SET name = ?1 WHERE name = ?2",
+            params![LIBRARY_PLAYLIST_NAME, LEGACY_LIBRARY_PLAYLIST_NAME],
+        );
         let playlist_id =
-            ensure_playlist_with_connection(&connection, &profile_id, "All Local Files")?;
+            ensure_playlist_with_connection(&connection, &profile_id, LIBRARY_PLAYLIST_NAME)?;
         let favorites_id =
             ensure_playlist_with_connection(&connection, &profile_id, "Favorites")?;
 
@@ -224,7 +237,7 @@ impl Library {
         let connection = self.lock_connection()?;
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
         let playlist_id =
-            ensure_playlist_with_connection(&connection, &profile_id, "All Local Files")?;
+            ensure_playlist_with_connection(&connection, &profile_id, LIBRARY_PLAYLIST_NAME)?;
         let _ = self.default_playlist_id_cache.set(playlist_id.clone());
         Ok(playlist_id)
     }
@@ -274,7 +287,7 @@ impl Library {
             None => extract_track(&path)?,
         };
 
-        // "All Local Files" is virtual — just ensure the track exists in the
+        // "Library" is virtual — just ensure the track exists in the
         // tracks table. No playlist_tracks entry is needed.
         if is_default {
             let mut connection = self.lock_connection()?;
@@ -341,35 +354,11 @@ impl Library {
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
         if is_default {
-            // "All Local Files" is virtual — remove the track entirely
-            let track_id: Option<String> = tx
-                .query_row(
-                    "SELECT id FROM tracks WHERE path = ?1",
-                    params![path],
-                    |row| row.get(0),
-                )
-                .ok();
-
-            let track_id = match track_id {
-                Some(id) => id,
-                None => return Err("Track not found".to_string()),
-            };
-
-            tx.execute(
-                "DELETE FROM playlist_tracks WHERE track_id = ?1",
-                params![track_id],
-            )
-            .map_err(|e| format!("Failed to remove from playlist_tracks: {e}"))?;
-
-            tx.execute(
-                "DELETE FROM tracks WHERE id = ?1",
-                params![track_id],
-            )
-            .map_err(|e| format!("Failed to remove track: {e}"))?;
-
-            tx.commit()
-                .map_err(|e| format!("Failed to commit transaction: {e}"))?;
-            return Ok(());
+            // Library is virtual — remove the track entirely
+            return Self::delete_track_by_path_in_tx(&tx, path).and_then(|_| {
+                tx.commit()
+                    .map_err(|e| format!("Failed to commit transaction: {e}"))
+            });
         }
 
         let deleted = tx
@@ -390,6 +379,43 @@ impl Library {
         Ok(())
     }
 
+    /// Remove a track from the library (and every playlist). Desktop and Android.
+    pub fn remove_track_from_library(&self, path: &str) -> Result<(), String> {
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction()
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+        Self::delete_track_by_path_in_tx(&tx, path)?;
+        tx.commit()
+            .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+        Ok(())
+    }
+
+    fn delete_track_by_path_in_tx(tx: &Transaction<'_>, path: &str) -> Result<(), String> {
+        let track_id: Option<String> = tx
+            .query_row(
+                "SELECT id FROM tracks WHERE path = ?1",
+                params![path],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let track_id = match track_id {
+            Some(id) => id,
+            None => return Err("Track not found".to_string()),
+        };
+
+        tx.execute(
+            "DELETE FROM playlist_tracks WHERE track_id = ?1",
+            params![track_id],
+        )
+        .map_err(|e| format!("Failed to remove from playlist_tracks: {e}"))?;
+
+        tx.execute("DELETE FROM tracks WHERE id = ?1", params![track_id])
+            .map_err(|e| format!("Failed to remove track: {e}"))?;
+        Ok(())
+    }
+
     pub fn get_default_playlist_tracks(&self) -> Result<Vec<Track>, String> {
         let playlist_id = self.default_playlist_id()?;
         self.get_playlist_tracks(&playlist_id)
@@ -398,7 +424,7 @@ impl Library {
     pub fn get_playlist_tracks(&self, playlist_id: &str) -> Result<Vec<Track>, String> {
         let connection = self.lock_connection()?;
 
-        // "All Local Files" returns every track in the library
+        // Library returns every track in the library
         if self.default_playlist_id_cache.get().map_or(false, |id| id == playlist_id) {
             let mut statement = connection
                 .prepare(
@@ -542,7 +568,7 @@ impl Library {
     ) -> Result<Vec<Track>, String> {
         let profile_id_str = profile_id.unwrap_or_else(|| "default".to_string());
         let playlist_name_str =
-            playlist_name.unwrap_or_else(|| "All Local Files".to_string());
+            playlist_name.unwrap_or_else(|| LIBRARY_PLAYLIST_NAME.to_string());
 
         // Resolve / create the profile and playlist outside the connection lock.
         let playlist_id = {
@@ -629,7 +655,7 @@ impl Library {
     pub fn list_playlists(&self, profile_id: Option<String>) -> Result<Vec<PlaylistInfo>, String> {
         let connection = self.lock_connection()?;
 
-        // For the default playlist ("All Local Files"), count from tracks table
+        // For the default Library playlist, count from tracks table
         // since it's virtual and doesn't rely on playlist_tracks.
         let default_count: i64 = connection
             .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
@@ -809,8 +835,8 @@ impl Library {
 
         match name {
             None => return Err("Playlist not found".to_string()),
-            Some(name) if name == "All Local Files" => {
-                return Err("The default \"All Local Files\" playlist cannot be deleted".to_string());
+            Some(name) if is_library_playlist_name(&name) => {
+                return Err("The default Library playlist cannot be deleted".to_string());
             }
             Some(name) if name == "Favorites" => {
                 return Err("The \"Favorites\" playlist cannot be deleted".to_string());
@@ -847,8 +873,8 @@ impl Library {
             .map_err(|error| format!("Failed to look up playlist: {error}"))?
             .ok_or_else(|| "Playlist not found".to_string())?;
 
-        if current_name == "All Local Files" {
-            return Err("The default \"All Local Files\" playlist cannot be renamed".to_string());
+        if is_library_playlist_name(&current_name) {
+            return Err("The default Library playlist cannot be renamed".to_string());
         }
 
         if current_name == "Favorites" {
@@ -874,8 +900,26 @@ impl Library {
             .default_playlist_id_cache
             .get()
             .map_or(false, |id| id == playlist_id);
+        let favorites_id = self.favorites_playlist_id()?;
+        if favorites_id == playlist_id {
+            return Err("Favorites cannot be cleared with clear playlist".to_string());
+        }
 
         let mut connection = self.lock_connection()?;
+
+        let sync_folder: Option<String> = connection
+            .query_row(
+                "SELECT sync_folder FROM playlists WHERE id = ?1",
+                params![playlist_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|e| format!("Failed to look up playlist: {e}"))?;
+        if sync_folder.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+            return Err(
+                "Synced playlists cannot be cleared. Unlink the sync folder first.".to_string(),
+            );
+        }
+
         let tx = connection
             .transaction()
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
@@ -896,6 +940,322 @@ impl Library {
         tx.commit()
             .map_err(|e| format!("Failed to commit transaction: {e}"))?;
         Ok(())
+    }
+
+    /// Wipe every track and delete all user playlists. Keeps Library and Favorites
+    /// (both empty). Also clears Library's sync folder link.
+    pub fn reset_library(&self) -> Result<(u32, u32), String> {
+        let library_id = self.default_playlist_id()?;
+        let favorites_id = self.favorites_playlist_id()?;
+        let playlists = self.list_playlists(None)?;
+
+        let mut deleted_playlists = 0u32;
+        for pl in &playlists {
+            if pl.id == library_id || pl.id == favorites_id {
+                continue;
+            }
+            self.delete_playlist(&pl.id)?;
+            deleted_playlists += 1;
+        }
+
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction()
+            .map_err(|e| format!("Failed to begin reset transaction: {e}"))?;
+
+        let track_count: i64 = tx
+            .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
+            .map_err(|e| format!("Failed to count tracks: {e}"))?;
+
+        tx.execute("DELETE FROM playlist_tracks", [])
+            .map_err(|e| format!("Failed to clear playlist membership: {e}"))?;
+        tx.execute("DELETE FROM tracks", [])
+            .map_err(|e| format!("Failed to clear tracks: {e}"))?;
+        tx.execute(
+            "UPDATE playlists SET sync_folder = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now_timestamp(), library_id],
+        )
+        .map_err(|e| format!("Failed to clear Library sync folder: {e}"))?;
+        tx.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![now_timestamp(), favorites_id],
+        )
+        .map_err(|e| format!("Failed to bump Favorites updated_at: {e}"))?;
+
+        tx.commit()
+            .map_err(|e| format!("Failed to commit reset: {e}"))?;
+
+        Ok((track_count as u32, deleted_playlists))
+    }
+
+    /// Make playlist membership match `desired_paths` exactly.
+    ///
+    /// Optimized for launch sync: only loads paths (not full track rows), uses
+    /// one DB transaction, and only probes metadata for brand-new files.
+    pub fn sync_playlist_to_paths(
+        &self,
+        playlist_id: &str,
+        desired_paths: &[String],
+    ) -> Result<(u32, u32), String> {
+        let (to_remove, to_add) = self.diff_playlist_paths(playlist_id, desired_paths)?;
+        if to_remove.is_empty() && to_add.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let existing_ids = self.track_ids_by_paths(&to_add)?;
+        let mut extracted = Vec::new();
+        for path in &to_add {
+            if existing_ids.contains_key(&normalize_path_key(path)) {
+                continue;
+            }
+            match extract_track(path) {
+                Ok(track) => extracted.push(track),
+                Err(e) => tracing::warn!("Sync skip (metadata): {path}: {e}"),
+            }
+        }
+
+        let link_ids: Vec<String> = to_add
+            .iter()
+            .filter_map(|path| existing_ids.get(&normalize_path_key(path)).cloned())
+            .collect();
+
+        self.apply_playlist_sync(playlist_id, &to_remove, &extracted, &link_ids)
+    }
+
+    /// Diff current playlist paths against `desired_paths` (normalized).
+    pub fn diff_playlist_paths(
+        &self,
+        playlist_id: &str,
+        desired_paths: &[String],
+    ) -> Result<(Vec<String>, Vec<String>), String> {
+        use std::collections::{HashMap, HashSet};
+
+        let current_raw = self.playlist_track_paths(playlist_id)?;
+        let mut current_by_key: HashMap<String, String> = HashMap::new();
+        for path in current_raw {
+            current_by_key
+                .entry(normalize_path_key(&path))
+                .or_insert(path);
+        }
+
+        let mut desired_set: HashSet<String> = HashSet::new();
+        let mut desired_ordered: Vec<String> = Vec::new();
+        for path in desired_paths {
+            let key = normalize_path_key(path);
+            if desired_set.insert(key) {
+                desired_ordered.push(path.clone());
+            }
+        }
+
+        let to_remove: Vec<String> = current_by_key
+            .iter()
+            .filter(|(key, _)| !desired_set.contains(key.as_str()))
+            .map(|(_, raw)| raw.clone())
+            .collect();
+        let to_add: Vec<String> = desired_ordered
+            .into_iter()
+            .filter(|path| !current_by_key.contains_key(&normalize_path_key(path)))
+            .collect();
+
+        Ok((to_remove, to_add))
+    }
+
+    /// Apply a precomputed sync diff in a single write transaction.
+    pub fn apply_playlist_sync(
+        &self,
+        playlist_id: &str,
+        to_remove: &[String],
+        extracted: &[Track],
+        link_track_ids: &[String],
+    ) -> Result<(u32, u32), String> {
+        if to_remove.is_empty() && extracted.is_empty() && link_track_ids.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let is_default = self
+            .default_playlist_id_cache
+            .get()
+            .map_or(false, |id| id == playlist_id);
+
+        let now = now_timestamp();
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction()
+            .map_err(|e| format!("Failed to begin sync transaction: {e}"))?;
+
+        // Upsert/link first so path rewrites land before removals. Otherwise a
+        // path-normalization mismatch deletes the real row, then inserts a dupe.
+        let mut kept_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut added = 0u32;
+        let mut position = next_playlist_position(&tx, playlist_id)?;
+
+        for track in extracted {
+            let track_id = upsert_track_deduped(&tx, track)?;
+            kept_ids.insert(track_id.clone());
+            if is_default {
+                added += 1;
+                continue;
+            }
+            let inserted = tx
+                .execute(
+                    "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![playlist_id, track_id, position, now],
+                )
+                .map_err(|e| format!("Failed to add track to playlist: {e}"))?;
+            if inserted > 0 {
+                added += 1;
+                position += 1;
+            }
+        }
+
+        if !is_default {
+            for track_id in link_track_ids {
+                kept_ids.insert(track_id.clone());
+                let inserted = tx
+                    .execute(
+                        "INSERT OR IGNORE INTO playlist_tracks (playlist_id, track_id, position, added_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![playlist_id, track_id, position, now],
+                    )
+                    .map_err(|e| format!("Failed to link track to playlist: {e}"))?;
+                if inserted > 0 {
+                    added += 1;
+                    position += 1;
+                }
+            }
+        } else {
+            for track_id in link_track_ids {
+                kept_ids.insert(track_id.clone());
+            }
+        }
+
+        let mut removed = 0u32;
+        if is_default {
+            for path in to_remove {
+                let track_id = resolve_track_id_by_path(&tx, path)?;
+                let Some(track_id) = track_id else {
+                    continue;
+                };
+                if kept_ids.contains(&track_id) {
+                    continue;
+                }
+                let _ = tx.execute(
+                    "DELETE FROM playlist_tracks WHERE track_id = ?1",
+                    params![track_id],
+                );
+                if tx
+                    .execute("DELETE FROM tracks WHERE id = ?1", params![track_id])
+                    .map_err(|e| format!("Failed to remove track: {e}"))?
+                    > 0
+                {
+                    removed += 1;
+                }
+            }
+        } else {
+            for path in to_remove {
+                let track_id = resolve_track_id_by_path(&tx, path)?;
+                let Some(track_id) = track_id else {
+                    continue;
+                };
+                if kept_ids.contains(&track_id) {
+                    continue;
+                }
+                let deleted = tx
+                    .execute(
+                        "DELETE FROM playlist_tracks
+                         WHERE playlist_id = ?1 AND track_id = ?2",
+                        params![playlist_id, track_id],
+                    )
+                    .map_err(|e| format!("Failed to remove playlist track: {e}"))?;
+                if deleted > 0 {
+                    removed += 1;
+                }
+            }
+        }
+
+        tx.execute(
+            "UPDATE playlists SET updated_at = ?1 WHERE id = ?2",
+            params![now, playlist_id],
+        )
+        .map_err(|e| format!("Failed to bump playlist updated_at: {e}"))?;
+
+        tx.commit()
+            .map_err(|e| format!("Failed to commit sync transaction: {e}"))?;
+        drop(connection);
+
+        // Collapse any artist/album/title duplicates left over from path mismatches.
+        {
+            let connection = self.lock_connection()?;
+            if let Err(e) = deduplicate_tracks(&connection) {
+                tracing::warn!("Post-sync dedupe failed: {e}");
+            }
+        }
+
+        Ok((added, removed))
+    }
+
+    /// Paths only — avoids loading cover art / full rows during sync.
+    pub fn playlist_track_paths(&self, playlist_id: &str) -> Result<Vec<String>, String> {
+        let connection = self.lock_connection()?;
+        if self
+            .default_playlist_id_cache
+            .get()
+            .map_or(false, |id| id == playlist_id)
+        {
+            let mut statement = connection
+                .prepare("SELECT path FROM tracks ORDER BY path")
+                .map_err(|e| format!("Failed to prepare path query: {e}"))?;
+            let paths = statement
+                .query_map([], |row| row.get(0))
+                .map_err(|e| format!("Failed to query paths: {e}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("Failed to read paths: {e}"))?;
+            return Ok(paths);
+        }
+
+        let mut statement = connection
+            .prepare(
+                "SELECT t.path FROM playlist_tracks pt
+                 JOIN tracks t ON t.id = pt.track_id
+                 WHERE pt.playlist_id = ?1
+                 ORDER BY pt.position",
+            )
+            .map_err(|e| format!("Failed to prepare playlist path query: {e}"))?;
+        let paths = statement
+            .query_map(params![playlist_id], |row| row.get(0))
+            .map_err(|e| format!("Failed to query playlist paths: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read playlist paths: {e}"))?;
+        Ok(paths)
+    }
+
+    pub fn track_ids_by_paths(
+        &self,
+        paths: &[String],
+    ) -> Result<std::collections::HashMap<String, String>, String> {
+        use std::collections::{HashMap, HashSet};
+        let mut map = HashMap::new();
+        if paths.is_empty() {
+            return Ok(map);
+        }
+        let wanted: HashSet<String> = paths.iter().map(|p| normalize_path_key(p)).collect();
+        let connection = self.lock_connection()?;
+        let mut statement = connection
+            .prepare("SELECT id, path FROM tracks")
+            .map_err(|e| format!("Failed to prepare track lookup: {e}"))?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| format!("Failed to query tracks: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read tracks: {e}"))?;
+        for (id, stored) in rows {
+            let key = normalize_path_key(&stored);
+            if wanted.contains(&key) {
+                map.insert(key, id);
+            }
+        }
+        Ok(map)
     }
 
     /// Create a playlist from all tracks matching the given album name.
@@ -1545,6 +1905,9 @@ trait Queryable {
     where
         P: rusqlite::Params,
         F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
+    fn query_vec<T, F>(&self, sql: &str, f: F) -> rusqlite::Result<Vec<T>>
+    where
+        F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>;
 }
 
 impl Queryable for Connection {
@@ -1557,6 +1920,14 @@ impl Queryable for Connection {
         F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     {
         self.query_row(sql, params, f).optional()
+    }
+    fn query_vec<T, F>(&self, sql: &str, f: F) -> rusqlite::Result<Vec<T>>
+    where
+        F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        let mut statement = self.prepare(sql)?;
+        let rows = statement.query_map([], f)?;
+        rows.collect()
     }
 }
 
@@ -1571,6 +1942,14 @@ impl Queryable for Transaction<'_> {
     {
         self.query_row(sql, params, f).optional()
     }
+    fn query_vec<T, F>(&self, sql: &str, f: F) -> rusqlite::Result<Vec<T>>
+    where
+        F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        let mut statement = self.prepare(sql)?;
+        let rows = statement.query_map([], f)?;
+        rows.collect()
+    }
 }
 
 impl Queryable for std::sync::MutexGuard<'_, Connection> {
@@ -1583,6 +1962,14 @@ impl Queryable for std::sync::MutexGuard<'_, Connection> {
         F: FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
     {
         self.query_row(sql, params, f).optional()
+    }
+    fn query_vec<T, F>(&self, sql: &str, f: F) -> rusqlite::Result<Vec<T>>
+    where
+        F: FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+    {
+        let mut statement = self.prepare(sql)?;
+        let rows = statement.query_map([], f)?;
+        rows.collect()
     }
 }
 
@@ -1637,6 +2024,166 @@ fn lookup_track_id(conn: &impl Queryable, path: &str) -> Result<String, String> 
     )
     .map_err(|error| format!("Failed to look up track id: {error}"))?
     .ok_or_else(|| format!("Track not found in library: {path}"))
+}
+
+/// Resolve a track id from a stored or scanned path (exact, then normalized).
+fn resolve_track_id_by_path(
+    conn: &impl Queryable,
+    path: &str,
+) -> Result<Option<String>, String> {
+    if let Some(id) = conn
+        .query_opt(
+            "SELECT id FROM tracks WHERE path = ?1",
+            params![path],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to look up track by path: {e}"))?
+    {
+        return Ok(Some(id));
+    }
+
+    let canon = normalize_path_key(path);
+    if canon != path {
+        if let Some(id) = conn
+            .query_opt(
+                "SELECT id FROM tracks WHERE path = ?1",
+                params![canon],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to look up track by canonical path: {e}"))?
+        {
+            return Ok(Some(id));
+        }
+    }
+
+    let rows = conn
+        .query_vec("SELECT id, path FROM tracks", |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("Failed to scan tracks for path match: {e}"))?;
+    for (id, stored) in rows {
+        if normalize_path_key(&stored) == canon {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+/// Find an existing library row for this file: path → fingerprint → tags.
+fn find_existing_track_id(conn: &impl Queryable, track: &Track) -> Result<Option<String>, String> {
+    if let Some(id) = resolve_track_id_by_path(conn, &track.path)? {
+        return Ok(Some(id));
+    }
+
+    if let Some(ref fp) = track.fingerprint_sha256 {
+        if !fp.is_empty() {
+            if let Some(id) = conn
+                .query_opt(
+                    "SELECT id FROM tracks WHERE fingerprint_sha256 = ?1 LIMIT 1",
+                    params![fp],
+                    |row| row.get(0),
+                )
+                .map_err(|e| format!("Failed to look up track by fingerprint: {e}"))?
+            {
+                return Ok(Some(id));
+            }
+        }
+    }
+
+    // Tag match (same heuristic as startup dedupe).
+    if !track.title.is_empty() && track.title != "Unknown" {
+        if let Some(id) = conn
+            .query_opt(
+                "SELECT id FROM tracks
+                 WHERE lower(artist) = lower(?1)
+                   AND lower(album) = lower(?2)
+                   AND lower(title) = lower(?3)
+                 LIMIT 1",
+                params![track.artist, track.album, track.title],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to look up track by tags: {e}"))?
+        {
+            return Ok(Some(id));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Upsert for sync: reuse fingerprint/tag matches and rewrite `path` to the
+/// canonical scanned location so later syncs stop seeing false "new" files.
+fn upsert_track_deduped(conn: &impl Queryable, track: &Track) -> Result<String, String> {
+    let mut track = track.clone();
+    track.path = normalize_path_key(&track.path);
+
+    if let Some(existing_id) = find_existing_track_id(conn, &track)? {
+        // Point the existing row at the canonical path (ignore unique conflict
+        // if another row already owns that path — then prefer that row).
+        let path_owner: Option<String> = conn
+            .query_opt(
+                "SELECT id FROM tracks WHERE path = ?1",
+                params![track.path],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to check path owner: {e}"))?;
+
+        let id = match path_owner {
+            Some(owner_id) if owner_id != existing_id => owner_id,
+            _ => {
+                conn.exec(
+                    "UPDATE tracks SET
+                        path = ?1,
+                        name = ?2,
+                        title = ?3,
+                        artist = ?4,
+                        album = ?5,
+                        album_artist = ?6,
+                        genre = ?7,
+                        year = ?8,
+                        track_number = ?9,
+                        disc_number = ?10,
+                        format = ?11,
+                        duration_seconds = ?12,
+                        sample_rate = ?13,
+                        channels = ?14,
+                        bit_depth = ?15,
+                        fingerprint_sha256 = COALESCE(?16, fingerprint_sha256),
+                        file_size = ?17,
+                        modified_at = ?18,
+                        indexed_at = ?19
+                     WHERE id = ?20",
+                    params![
+                        track.path,
+                        track.name,
+                        track.title,
+                        track.artist,
+                        track.album,
+                        track.album_artist,
+                        track.genre,
+                        track.year,
+                        track.track_number,
+                        track.disc_number,
+                        track.format,
+                        track.duration_seconds,
+                        track.sample_rate,
+                        track.channels,
+                        track.bit_depth,
+                        track.fingerprint_sha256,
+                        track.file_size,
+                        track.modified_at,
+                        track.indexed_at,
+                        existing_id,
+                    ],
+                )
+                .map_err(|e| format!("Failed to update existing track: {e}"))?;
+                existing_id
+            }
+        };
+        return Ok(id);
+    }
+
+    upsert_track(conn, &track)
 }
 
 fn upsert_track(conn: &impl Queryable, track: &Track) -> Result<String, String> {
@@ -1791,13 +2338,25 @@ fn repair_all_playlist_positions(connection: &Connection) -> Result<(), String> 
 }
 
 /// Remove duplicate tracks that share the same artist, album, and title,
-/// keeping the earliest indexed copy.
+/// keeping the earliest indexed copy. Untitled / "Unknown" rows are left alone
+/// so distinct untagged files are not collapsed together.
 fn deduplicate_tracks(connection: &Connection) -> Result<(), String> {
     let keep_ids: Vec<String> = {
         let mut stmt = connection
             .prepare(
-                "SELECT MIN(id) FROM tracks
-                 GROUP BY artist, album, title",
+                "SELECT id FROM (
+                     SELECT id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY lower(artist), lower(album), lower(title)
+                                ORDER BY indexed_at ASC, id ASC
+                            ) AS rn
+                     FROM tracks
+                     WHERE trim(title) != '' AND lower(trim(title)) != 'unknown'
+                 )
+                 WHERE rn = 1
+                 UNION ALL
+                 SELECT id FROM tracks
+                 WHERE trim(title) = '' OR lower(trim(title)) = 'unknown'",
             )
             .map_err(|e| format!("Failed to prepare dedup query: {e}"))?;
         let rows = stmt
@@ -1895,6 +2454,15 @@ fn compact_playlist_positions(
     }
 
     Ok(())
+}
+
+/// Stable path key for membership diffs (resolves symlinks when possible).
+fn normalize_path_key(path: &str) -> String {
+    let trimmed = path.trim();
+    Path::new(trimmed)
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| trimmed.to_string())
 }
 
 fn now_timestamp() -> i64 {
@@ -2001,7 +2569,7 @@ mod tests {
             .remove_track_from_playlist_by_path(&playlist_id, track_path)
             .expect("remove");
 
-        // After removing from "All Local Files", the track row is deleted entirely.
+        // After removing from Library, the track row is deleted entirely.
         // Re-upserting creates a new track with the new id.
         {
             let connection = library.lock_connection().expect("connection");
@@ -2328,7 +2896,7 @@ mod tests {
         let playlists = library.list_playlists(None).expect("playlists");
         let names: Vec<&str> = playlists.iter().map(|p| p.name.as_str()).collect();
         assert!(names.contains(&"Favorites"));
-        assert!(names.contains(&"All Local Files"));
+        assert!(names.contains(&"Library"));
     }
 
     #[test]
@@ -2503,5 +3071,254 @@ mod tests {
         let favorites = library.get_favorites().expect("favorites");
         assert_eq!(favorites.len(), 1);
         assert_eq!(favorites[0].path, track_path);
+    }
+
+    #[test]
+    fn apply_playlist_sync_reuses_fingerprint_instead_of_duplicating() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+
+        let mut first = sample_track("track-a", "/music/album/song.mp3");
+        first.fingerprint_sha256 = Some("fp-same-file".to_string());
+        first.title = "Real Title".to_string();
+
+        library
+            .apply_playlist_sync(&favorites_id, &[], &[first], &[])
+            .expect("first sync");
+
+        let mut second = sample_track("track-b", "/other/mount/song.mp3");
+        second.fingerprint_sha256 = Some("fp-same-file".to_string());
+        second.title = "Real Title".to_string();
+        second.artist = "Artist".to_string();
+        second.album = "Album".to_string();
+
+        // Same file, new path string — must update the existing row, not insert.
+        library
+            .apply_playlist_sync(
+                &favorites_id,
+                &["/music/album/song.mp3".to_string()],
+                &[second],
+                &[],
+            )
+            .expect("second sync");
+
+        let favorites = library.get_playlist_tracks(&favorites_id).expect("tracks");
+        assert_eq!(favorites.len(), 1, "playlist must not grow on path-variant sync");
+        assert_eq!(favorites[0].id, "track-a");
+        assert_eq!(favorites[0].path, "/other/mount/song.mp3");
+
+        let connection = library.lock_connection().expect("connection");
+        let track_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(track_count, 1, "library must not keep a leftover duplicate row");
+    }
+
+    #[test]
+    fn sync_playlist_to_paths_is_idempotent() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+
+        let track = sample_track("stable-id", "/library/track.flac");
+        library
+            .apply_playlist_sync(&favorites_id, &[], &[track], &[])
+            .expect("seed");
+
+        let desired = vec!["/library/track.flac".to_string()];
+        let (added, removed) = library
+            .sync_playlist_to_paths(&favorites_id, &desired)
+            .expect("first reconcile");
+        assert_eq!((added, removed), (0, 0));
+
+        let (added2, removed2) = library
+            .sync_playlist_to_paths(&favorites_id, &desired)
+            .expect("second reconcile");
+        assert_eq!((added2, removed2), (0, 0));
+
+        let favorites = library.get_playlist_tracks(&favorites_id).expect("tracks");
+        assert_eq!(favorites.len(), 1);
+    }
+
+    #[test]
+    fn clear_playlist_rejects_synced_folder() {
+        let library = open_test_library().expect("library");
+        let info = library
+            .create_playlist("Synced Mix", Some("/music/synced"))
+            .expect("create");
+        let err = library
+            .clear_playlist(&info.id)
+            .expect_err("synced clear should fail");
+        assert!(err.to_lowercase().contains("synced"));
+    }
+
+    #[test]
+    fn remove_from_user_playlist_keeps_library_track() {
+        let library = open_test_library().expect("library");
+        let playlist = library
+            .create_playlist("Workout", None)
+            .expect("create");
+        let path = "/music/only-here.mp3";
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let id = upsert_track(&*connection, &sample_track("t1", path)).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &playlist.id, &id, 0)
+                .expect("playlist");
+        }
+
+        library
+            .remove_track_from_playlist_by_path(&playlist.id, path)
+            .expect("remove");
+
+        let default_id = library.default_playlist_id().expect("default");
+        assert_eq!(
+            library
+                .get_playlist_tracks(&default_id)
+                .expect("library")
+                .len(),
+            1,
+            "playlist remove must not delete the library row"
+        );
+        assert!(library.get_playlist_tracks(&playlist.id).expect("pl").is_empty());
+    }
+
+    #[test]
+    fn remove_from_library_deletes_everywhere() {
+        let library = open_test_library().expect("library");
+        let playlist = library.create_playlist("Mix", None).expect("create");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let path = "/music/gone.mp3";
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let id = upsert_track(&*connection, &sample_track("gone", path)).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &playlist.id, &id, 0)
+                .expect("playlist");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id, 0)
+                .expect("favorite");
+        }
+
+        library
+            .remove_track_from_library(path)
+            .expect("remove from library");
+
+        let default_id = library.default_playlist_id().expect("default");
+        assert!(library.get_playlist_tracks(&default_id).expect("lib").is_empty());
+        assert!(library.get_playlist_tracks(&playlist.id).expect("pl").is_empty());
+        assert!(library.get_favorites().expect("fav").is_empty());
+    }
+
+    #[test]
+    fn remove_from_user_playlist_keeps_track_if_in_another_playlist() {
+        let library = open_test_library().expect("library");
+        let a = library.create_playlist("A", None).expect("a");
+        let b = library.create_playlist("B", None).expect("b");
+        let path = "/music/shared.mp3";
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let id = upsert_track(&*connection, &sample_track("t-shared", path)).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &a.id, &id, 0).expect("a");
+            insert_playlist_track_with_connection(&connection, &b.id, &id, 0).expect("b");
+        }
+
+        library
+            .remove_track_from_playlist_by_path(&a.id, path)
+            .expect("remove from a");
+
+        let default_id = library.default_playlist_id().expect("default");
+        let all = library.get_playlist_tracks(&default_id).expect("library");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].path, path);
+        assert_eq!(library.get_playlist_tracks(&b.id).expect("b").len(), 1);
+    }
+
+    #[test]
+    fn remove_from_favorites_does_not_purge_library_track() {
+        let library = open_test_library().expect("library");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let path = "/music/keep-me.mp3";
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let id = upsert_track(&*connection, &sample_track("keep", path)).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id, 0)
+                .expect("favorite");
+        }
+
+        library
+            .remove_track_from_favorites(path)
+            .expect("unfavorite");
+
+        let default_id = library.default_playlist_id().expect("default");
+        assert_eq!(
+            library.get_playlist_tracks(&default_id).expect("all").len(),
+            1,
+            "unfavoriting must not delete the library row"
+        );
+    }
+
+    #[test]
+    fn clear_user_playlist_keeps_library_tracks() {
+        let library = open_test_library().expect("library");
+        let playlist = library.create_playlist("Temp", None).expect("create");
+        let path = "/music/temp-only.mp3";
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let id = upsert_track(&*connection, &sample_track("temp", path)).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &playlist.id, &id, 0)
+                .expect("insert");
+        }
+
+        library.clear_playlist(&playlist.id).expect("clear");
+
+        let default_id = library.default_playlist_id().expect("default");
+        assert_eq!(
+            library.get_playlist_tracks(&default_id).expect("all").len(),
+            1,
+            "clearing a playlist must not wipe the library"
+        );
+    }
+
+    #[test]
+    fn reset_library_wipes_tracks_and_user_playlists() {
+        let library = open_test_library().expect("library");
+        let mix = library.create_playlist("Mix", Some("/music/mix")).expect("mix");
+        let favorites_id = library.favorites_playlist_id().expect("favorites");
+        let library_id = library.default_playlist_id().expect("library");
+        let path = "/music/wipe-me.mp3";
+
+        {
+            let connection = library.lock_connection().expect("connection");
+            let id = upsert_track(&*connection, &sample_track("wipe", path)).expect("upsert");
+            insert_playlist_track_with_connection(&connection, &mix.id, &id, 0).expect("mix");
+            insert_playlist_track_with_connection(&connection, &favorites_id, &id, 0)
+                .expect("fav");
+        }
+
+        let (tracks, playlists) = library.reset_library().expect("reset");
+        assert_eq!(tracks, 1);
+        assert_eq!(playlists, 1);
+
+        let remaining = library.list_playlists(None).expect("list");
+        let names: Vec<_> = remaining.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"Library"));
+        assert!(names.contains(&"Favorites"));
+        assert!(!names.contains(&"Mix"));
+        assert!(library.get_playlist_tracks(&library_id).expect("lib").is_empty());
+        assert!(library.get_favorites().expect("fav").is_empty());
+
+        let sync: Option<String> = {
+            let connection = library.lock_connection().expect("connection");
+            connection
+                .query_row(
+                    "SELECT sync_folder FROM playlists WHERE id = ?1",
+                    params![library_id],
+                    |row| row.get(0),
+                )
+                .expect("sync")
+        };
+        assert!(sync.is_none());
     }
 }

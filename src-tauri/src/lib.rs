@@ -208,6 +208,7 @@ pub fn run() {
             commands::get_playlist_tracks_by_id,
             commands::add_track_to_playlist_by_id,
             commands::remove_track_from_playlist_by_id,
+            commands::remove_track_from_library,
             commands::clear_playlist_by_id,
             commands::fetch_lyrics_for_track,
             commands::play_track_from_specific_playlist,
@@ -244,6 +245,9 @@ pub fn run() {
             commands::remove_media_folder,
             commands::scan_media_folder,
             commands::import_scanned_audio,
+            commands::sync_playlist_folder,
+            commands::is_folder_setup_dismissed,
+            commands::dismiss_folder_setup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

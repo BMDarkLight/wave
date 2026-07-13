@@ -30,7 +30,7 @@ pub enum Commands {
     #[command(subcommand)]
     Tracks(TracksCmd),
     /// Manage playlists
-    #[command(subcommand)]
+    #[command(subcommand, visible_alias = "playlist")]
     Playlists(PlaylistsCmd),
     /// Control audio playback
     #[command(subcommand)]
@@ -76,21 +76,27 @@ pub enum TracksCmd {
         /// Search query string
         query: String,
     },
-    /// Add a track to a playlist (default playlist if omitted)
+    /// Add a track to a playlist (Library if --playlist-id is omitted)
     Add {
         /// Track ID (UUID) or file path
         track_id: String,
-        /// Playlist ID (defaults to the main library playlist)
+        /// Playlist ID (defaults to Library)
         #[arg(long)]
         playlist_id: Option<String>,
     },
-    /// Remove a track from a playlist (default playlist if omitted)
+    /// Remove a track from a playlist, or from the Library if --playlist-id is omitted
     Remove {
         /// Track ID (UUID) or file path
         track_id: String,
-        /// Playlist ID (defaults to the main library playlist)
+        /// Playlist ID. Omit to remove the track from the Library entirely.
         #[arg(long)]
         playlist_id: Option<String>,
+    },
+    /// Delete every track and all playlists except Library and Favorites
+    Reset {
+        /// Skip the interactive confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
     },
 }
 
@@ -141,7 +147,7 @@ pub enum PlaylistsCmd {
         /// New name
         name: String,
     },
-    /// Remove all tracks from a playlist
+    /// Remove all tracks from a playlist (blocked for synced playlists)
     Clear {
         /// Playlist ID
         id: String,
@@ -153,12 +159,17 @@ pub enum PlaylistsCmd {
         /// Track ID (UUID) or file path
         track_id: String,
     },
-    /// Remove a track from a playlist
+    /// Remove a track from a playlist (does not delete it from the Library)
     RemoveTrack {
         /// Playlist ID
         id: String,
         /// Track ID (UUID) or file path
         track_id: String,
+    },
+    /// Sync a folder-linked playlist with its folder on disk
+    Sync {
+        /// Playlist ID (UUID)
+        id: String,
     },
 }
 
@@ -478,6 +489,7 @@ fn run_tracks(cmd: TracksCmd) {
             track_id,
             playlist_id,
         } => cmd_tracks_remove(track_id, playlist_id),
+        TracksCmd::Reset { yes } => cmd_tracks_reset(yes),
     }
 }
 
@@ -633,19 +645,59 @@ fn cmd_tracks_remove(track_id: String, playlist_id: Option<String>) {
         std::process::exit(1);
     });
     let result = if let Some(pid) = playlist_id {
-        library.remove_track_from_playlist_by_path(&pid, &path)
+        library
+            .remove_track_from_playlist_by_path(&pid, &path)
+            .map(|_| "Track removed from playlist.")
     } else {
-        match library.default_playlist_id() {
-            Ok(pid) => library.remove_track_from_playlist_by_path(&pid, &path),
-            Err(e) => Err(e),
-        }
+        library
+            .remove_track_from_library(&path)
+            .map(|_| "Track removed from library.")
     };
     match result {
-        Ok(()) => println!("Track removed from playlist."),
+        Ok(msg) => println!("{msg}"),
         Err(e) => {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+fn cmd_tracks_reset(yes: bool) {
+    if !yes {
+        let confirmed = confirm_prompt(
+            "This will delete ALL tracks and ALL playlists except Library and Favorites.\n\
+             Type 'reset' to confirm: ",
+            "reset",
+        );
+        if !confirmed {
+            eprintln!("Aborted.");
+            std::process::exit(1);
+        }
+    }
+
+    let library = open_library();
+    match library.reset_library() {
+        Ok((tracks, playlists)) => {
+            println!(
+                "Library reset: removed {tracks} track(s) and deleted {playlists} playlist(s)."
+            );
+            println!("Library and Favorites were kept (empty).");
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn confirm_prompt(prompt: &str, expected: &str) -> bool {
+    use std::io::{self, Write};
+    eprint!("{prompt}");
+    let _ = io::stderr().flush();
+    let mut line = String::new();
+    match io::stdin().read_line(&mut line) {
+        Ok(_) => line.trim().eq_ignore_ascii_case(expected),
+        Err(_) => false,
     }
 }
 
@@ -664,6 +716,7 @@ fn run_playlists(cmd: PlaylistsCmd) {
         PlaylistsCmd::Clear { id } => cmd_playlists_clear(id),
         PlaylistsCmd::AddTrack { id, track_id } => cmd_playlists_add_track(id, track_id),
         PlaylistsCmd::RemoveTrack { id, track_id } => cmd_playlists_remove_track(id, track_id),
+        PlaylistsCmd::Sync { id } => cmd_playlists_sync(id),
     }
 }
 
@@ -677,9 +730,13 @@ fn cmd_playlists_list() {
             }
             println!("Found {} playlist(s):", playlists.len());
             for pl in &playlists {
+                let sync_tag = match &pl.sync_folder {
+                    Some(folder) => format!("  [synced → {folder}]"),
+                    None => String::new(),
+                };
                 println!(
-                    "  {:36}  {:5} tracks  {}",
-                    pl.id, pl.track_count, pl.name
+                    "  {:36}  {:5} tracks  {}{}",
+                    pl.id, pl.track_count, pl.name, sync_tag
                 );
             }
         }
@@ -755,6 +812,10 @@ fn cmd_playlists_info(id: String) {
         Ok(Some(info)) => {
             println!("Playlist: {} (ID: {})", info.name, info.id);
             println!("  Track count: {}", info.track_count);
+            match &info.sync_folder {
+                Some(folder) => println!("  Synced folder: {folder}"),
+                None => println!("  Synced folder: (none)"),
+            }
             println!();
             match library.get_playlist_tracks(&id) {
                 Ok(tracks) => {
@@ -793,7 +854,14 @@ fn cmd_playlists_query(query: String) {
             }
             println!("Found {} playlist(s) matching \"{}\":", playlists.len(), query);
             for pl in &playlists {
-                println!("  {:36}  {:5} tracks  {}", pl.id, pl.track_count, pl.name);
+                let sync_tag = match &pl.sync_folder {
+                    Some(_) => "  [synced]",
+                    None => "",
+                };
+                println!(
+                    "  {:36}  {:5} tracks  {}{}",
+                    pl.id, pl.track_count, pl.name, sync_tag
+                );
             }
         }
         Err(e) => {
@@ -870,6 +938,68 @@ fn cmd_playlists_remove_track(id: String, track_id: String) {
     });
     match library.remove_track_from_playlist_by_path(&id, &path) {
         Ok(()) => println!("Removed track from playlist {id}."),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_playlists_sync(id: String) {
+    use crate::metadata::is_supported_audio_file;
+    use walkdir::WalkDir;
+
+    let library = open_library();
+    let info = match library.get_playlist_info(&id) {
+        Ok(Some(info)) => info,
+        Ok(None) => {
+            eprintln!("Error: Playlist not found: {id}");
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let Some(folder) = info.sync_folder.as_deref() else {
+        eprintln!(
+            "Error: Playlist \"{}\" is not linked to a sync folder.\n\
+             Link one in the app (Create playlist → Sync with folder, or Add folder as playlist).",
+            info.name
+        );
+        std::process::exit(1);
+    };
+
+    let dir_path = Path::new(folder);
+    if !dir_path.is_dir() {
+        eprintln!("Error: Sync folder is missing or not a directory: {folder}");
+        std::process::exit(1);
+    }
+
+    let paths: Vec<String> = WalkDir::new(dir_path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| is_supported_audio_file(e.path()))
+        .filter_map(|e| e.path().to_str().map(str::to_string))
+        .collect();
+
+    println!(
+        "Syncing \"{}\" with {} ({} audio file(s) found)…",
+        info.name,
+        folder,
+        paths.len()
+    );
+
+    match library.sync_playlist_to_paths(&id, &paths) {
+        Ok((added, removed)) => {
+            println!("Done. Added {added}, removed {removed}.");
+            if let Ok(Some(updated)) = library.get_playlist_info(&id) {
+                println!("Playlist now has {} track(s).", updated.track_count);
+            }
+        }
         Err(e) => {
             eprintln!("Error: {e}");
             std::process::exit(1);

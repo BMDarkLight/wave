@@ -103,6 +103,24 @@ input:disabled {
   height: 48px;
 }
 
+.brand-sync-spinner {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid transparent;
+  border-top-color: rgba(255, 255, 255, 0.55);
+  border-right-color: rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  animation: brand-sync-spin 0.85s linear infinite;
+  opacity: 0.85;
+}
+
+@keyframes brand-sync-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .mobile-topbar-logo {
   width: 36px;
   height: 36px;
@@ -2564,9 +2582,17 @@ img.queue-thumb {
   }
 
   .mobile-topbar-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     font-size: 17px;
     font-weight: 800;
     letter-spacing: -0.03em;
+  }
+
+  .mobile-topbar-title .brand-sync-spinner {
+    width: 9px;
+    height: 9px;
   }
 
   .mobile-topbar-btn {
@@ -2752,7 +2778,7 @@ img.queue-thumb {
     pointer-events: auto;
   }
 
-  .track-actions-hover .track-action-btn[title="Remove"] {
+  .track-actions-hover .track-remove-action {
     display: none;
   }
 

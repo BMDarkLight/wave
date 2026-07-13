@@ -376,6 +376,10 @@ export const removeTrackFromPlaylistById = (id: string, path: string): Promise<v
   return safeInvoke("remove_track_from_playlist_by_id", { id, path });
 };
 
+export const removeTrackFromLibrary = (path: string): Promise<void> => {
+  return safeInvoke("remove_track_from_library", { path });
+};
+
 export const fetchLyricsForTrack = (path: string): Promise<Track | null> => {
   return safeInvoke<Track>("fetch_lyrics_for_track", { path }).catch(() => null);
 };
@@ -763,6 +767,28 @@ export const importScannedAudio = (
   playlistId: string,
 ): Promise<ScanImportResult> =>
   safeInvoke<ScanImportResult>("import_scanned_audio", { paths, playlistId });
+
+export interface SyncPlaylistResult {
+  added: number;
+  removed: number;
+  errors: string[];
+}
+
+/** Reconcile a synced playlist with folder contents (add missing, remove gone). */
+export const syncPlaylistFolder = (
+  playlistId: string,
+  scannedPaths?: string[] | null,
+): Promise<SyncPlaylistResult> =>
+  safeInvoke<SyncPlaylistResult>("sync_playlist_folder", {
+    playlistId,
+    scannedPaths: scannedPaths ?? null,
+  });
+
+export const isFolderSetupDismissed = (): Promise<boolean> =>
+  safeInvoke<boolean>("is_folder_setup_dismissed");
+
+export const dismissFolderSetup = (): Promise<void> =>
+  safeInvoke("dismiss_folder_setup");
 
 /** Recursively scan a directory URI using @tauri-apps/plugin-fs.
  *  Works with content:// URIs on Android. Returns audio file URIs/paths. */
