@@ -20,7 +20,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2.11", features = [] }
 tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
+tauri-plugin-fs = "2.5.1"
 # No-op on desktop; Android/iOS MediaSession + media notification.
 # Vendored locally (vendor/tauri-plugin-media-session) to add shuffle/repeat
 # notification buttons on top of upstream 0.2.4.

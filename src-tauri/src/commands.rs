@@ -226,6 +226,76 @@ fn sync_bridge_now_playing(app: &tauri::AppHandle, track: &Track) {
     sync_bridge_playback_mode(app, &bridge);
 }
 
+/// GUI-side auto-advance (matches the playback daemon tick).
+/// Call periodically from a background thread so Android/desktop keep playing
+/// the queue when a track ends — without relying on frontend polling alone.
+pub(crate) fn tick_auto_advance(app: &tauri::AppHandle) {
+    let advanced = {
+        let state = app.state::<PlayerState>();
+        let mut slot = match state.0.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("Player mutex was poisoned during auto-advance, recovering");
+                poisoned.into_inner()
+            }
+        };
+        let Some(player) = slot.as_mut() else {
+            return;
+        };
+        if !player.should_auto_advance() {
+            return;
+        }
+
+        // Skip past unreadable files instead of stopping — a single bad track
+        // must not halt background queue playback on Android.
+        let mut result = None;
+        for _ in 0..8 {
+            match player.play_next() {
+                Ok(Some(path)) => {
+                    result = Some(path);
+                    break;
+                }
+                Ok(None) => {
+                    let _ = player.stop();
+                    result = None;
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!("Auto-advance failed, skipping track: {error}");
+                }
+            }
+        }
+        if result.is_none() && player.get_current_path().is_some() && player.should_auto_advance() {
+            let _ = player.stop();
+        }
+        result
+    };
+
+    match advanced {
+        Some(path) => {
+            let track = match app.state::<LibraryState>().0.lock() {
+                Ok(lib) => resolve_track(&lib, &path),
+                Err(_) => placeholder_track(&path),
+            };
+            sync_bridge_now_playing(app, &track);
+        }
+        None => {
+            // Only clear the media session when nothing is playing anymore.
+            let still_playing = app
+                .state::<PlayerState>()
+                .0
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|p| p.is_playing() || p.is_paused()))
+                .unwrap_or(false);
+            if !still_playing {
+                let bridge = app.state::<MediaBridgeState>();
+                bridge.0.set_stopped();
+            }
+        }
+    }
+}
+
 /// Push the current shuffle/repeat mode to the OS media bridge (e.g. so the
 /// Android notification's shuffle/repeat buttons reflect the right state).
 fn sync_bridge_playback_mode(app: &tauri::AppHandle, bridge: &tauri::State<MediaBridgeState>) {
@@ -312,6 +382,74 @@ pub async fn play_track(
     .await?;
     sync_bridge_now_playing(&app, &track);
 
+    Ok(())
+}
+
+/// Play `paths[index]` and replace the playback queue with `paths`.
+/// Used by album/artist views so Next/auto-advance follows that list.
+#[tauri::command]
+pub async fn play_tracks(
+    paths: Vec<String>,
+    index: usize,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    if paths.is_empty() {
+        return Err("No tracks to play".to_string());
+    }
+    if index >= paths.len() {
+        return Err(format!("Track not found at index {index}"));
+    }
+
+    let app_clone = app.clone();
+    let paths_clone = paths.clone();
+    let materialized = blocking(move || {
+        Ok::<_, String>(
+            paths_clone
+                .into_iter()
+                .map(|path| {
+                    crate::android_import::materialize_audio_source(&app_clone, &path)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("Failed to materialize track {path}: {e}");
+                            path
+                        })
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await?;
+
+    let local_path = materialized
+        .get(index)
+        .cloned()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| format!("Audio file not found for track at index {index}"))?;
+
+    let play_path = local_path.clone();
+    let queue_paths = materialized.clone();
+    let app_clone = app.clone();
+    blocking(move || {
+        with_app_player(&app_clone, |player| {
+            player.queue.set_tracks(queue_paths);
+            if player.queue.jump(index).is_none() {
+                tracing::warn!("Failed to align queue with play_tracks index {index}");
+            }
+            player
+                .play(&play_path)
+                .map_err(|e| format!("Playback failed: {e}"))
+        })
+    })
+    .await?;
+
+    let app_clone = app.clone();
+    let lookup = local_path.clone();
+    let track = blocking(move || {
+        let lib = app_clone.state::<LibraryState>();
+        let lib = lib.0.lock().map_err(|e| e.to_string())?;
+        Ok::<_, String>(resolve_track(&lib, &lookup))
+    })
+    .await?;
+    sync_bridge_now_playing(&app, &track);
     Ok(())
 }
 
@@ -859,9 +997,19 @@ pub async fn get_playback_mode(
 #[tauri::command]
 pub async fn create_playlist(
     name: String,
+    sync_folder: Option<String>,
     library: tauri::State<'_, LibraryState>,
 ) -> Result<PlaylistInfo, String> {
-    lock_library(&library)?.create_playlist(&name)
+    lock_library(&library)?.create_playlist(&name, sync_folder.as_deref())
+}
+
+#[tauri::command]
+pub async fn set_playlist_sync_folder(
+    id: String,
+    sync_folder: Option<String>,
+    library: tauri::State<'_, LibraryState>,
+) -> Result<PlaylistInfo, String> {
+    lock_library(&library)?.set_playlist_sync_folder(&id, sync_folder.as_deref())
 }
 
 #[tauri::command]
@@ -1447,4 +1595,108 @@ pub fn toggle_close_action(
     settings.toggle_close_action();
     settings.save(&app)?;
     Ok(settings.close_action)
+}
+
+// ── Media folders ─────────────────────────────────────────────────────────────
+
+/// Return the list of saved media folder paths/URIs.
+#[tauri::command]
+pub fn list_media_folders(
+    state: tauri::State<'_, AppSettingsState>,
+) -> Result<Vec<String>, String> {
+    let settings = lock_settings(&state)?;
+    Ok(settings.media_folders.clone())
+}
+
+/// Persist a new media folder URI (e.g. content://… on Android) to settings.
+#[tauri::command]
+pub fn save_media_folder(
+    path: String,
+    state: tauri::State<'_, AppSettingsState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut settings = lock_settings(&state)?;
+    if !settings.media_folders.contains(&path) {
+        settings.media_folders.push(path);
+        settings.save(&app)?;
+    }
+    Ok(())
+}
+
+/// Remove a media folder URI from settings.
+#[tauri::command]
+pub fn remove_media_folder(
+    path: String,
+    state: tauri::State<'_, AppSettingsState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let mut settings = lock_settings(&state)?;
+    settings.media_folders.retain(|f| f != &path);
+    settings.save(&app)?;
+    Ok(())
+}
+
+/// Scan a local directory for audio files and return their paths.
+/// Works on desktop where paths are real filesystem paths.
+#[tauri::command]
+pub fn scan_media_folder(
+    folder: String,
+) -> Result<Vec<String>, String> {
+    let dir_path = Path::new(&folder);
+    if !dir_path.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+
+    let paths: Vec<String> = WalkDir::new(dir_path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_file())
+        .filter(|e| is_supported_audio_file(e.path()))
+        .filter_map(|e| e.path().to_str().map(str::to_string))
+        .collect();
+
+    Ok(paths)
+}
+
+/// Import audio files found by a scan into a playlist.
+/// Each path is materialized (content:// URIs → local copies) then added.
+#[derive(serde::Serialize)]
+pub struct ScanImportResult {
+    pub imported: u32,
+    pub errors: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn import_scanned_audio(
+    paths: Vec<String>,
+    playlist_id: String,
+    app: tauri::AppHandle,
+) -> Result<ScanImportResult, String> {
+    let app_clone = app.clone();
+    blocking(move || {
+        let mut imported = 0u32;
+        let mut errors = Vec::new();
+        for path in &paths {
+            match crate::android_import::materialize_audio_source(&app_clone, path) {
+                Ok(local) => {
+                    let library = app_clone.state::<LibraryState>();
+                    let result = library.0.lock().map_err(|e| e.to_string()).and_then(|lib| {
+                        lib.add_track_to_playlist(
+                            &playlist_id,
+                            local.to_string_lossy().into_owned(),
+                        )
+                    });
+                    match result {
+                        Ok(_) => imported += 1,
+                        Err(e) if e.contains("already in the playlist") => imported += 1,
+                        Err(e) => errors.push(format!("{path}: {e}")),
+                    }
+                }
+                Err(e) => errors.push(format!("{path}: {e}")),
+            }
+        }
+        Ok(ScanImportResult { imported, errors })
+    })
+    .await
 }

@@ -641,12 +641,13 @@ fn playback_tick_loop(state: Arc<Mutex<DaemonState>>, tooltip: Arc<Mutex<String>
                 poisoned.into_inner()
             }
         };
-        if !guard.player.is_playing() && !guard.player.is_paused() {
-            if let Ok(Some(path)) = guard.player.play_next() {
-                sync_media_for_path(&mut guard, &path);
-            } else {
-                guard.media.clear();
-            }
+        if !guard.player.should_auto_advance() {
+            // keep waiting
+        } else if let Ok(Some(path)) = guard.player.play_next() {
+            sync_media_for_path(&mut guard, &path);
+        } else {
+            let _ = guard.player.stop();
+            guard.media.clear();
         }
 
         sync_media_playback_state(&mut guard);

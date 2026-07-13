@@ -67,7 +67,7 @@ const AlbumArt = ({
 interface ArtistPageProps {
   artist: string;
   onBack: () => void;
-  onPlayTrack: (path: string) => void;
+  onPlayTrack: (path: string, tracks: Track[]) => void;
   onAlbumClick: (album: string, albumArtist: string | null) => void;
   playbackState: PlaybackState;
 }
@@ -109,12 +109,10 @@ export default function ArtistPage({
 
   if (loading) {
     return (
-      <div className="main-content">
-        <div className="page-header">
-          <button className="page-back-btn" onClick={onBack} type="button">
-            <BiArrowBack />
-          </button>
-        </div>
+      <div className="main-content page-with-float-back">
+        <button className="page-back-btn" onClick={onBack} type="button">
+          <BiArrowBack />
+        </button>
         <div className="empty-state">
           <div className="empty-icon">
             <span className="import-spinner" />
@@ -126,12 +124,10 @@ export default function ArtistPage({
   }
 
   return (
-    <div className="main-content">
-      <div className="page-header">
-        <button className="page-back-btn" onClick={onBack} type="button">
-          <BiArrowBack />
-        </button>
-      </div>
+    <div className="main-content page-with-float-back">
+      <button className="page-back-btn" onClick={onBack} type="button">
+        <BiArrowBack />
+      </button>
 
       {/* Artist hero */}
       <div className="artist-hero">
@@ -238,7 +234,7 @@ export default function ArtistPage({
                 <div
                   key={track.id}
                   className={`track-item ${isCurrentTrack(track) ? "active" : ""}`}
-                  onClick={() => onPlayTrack(track.path)}
+                  onClick={() => onPlayTrack(track.path, tracks)}
                 >
                   <div className="track-col-index">
                     {isCurrentTrack(track) && playbackState.is_playing ? (

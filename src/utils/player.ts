@@ -105,6 +105,8 @@ export interface PlaylistInfo {
   track_count: number;
   created_at: number;
   updated_at: number;
+  /** Folder path/URI this playlist is media-synced with, if any. */
+  sync_folder?: string | null;
 }
 
 export interface QueueTrackState {
@@ -139,6 +141,11 @@ export interface ArtistSummary {
 
 export const playTrack = (path: string): Promise<void> => {
   return safeInvoke("play_track", { path });
+};
+
+/** Replace the queue with `paths` and start playback at `index`. */
+export const playTracks = (paths: string[], index: number): Promise<void> => {
+  return safeInvoke("play_tracks", { paths, index });
 };
 
 export const pauseTrack = (): Promise<void> => {
@@ -329,8 +336,24 @@ export const getSupportedAudioExtensions = (): Promise<string[]> => {
 
 // ── Playlist CRUD ────────────────────────────────────────────────────────────
 
-export const createPlaylist = (name: string): Promise<PlaylistInfo> => {
-  return safeInvoke<PlaylistInfo>("create_playlist", { name });
+export const createPlaylist = (
+  name: string,
+  syncFolder?: string | null,
+): Promise<PlaylistInfo> => {
+  return safeInvoke<PlaylistInfo>("create_playlist", {
+    name,
+    syncFolder: syncFolder ?? null,
+  });
+};
+
+export const setPlaylistSyncFolder = (
+  id: string,
+  syncFolder?: string | null,
+): Promise<PlaylistInfo> => {
+  return safeInvoke<PlaylistInfo>("set_playlist_sync_folder", {
+    id,
+    syncFolder: syncFolder ?? null,
+  });
 };
 
 export const deletePlaylist = (id: string): Promise<void> => {
@@ -715,3 +738,78 @@ export const setCloseAction = (action: CloseAction): Promise<CloseAction> =>
 
 export const toggleCloseAction = (): Promise<CloseAction> =>
   safeInvoke<CloseAction>("toggle_close_action");
+
+// ── Media folders ─────────────────────────────────────────────────────────────
+
+export const listMediaFolders = (): Promise<string[]> =>
+  safeInvoke<string[]>("list_media_folders");
+
+export const saveMediaFolder = (path: string): Promise<void> =>
+  safeInvoke("save_media_folder", { path });
+
+export const removeMediaFolder = (path: string): Promise<void> =>
+  safeInvoke("remove_media_folder", { path });
+
+export const scanMediaFolder = (folder: string): Promise<string[]> =>
+  safeInvoke<string[]>("scan_media_folder", { folder });
+
+export interface ScanImportResult {
+  imported: number;
+  errors: string[];
+}
+
+export const importScannedAudio = (
+  paths: string[],
+  playlistId: string,
+): Promise<ScanImportResult> =>
+  safeInvoke<ScanImportResult>("import_scanned_audio", { paths, playlistId });
+
+/** Recursively scan a directory URI using @tauri-apps/plugin-fs.
+ *  Works with content:// URIs on Android. Returns audio file URIs/paths. */
+export const scanDirectoryRecursive = async (dirUri: string): Promise<string[]> => {
+  const { readDir } = await import("@tauri-apps/plugin-fs");
+  const results: string[] = [];
+
+  const AUDIO_EXTENSIONS = new Set([
+    "mp3", "flac", "ogg", "opus", "wav", "m4a", "m4b", "aac",
+    "aiff", "alac", "caf", "mka", "wma", "weba",
+  ]);
+
+  const isAudioFile = (name: string): boolean => {
+    const dot = name.lastIndexOf(".");
+    if (dot < 0) return false;
+    const ext = name.slice(dot + 1).toLowerCase();
+    return AUDIO_EXTENSIONS.has(ext);
+  };
+
+  /** Build a child tree URI for SAF content:// URIs.
+   *  Parent: content://.../tree/primary%3AMusic
+   *  Child:  content://.../tree/primary%3AMusic%2Fdirname           */
+  const childTreeUri = (parentUri: string, childName: string): string =>
+    parentUri + "%2F" + encodeURIComponent(childName);
+
+  /** Build a child document URI (for files) from a SAF tree URI.
+   *  Parent tree: content://.../tree/primary%3AMusic
+   *  Child doc:   content://.../document/primary%3AMusic%2Ffile.mp3  */
+  const childDocUri = (parentUri: string, childName: string): string =>
+    parentUri.replace("/tree/", "/document/") + "%2F" + encodeURIComponent(childName);
+
+  const walk = async (uri: string) => {
+    try {
+      const entries = await readDir(uri);
+      for (const entry of entries) {
+        if (!entry.name) continue;
+        if (entry.isDirectory) {
+          await walk(childTreeUri(uri, entry.name));
+        } else if (isAudioFile(entry.name)) {
+          results.push(childDocUri(uri, entry.name));
+        }
+      }
+    } catch {
+      // Skip directories we can't read (permission denied, etc.)
+    }
+  };
+
+  await walk(dirUri);
+  return results;
+};

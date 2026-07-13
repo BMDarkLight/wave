@@ -115,6 +115,18 @@ pub fn run() {
                 tracing::warn!("System tray unavailable: {e}");
             }
 
+            // Auto-advance when the current track ends. The playback daemon
+            // does this for headless mode; the GUI needs its own tick —
+            // especially on Android, where sink-empty detection via frontend
+            // polling alone is unreliable.
+            let tick_app = app_handle.clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    commands::tick_auto_advance(&tick_app);
+                }
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -156,6 +168,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::play_track,
+            commands::play_tracks,
             commands::pause_track,
             commands::resume_track,
             commands::stop_track,
@@ -189,6 +202,7 @@ pub fn run() {
             commands::update_media_position,
             commands::clear_media_session,
             commands::create_playlist,
+            commands::set_playlist_sync_folder,
             commands::delete_playlist,
             commands::rename_playlist,
             commands::get_playlist_tracks_by_id,
@@ -225,6 +239,11 @@ pub fn run() {
             commands::toggle_close_action,
             commands::host_os,
             commands::import_audio_sources,
+            commands::list_media_folders,
+            commands::save_media_folder,
+            commands::remove_media_folder,
+            commands::scan_media_folder,
+            commands::import_scanned_audio,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

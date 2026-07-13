@@ -23,6 +23,8 @@ pub struct AppSettings {
     pub last_queue_index: Option<usize>,
     pub shuffle: bool,
     pub repeat: RepeatMode,
+    // Media folders scanned for music (content:// URIs on Android, paths on desktop).
+    pub media_folders: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -36,6 +38,7 @@ impl Default for AppSettings {
             last_queue_index: None,
             shuffle: false,
             repeat: RepeatMode::Off,
+            media_folders: Vec::new(),
         }
     }
 }

@@ -805,7 +805,7 @@ fn cmd_playlists_query(query: String) {
 
 fn cmd_playlists_create(name: String) {
     let library = open_library();
-    match library.create_playlist(&name) {
+    match library.create_playlist(&name, None) {
         Ok(info) => println!("Created playlist \"{}\" (ID: {})", info.name, info.id),
         Err(e) => {
             eprintln!("Error: {e}");

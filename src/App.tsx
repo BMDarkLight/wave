@@ -32,6 +32,7 @@ import {
   BiChevronDown,
   BiAlbum,
   BiUser,
+  BiSync,
 } from "react-icons/bi";
 import {
   addTrackToPlaylistById,
@@ -58,6 +59,7 @@ import {
   playNext,
   playPrevious,
   playTrack,
+  playTracks,
   playTrackFromQueue,
   playTrackFromSpecificPlaylist,
   queueInsertNext,
@@ -85,6 +87,11 @@ import {
   setEqEnabled,
   EQ_BAND_LABELS,
   EQ_PRESETS,
+  listMediaFolders,
+  saveMediaFolder,
+  scanDirectoryRecursive,
+  importScannedAudio,
+  setPlaylistSyncFolder,
   type EqSettings,
   type PlaybackMode,
   type PlaybackState,
@@ -196,7 +203,7 @@ function App() {
   const lyricsFetchIdRef = useRef(0);
   const [isAddingTracks, setIsAddingTracks] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
-  const [isLoadingPlaylist, setIsLoadingPlaylist] = useState(false);
+  const [isLoadingPlaylist, setIsLoadingPlaylist] = useState(true);
   const [importedCount, setImportedCount] = useState(0);
   const [showAddTrackMenu, setShowAddTrackMenu] = useState(false);
   const [addTrackMenuAnchor, setAddTrackMenuAnchor] = useState<{
@@ -309,6 +316,9 @@ function App() {
 
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [androidHost, setAndroidHost] = useState(false);
+  const [showFolderSetup, setShowFolderSetup] = useState(false);
+  const [isScanningFolder, setIsScanningFolder] = useState(false);
+  const [scanProgress, setScanProgress] = useState(0);
 
   const clampRightPanelWidth = (width: number, sidebar = sidebarWidth) => {
     const reserved = sidebar + 8 + 340; // handles + minimum main column
@@ -452,14 +462,15 @@ function App() {
     | null
   >(null);
   const [playlistNameInput, setPlaylistNameInput] = useState("");
+  const [playlistSyncFolder, setPlaylistSyncFolderInput] = useState<
+    string | null
+  >(null);
   const [playlistDialogError, setPlaylistDialogError] = useState<string | null>(
     null,
   );
   const playlistNameInputRef = useRef<HTMLInputElement>(null);
   const addTrackBtnRef = useRef<HTMLButtonElement>(null);
   const selectedPlaylistIdRef = useRef<string | null>(null);
-
-  const wasPlayingRef = useRef(false);
 
   const currentTrack = useMemo(() => {
     if (!playbackState.current_path) return null;
@@ -490,6 +501,19 @@ function App() {
   useEffect(() => {
     void isAndroid().then(setAndroidHost);
   }, []);
+
+  // On Android, prompt for a music folder if All Local Files isn't synced yet.
+  useEffect(() => {
+    if (!androidHost || playlists.length === 0) return;
+    const allLocal = playlists.find((p) => p.name === "All Local Files");
+    if (allLocal && !allLocal.sync_folder) {
+      listMediaFolders()
+        .then((folders) => {
+          if (folders.length === 0) setShowFolderSetup(true);
+        })
+        .catch(() => setShowFolderSetup(true));
+    }
+  }, [androidHost, playlists]);
 
   useEffect(() => {
     const clamp = () =>
@@ -737,6 +761,7 @@ function App() {
     const initApp = async () => {
       await new Promise((resolve) => setTimeout(resolve, 300));
       try {
+        setIsLoadingPlaylist(true);
         const list = await loadPlaylists();
         const defaultId = getDefaultPlaylistId(list);
         if (defaultId) {
@@ -758,6 +783,8 @@ function App() {
             "Tauri API not available. Run `npm run tauri dev` instead of plain Vite.",
           );
         }
+      } finally {
+        setIsLoadingPlaylist(false);
       }
     };
 
@@ -781,44 +808,9 @@ function App() {
     };
   }, []);
 
-  // Auto-advance when a track finishes naturally.
-  // Falls back to the selected playlist if the queue is exhausted.
-  useEffect(() => {
-    const wasPlaying = wasPlayingRef.current;
-    const {
-      is_playing,
-      is_paused,
-      current_path,
-      position_seconds,
-      duration_seconds,
-    } = playbackState;
-
-    if (
-      wasPlaying &&
-      !is_playing &&
-      !is_paused &&
-      current_path &&
-      duration_seconds != null &&
-      position_seconds >= duration_seconds - 1
-    ) {
-      (async () => {
-        const path = await playNext();
-        if (!path) {
-          const mode = await getPlaybackMode();
-          if (mode.repeat === "one") return;
-          if (selectedPlaylistId && playlist.length > 0) {
-            const nextIndex = (currentPlaylistIndex + 1) % playlist.length;
-            await playTrackFromSpecificPlaylist(selectedPlaylistId, nextIndex);
-          }
-        }
-        await updatePlaybackState();
-        await loadQueueTracks();
-        await loadPlaybackMode();
-      })();
-    }
-
-    wasPlayingRef.current = is_playing;
-  }, [playbackState]);
+  // Auto-advance is handled natively in Rust (`tick_auto_advance`) so the
+  // queue keeps going on Android even when sink-empty detection is flaky.
+  // Frontend only polls playback state for the UI.
 
   // Poll queue more frequently while the panel is open
   useEffect(() => {
@@ -936,8 +928,13 @@ function App() {
   const handleAddTrack = async (multiple = false) => {
     try {
       setError(null);
-      // Open the native picker *before* any React state updates so Android
-      // still treats this as a direct user gesture.
+      // Desktop: close the menu first so the native dialog isn't blocked by the
+      // overlay/history sentinel. Android needs the picker in the same gesture
+      // chain, so the menu stays open until after the picker returns.
+      if (!androidHost) {
+        setShowAddTrackMenu(false);
+        setAddTrackMenuAnchor(null);
+      }
       const paths = await selectAudioFile(multiple);
       setShowAddTrackMenu(false);
       setAddTrackMenuAnchor(null);
@@ -974,13 +971,14 @@ function App() {
   const handleAddFolder = async () => {
     try {
       setError(null);
-      setIsAddingTracks(true);
+      // Desktop-only path: close menu before opening the folder dialog.
       setShowAddTrackMenu(false);
+      setAddTrackMenuAnchor(null);
       const directory = await selectAudioFolder();
       if (!directory) {
-        setIsAddingTracks(false);
         return;
       }
+      setIsAddingTracks(true);
       const paths = await scanDirectory(directory);
       if (!paths.length) {
         setError("No audio files found in the selected folder.");
@@ -996,23 +994,85 @@ function App() {
       setIsAddingTracks(false);
       runFolderImport(paths, playlistId).catch(() => {});
     } catch (err) {
+      setShowAddTrackMenu(false);
+      setAddTrackMenuAnchor(null);
       setError(formatInvokeError(err, "Failed to add folder"));
       setIsAddingTracks(false);
+    }
+  };
+
+  const handleAddFolderAndroid = async () => {
+    try {
+      setError(null);
+      // Keep the user-gesture chain intact for the SAF folder picker.
+      const directory = await selectAudioFolder();
+      setShowFolderSetup(false);
+      if (!directory) return;
+
+      setIsScanningFolder(true);
+      setScanProgress(0);
+
+      const paths = await scanDirectoryRecursive(directory);
+      if (!paths.length) {
+        setError("No audio files found in the selected folder.");
+        setIsScanningFolder(false);
+        return;
+      }
+
+      // Android media scan always targets All Local Files.
+      const list = playlists.length > 0 ? playlists : await loadPlaylists();
+      const playlistId =
+        list.find((p) => p.name === "All Local Files")?.id ??
+        getDefaultPlaylistId(list);
+      if (!playlistId) {
+        setError("No playlist selected.");
+        setIsScanningFolder(false);
+        return;
+      }
+
+      await setPlaylistSyncFolder(playlistId, directory);
+      await saveMediaFolder(directory).catch(() => {});
+
+      // Import in batches of 10 to show progress
+      const BATCH = 10;
+      let failCount = 0;
+      for (let i = 0; i < paths.length; i += BATCH) {
+        const batch = paths.slice(i, i + BATCH);
+        try {
+          const result = await importScannedAudio(batch, playlistId);
+          failCount += result.errors.length;
+        } catch {
+          failCount += batch.length;
+        }
+        setScanProgress(Math.min(i + BATCH, paths.length));
+      }
+
+      setIsScanningFolder(false);
+      if (failCount > 0) {
+        setError(`Imported with ${failCount} error(s).`);
+      }
+      setSelectedPlaylistId(playlistId);
+      await loadPlaylistTracks(playlistId);
+      await loadPlaylists();
+    } catch (err) {
+      setIsScanningFolder(false);
+      setError(formatInvokeError(err, "Failed to scan folder"));
     }
   };
 
   const handleAddFolderAsPlaylist = async () => {
     try {
       setError(null);
-      setIsAddingTracks(true);
+      // Desktop-only: close menu, then bind sync_folder and import.
       setShowAddTrackMenu(false);
+      setAddTrackMenuAnchor(null);
       const directory = await selectAudioFolder();
       if (!directory) {
-        setIsAddingTracks(false);
         return;
       }
+      setIsAddingTracks(true);
       const folderName = getFileName(directory);
-      const info = await createPlaylist(folderName);
+      const info = await createPlaylist(folderName, directory);
       setSelectedPlaylistId(info.id);
       await loadPlaylists();
       await loadPlaylistTracks(info.id);
@@ -1025,6 +1085,8 @@ function App() {
       setIsAddingTracks(false);
       runFolderImport(paths, info.id).catch(() => {});
     } catch (err) {
+      setShowAddTrackMenu(false);
+      setAddTrackMenuAnchor(null);
       setError(formatInvokeError(err, "Failed to add folder as playlist"));
       setIsAddingTracks(false);
     }
@@ -1401,6 +1463,7 @@ function App() {
   const openCreatePlaylistDialog = () => {
     setMobileNavOpen(false);
     setPlaylistNameInput("");
+    setPlaylistSyncFolderInput(null);
     setPlaylistDialogError(null);
     setPlaylistDialog({ mode: "create" });
   };
@@ -1411,13 +1474,30 @@ function App() {
   ) => {
     setMobileNavOpen(false);
     setPlaylistNameInput(currentName);
+    setPlaylistSyncFolderInput(null);
     setPlaylistDialogError(null);
     setPlaylistDialog({ mode: "rename", playlistId, currentName });
   };
 
   const closePlaylistDialog = () => {
     setPlaylistDialog(null);
+    setPlaylistSyncFolderInput(null);
     setPlaylistDialogError(null);
+  };
+
+  const pickPlaylistSyncFolder = async () => {
+    try {
+      const directory = await selectAudioFolder();
+      if (!directory) return;
+      setPlaylistSyncFolderInput(directory);
+      if (!playlistNameInput.trim()) {
+        setPlaylistNameInput(getFileName(directory));
+      }
+    } catch (err) {
+      setPlaylistDialogError(
+        formatInvokeError(err, "Failed to select folder"),
+      );
+    }
   };
 
   const submitPlaylistDialog = async () => {
@@ -1434,10 +1514,45 @@ function App() {
       setPlaylistDialogError(null);
 
       if (playlistDialog.mode === "create") {
-        const info = await createPlaylist(name);
+        const info = await createPlaylist(name, playlistSyncFolder);
         await loadPlaylists();
         setSelectedPlaylistId(info.id);
         await loadPlaylistTracks(info.id);
+        if (playlistSyncFolder) {
+          closePlaylistDialog();
+          const paths = androidHost
+            ? await scanDirectoryRecursive(playlistSyncFolder)
+            : await scanDirectory(playlistSyncFolder);
+          if (!paths.length) {
+            setError(`No audio files found in the selected folder.`);
+            return;
+          }
+          if (androidHost) {
+            setIsScanningFolder(true);
+            setScanProgress(0);
+            const BATCH = 10;
+            let failCount = 0;
+            for (let i = 0; i < paths.length; i += BATCH) {
+              const batch = paths.slice(i, i + BATCH);
+              try {
+                const result = await importScannedAudio(batch, info.id);
+                failCount += result.errors.length;
+              } catch {
+                failCount += batch.length;
+              }
+              setScanProgress(Math.min(i + BATCH, paths.length));
+            }
+            setIsScanningFolder(false);
+            if (failCount > 0) {
+              setError(`Imported with ${failCount} error(s).`);
+            }
+            await loadPlaylistTracks(info.id);
+            await loadPlaylists();
+          } else {
+            runFolderImport(paths, info.id).catch(() => {});
+          }
+          return;
+        }
       } else {
         await renamePlaylist(playlistDialog.playlistId, name);
         await loadPlaylists();
@@ -1956,6 +2071,25 @@ function App() {
                   onClick={() => handleSelectPlaylist(pl.id)}
                 >
                   <span className="playlist-item-name" title={pl.name}>
+                    {(isScanningFolder &&
+                      (pl.sync_folder || pl.name === "All Local Files") &&
+                      (selectedPlaylistId === pl.id ||
+                        pl.name === "All Local Files")) ||
+                    (isImporting &&
+                      pl.sync_folder &&
+                      selectedPlaylistId === pl.id) ? (
+                      <BiSync
+                        className="playlist-sync-icon playlist-sync-spin"
+                        title="Syncing with folder"
+                        aria-label="Syncing with folder"
+                      />
+                    ) : pl.sync_folder ? (
+                      <BiSync
+                        className="playlist-sync-icon"
+                        title="Synced with a folder"
+                        aria-label="Synced with a folder"
+                      />
+                    ) : null}
                     {pl.name}
                   </span>
                   {pl.name !== "All Local Files" && (
@@ -2020,8 +2154,18 @@ function App() {
           album={viewingAlbum.name}
           albumArtist={viewingAlbum.albumArtist}
           onBack={() => setViewingAlbum(null)}
-          onPlayTrack={(path) => {
-            void playTrack(path).then(() => updatePlaybackState());
+          onPlayTrack={(path, tracks) => {
+            const index = Math.max(
+              0,
+              tracks.findIndex((t) => t.path === path),
+            );
+            void playTracks(
+              tracks.map((t) => t.path),
+              index,
+            ).then(() => {
+              updatePlaybackState();
+              loadQueueTracks();
+            });
           }}
           onArtistClick={(name) => {
             setViewingAlbum(null);
@@ -2033,8 +2177,18 @@ function App() {
         <ArtistPage
           artist={viewingArtist}
           onBack={() => setViewingArtist(null)}
-          onPlayTrack={(path) => {
-            void playTrack(path).then(() => updatePlaybackState());
+          onPlayTrack={(path, tracks) => {
+            const index = Math.max(
+              0,
+              tracks.findIndex((t) => t.path === path),
+            );
+            void playTracks(
+              tracks.map((t) => t.path),
+              index,
+            ).then(() => {
+              updatePlaybackState();
+              loadQueueTracks();
+            });
           }}
           onAlbumClick={(name, albumArtist) => {
             setViewingArtist(null);
@@ -2049,7 +2203,30 @@ function App() {
           <p>
             {playlist.length
               ? `${playlist.length} tracks in this playlist`
-              : "No tracks in this playlist"}
+              : isLoadingPlaylist
+                ? "Loading tracks…"
+                : "No tracks in this playlist"}
+            {(isScanningFolder &&
+              (selectedPlaylist?.sync_folder ||
+                selectedPlaylist?.name === "All Local Files")) ||
+            (isImporting && selectedPlaylist?.sync_folder) ? (
+              <>
+                {" · "}
+                <span className="playlist-sync-badge playlist-sync-badge-active">
+                  <BiSync className="playlist-sync-spin" /> Syncing…
+                </span>
+              </>
+            ) : selectedPlaylist?.sync_folder ? (
+              <>
+                {" · "}
+                <span
+                  className="playlist-sync-badge"
+                  title={selectedPlaylist.sync_folder}
+                >
+                  <BiSync /> Synced folder
+                </span>
+              </>
+            ) : null}
           </p>
           <div className="hero-actions">
             <button
@@ -2067,8 +2244,8 @@ function App() {
                   className="btn-secondary"
                   onClick={() => {
                     if (androidHost) {
-                      // Nested menus break Android's user-gesture requirement for pickers.
-                      void handleAddTrack(true);
+                      // On Android, open folder picker for media scanning.
+                      void handleAddFolderAndroid();
                       return;
                     }
                     if (addTrackBtnRef.current) {
@@ -2083,7 +2260,7 @@ function App() {
                   }}
                   disabled={isAddingTracks}
                   type="button"
-                  title={androidHost ? "Add audio files" : "Add tracks"}
+                  title={androidHost ? "Scan media folder" : "Add tracks"}
                 >
                   <BiPlus />
                 </button>
@@ -2506,7 +2683,15 @@ function App() {
           </div>
         )}
         {lyricsPanelTrack && (
-          <div className="right-panel-content">
+          <div className="right-panel-content lyrics-panel">
+            <button
+              className="right-panel-close lyrics-close-float"
+              onClick={closeRightPanelDelayed}
+              type="button"
+              title="Close"
+            >
+              <BiX />
+            </button>
             <div className="lyrics-panel-scroll">
               <div className="lyrics-panel-cover">
                 <Artwork
@@ -2520,14 +2705,6 @@ function App() {
               <div className="lyrics-panel-header">
                 <div className="right-panel-header">
                   <h2>{getTrackTitle(lyricsPanelTrack)}</h2>
-                  <button
-                    className="right-panel-close"
-                    onClick={closeRightPanelDelayed}
-                    type="button"
-                    title="Close"
-                  >
-                    <BiX />
-                  </button>
                 </div>
                 {lyricsPanelTrack.artist && (
                   <p className="lyrics-artist">
@@ -2679,18 +2856,28 @@ function App() {
               </button>
               {!androidHost && (
                 <>
-                  <button type="button" onClick={handleAddFolder}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleAddFolder();
+                    }}
+                  >
                     <BiFolderOpen /> Add folder
                   </button>
-                  <button type="button" onClick={handleAddFolderAsPlaylist}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleAddFolderAsPlaylist();
+                    }}
+                  >
                     <BiFolderOpen /> Add folder as playlist
                   </button>
                 </>
               )}
               {androidHost && (
                 <p className="add-track-menu-hint">
-                  On Android, pick one or more audio files. Folder import isn’t
-                  supported yet.
+                  On Android, tap the + button to scan a music folder into All
+                  Local Files.
                 </p>
               )}
             </div>
@@ -2899,6 +3086,41 @@ function App() {
                 placeholder="My playlist"
                 autoComplete="off"
               />
+              {playlistDialog.mode === "create" && (
+                <div className="playlist-sync-field">
+                  <span className="modal-label">Sync with folder</span>
+                  <p className="modal-hint">
+                    Optional. Keep this playlist tied to a music folder
+                    {androidHost ? " (media scan)" : ""}.
+                  </p>
+                  {playlistSyncFolder ? (
+                    <div className="playlist-sync-selected">
+                      <BiSync className="playlist-sync-icon" />
+                      <span
+                        className="playlist-sync-path"
+                        title={playlistSyncFolder}
+                      >
+                        {getFileName(playlistSyncFolder)}
+                      </span>
+                      <button
+                        type="button"
+                        className="btn-ghost btn-sm"
+                        onClick={() => setPlaylistSyncFolderInput(null)}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-secondary playlist-sync-pick"
+                      onClick={() => void pickPlaylistSyncFolder()}
+                    >
+                      <BiFolderOpen /> Choose folder
+                    </button>
+                  )}
+                </div>
+              )}
               {playlistDialogError && (
                 <p className="modal-error">{playlistDialogError}</p>
               )}
@@ -3351,6 +3573,49 @@ function App() {
           </>,
           document.body,
         )}
+
+      {showFolderSetup && androidHost && (
+        <div className="modal-backdrop" onClick={() => {}}>
+          <div
+            className="modal-dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>Welcome to Wave</h2>
+            <p className="modal-desc">
+              Select a folder containing your music to get started. Wave will
+              scan it and import all supported audio files.
+            </p>
+            <div className="modal-actions">
+              <button
+                className="btn-primary"
+                onClick={() => void handleAddFolderAndroid()}
+                type="button"
+              >
+                <BiFolderOpen /> Select Music Folder
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isScanningFolder && (
+        <div className="modal-backdrop">
+          <div
+            className="modal-dialog"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>Scanning & Importing</h2>
+            <p className="modal-desc">
+              {scanProgress > 0
+                ? `${scanProgress} files processed so far…`
+                : "Scanning folder for audio files…"}
+            </p>
+            <div className="scan-progress-bar">
+              <div className="scan-progress-fill" />
+            </div>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="error-toast" role="alert" aria-live="assertive">

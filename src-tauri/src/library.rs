@@ -25,6 +25,9 @@ pub struct PlaylistInfo {
     pub track_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Optional folder path/URI this playlist stays synced with.
+    /// Desktop: filesystem path. Android: SAF `content://…/tree/…` URI.
+    pub sync_folder: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -187,6 +190,7 @@ impl Library {
         ensure_track_column(&connection, "fingerprint_sha256", "TEXT")?;
         ensure_track_column(&connection, "acoustid_fingerprint", "TEXT")?;
         ensure_track_column(&connection, "musicbrainz_recording_id", "TEXT")?;
+        ensure_playlist_column(&connection, "sync_folder", "TEXT")?;
 
         // Seed the default profile and playlist. We do this once at startup.
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
@@ -634,7 +638,8 @@ impl Library {
         let default_id = self.default_playlist_id_cache.get().cloned();
 
         let mut sql = "
-            SELECT p.id, p.profile_id, p.name, COUNT(pt.track_id), p.created_at, p.updated_at
+            SELECT p.id, p.profile_id, p.name, COUNT(pt.track_id), p.created_at, p.updated_at,
+                   p.sync_folder
             FROM playlists p
             LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
         "
@@ -675,20 +680,34 @@ impl Library {
 
     // ── Playlist CRUD ────────────────────────────────────────────────────────
 
-    pub fn create_playlist(&self, name: &str) -> Result<PlaylistInfo, String> {
-        self.insert_playlist(name, false)
+    pub fn create_playlist(
+        &self,
+        name: &str,
+        sync_folder: Option<&str>,
+    ) -> Result<PlaylistInfo, String> {
+        self.insert_playlist(name, false, sync_folder)
     }
 
     /// Create a playlist for import flows, auto-suffixing duplicate names.
     pub fn create_playlist_for_import(&self, name: &str) -> Result<PlaylistInfo, String> {
-        self.insert_playlist(name, true)
+        self.insert_playlist(name, true, None)
     }
 
-    fn insert_playlist(&self, name: &str, allow_duplicate_suffix: bool) -> Result<PlaylistInfo, String> {
+    fn insert_playlist(
+        &self,
+        name: &str,
+        allow_duplicate_suffix: bool,
+        sync_folder: Option<&str>,
+    ) -> Result<PlaylistInfo, String> {
         let name = name.trim();
         if name.is_empty() {
             return Err("Playlist name cannot be empty".to_string());
         }
+
+        let sync_folder = sync_folder
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
 
         let connection = self.lock_connection()?;
         let profile_id = ensure_profile_with_connection(&connection, "default", "Default")?;
@@ -704,14 +723,40 @@ impl Library {
         let now = now_timestamp();
         connection
             .execute(
-                "INSERT INTO playlists (id, profile_id, name, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4)",
-                params![id, profile_id, final_name, now],
+                "INSERT INTO playlists (id, profile_id, name, created_at, updated_at, sync_folder)
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5)",
+                params![id, profile_id, final_name, now, sync_folder],
             )
             .map_err(|error| format!("Failed to create playlist: {error}"))?;
 
         self.playlist_info(&connection, &id)?
             .ok_or_else(|| "Playlist vanished immediately after creation".to_string())
+    }
+
+    /// Bind (or clear) the folder a playlist stays synced with.
+    pub fn set_playlist_sync_folder(
+        &self,
+        playlist_id: &str,
+        sync_folder: Option<&str>,
+    ) -> Result<PlaylistInfo, String> {
+        let sync_folder = sync_folder
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let connection = self.lock_connection()?;
+        let now = now_timestamp();
+        let updated = connection
+            .execute(
+                "UPDATE playlists SET sync_folder = ?1, updated_at = ?2 WHERE id = ?3",
+                params![sync_folder, now, playlist_id],
+            )
+            .map_err(|error| format!("Failed to update playlist sync folder: {error}"))?;
+        if updated == 0 {
+            return Err("Playlist not found".to_string());
+        }
+        self.playlist_info(&connection, playlist_id)?
+            .ok_or_else(|| "Playlist not found".to_string())
     }
 
     fn playlist_name_exists(
@@ -1164,7 +1209,8 @@ impl Library {
     ) -> Result<Option<PlaylistInfo>, String> {
         connection
             .query_row(
-                "SELECT p.id, p.profile_id, p.name, COUNT(pt.track_id), p.created_at, p.updated_at
+                "SELECT p.id, p.profile_id, p.name, COUNT(pt.track_id), p.created_at, p.updated_at,
+                        p.sync_folder
                  FROM playlists p
                  LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
                  WHERE p.id = ?1
@@ -1216,7 +1262,8 @@ impl Library {
         let connection = self.lock_connection()?;
         let mut stmt = connection
             .prepare(
-                "SELECT p.id, p.profile_id, p.name, COUNT(pt.track_id), p.created_at, p.updated_at
+                "SELECT p.id, p.profile_id, p.name, COUNT(pt.track_id), p.created_at, p.updated_at,
+                        p.sync_folder
                  FROM playlists p
                  LEFT JOIN playlist_tracks pt ON pt.playlist_id = p.id
                  WHERE p.name LIKE ?1
@@ -1466,6 +1513,7 @@ fn row_to_playlist(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaylistInfo> {
         track_count: row.get(3)?,
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
+        sync_folder: row.get(6)?,
     })
 }
 
@@ -1669,14 +1717,31 @@ fn ensure_track_column(
     column_name: &str,
     column_type: &str,
 ) -> Result<(), String> {
+    ensure_table_column(connection, "tracks", column_name, column_type)
+}
+
+fn ensure_playlist_column(
+    connection: &Connection,
+    column_name: &str,
+    column_type: &str,
+) -> Result<(), String> {
+    ensure_table_column(connection, "playlists", column_name, column_type)
+}
+
+fn ensure_table_column(
+    connection: &Connection,
+    table_name: &str,
+    column_name: &str,
+    column_type: &str,
+) -> Result<(), String> {
     let mut statement = connection
-        .prepare("PRAGMA table_info(tracks)")
-        .map_err(|error| format!("Failed to inspect tracks schema: {error}"))?;
+        .prepare(&format!("PRAGMA table_info({table_name})"))
+        .map_err(|error| format!("Failed to inspect {table_name} schema: {error}"))?;
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|error| format!("Failed to inspect tracks columns: {error}"))?
+        .map_err(|error| format!("Failed to inspect {table_name} columns: {error}"))?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("Failed to read tracks columns: {error}"))?;
+        .map_err(|error| format!("Failed to read {table_name} columns: {error}"))?;
 
     if columns.iter().any(|column| column == column_name) {
         return Ok(());
@@ -1684,10 +1749,10 @@ fn ensure_track_column(
 
     connection
         .execute(
-            &format!("ALTER TABLE tracks ADD COLUMN {column_name} {column_type}"),
+            &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"),
             [],
         )
-        .map_err(|error| format!("Failed to add tracks.{column_name}: {error}"))?;
+        .map_err(|error| format!("Failed to add {table_name}.{column_name}: {error}"))?;
     Ok(())
 }
 

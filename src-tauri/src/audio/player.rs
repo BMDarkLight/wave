@@ -38,12 +38,14 @@ impl PlaybackClock {
         }
     }
 
-    fn position(&self) -> Duration {
-        let elapsed = self
-            .started_at
+    fn raw_elapsed(&self) -> Duration {
+        self.started_at
             .map(|started_at| self.elapsed_before_start + started_at.elapsed())
-            .unwrap_or(self.elapsed_before_start);
+            .unwrap_or(self.elapsed_before_start)
+    }
 
+    fn position(&self) -> Duration {
+        let elapsed = self.raw_elapsed();
         self.duration
             .map(|duration| elapsed.min(duration))
             .unwrap_or(elapsed)
@@ -115,23 +117,18 @@ impl Queue {
         self.tracks.get(index).map(String::as_str)
     }
 
-    /// Advance to the next track. Returns `None` when the queue is exhausted
-    /// and `repeat == Off`. With `repeat == All` it wraps around.
-    pub fn next(&mut self, repeat: &RepeatMode) -> Option<&str> {
+    /// Index that `next` would select, without mutating queue state.
+    fn peek_next_index(&self, repeat: &RepeatMode) -> Option<usize> {
         if self.tracks.is_empty() {
             return None;
         }
-        let next_idx = if let Some(ref order) = self.shuffle_order.clone() {
+        if let Some(ref order) = self.shuffle_order {
             let next_pos = self.shuffle_pos + 1;
             match repeat {
-                RepeatMode::All => {
-                    self.shuffle_pos = next_pos % order.len();
-                    Some(order[self.shuffle_pos])
-                }
+                RepeatMode::All => Some(order[next_pos % order.len()]),
                 RepeatMode::Off | RepeatMode::One => {
                     if next_pos < order.len() {
-                        self.shuffle_pos = next_pos;
-                        Some(order[self.shuffle_pos])
+                        Some(order[next_pos])
                     } else {
                         None
                     }
@@ -155,10 +152,28 @@ impl Queue {
                     }
                 }
             }
-        };
+        }
+    }
 
-        self.current_index = next_idx;
-        next_idx.and_then(|i| self.tracks.get(i).map(String::as_str))
+    /// Peek at the next track path without advancing the queue.
+    pub fn peek_next(&self, repeat: &RepeatMode) -> Option<&str> {
+        self.peek_next_index(repeat)
+            .and_then(|i| self.tracks.get(i).map(String::as_str))
+    }
+
+    /// Advance to the next track. Returns `None` when the queue is exhausted
+    /// and `repeat == Off`. With `repeat == All` it wraps around.
+    pub fn next(&mut self, repeat: &RepeatMode) -> Option<&str> {
+        let next_idx = self.peek_next_index(repeat)?;
+        if let Some(ref order) = self.shuffle_order.clone() {
+            let next_pos = self.shuffle_pos + 1;
+            match repeat {
+                RepeatMode::All => self.shuffle_pos = next_pos % order.len(),
+                RepeatMode::Off | RepeatMode::One => self.shuffle_pos = next_pos,
+            }
+        }
+        self.current_index = Some(next_idx);
+        self.tracks.get(next_idx).map(String::as_str)
     }
 
     /// Go back to the previous track.
@@ -378,6 +393,10 @@ pub struct AudioPlayer {
     /// `Equalizer` source inside the current sink).
     pub eq_config: Arc<Mutex<EqConfig>>,
     pub(crate) eq_version: Arc<Mutex<u64>>,
+    /// Next queue path already appended to the sink so playback can continue
+    /// when the current source ends — critical on Android while backgrounded,
+    /// where a delayed tick alone can miss the transition.
+    prefetched_next: Option<(String, Option<Duration>)>,
 }
 
 impl AudioPlayer {
@@ -396,6 +415,7 @@ impl AudioPlayer {
             repeat: RepeatMode::default(),
             eq_config: Arc::new(Mutex::new(EqConfig::default())),
             eq_version: Arc::new(Mutex::new(0)),
+            prefetched_next: None,
         }
     }
 
@@ -486,6 +506,7 @@ impl AudioPlayer {
             repeat: RepeatMode::default(),
             eq_config: Arc::new(Mutex::new(EqConfig::default())),
             eq_version: Arc::new(Mutex::new(0)),
+            prefetched_next: None,
         })
     }
 
@@ -540,6 +561,7 @@ impl AudioPlayer {
                 sink.stop();
             }));
         }
+        self.prefetched_next = None;
 
         let (source, duration) =
             Self::build_source(path, self.eq_config.clone(), self.eq_version.clone())?;
@@ -574,7 +596,43 @@ impl AudioPlayer {
             duration,
         };
 
+        // Prefetch the following queue item into the same sink so rodio keeps
+        // playing when this source ends — even if the auto-advance tick is
+        // delayed (common when Android backgrounds the activity).
+        self.prefetch_next_into_sink();
+
         Ok(())
+    }
+
+    /// Append the upcoming queue track to the active sink (best-effort).
+    fn prefetch_next_into_sink(&mut self) {
+        if self.repeat == RepeatMode::One {
+            return;
+        }
+        let Some(next_path) = self.queue.peek_next(&self.repeat).map(str::to_string) else {
+            return;
+        };
+        let Ok((source, duration)) =
+            Self::build_source(&next_path, self.eq_config.clone(), self.eq_version.clone())
+        else {
+            return;
+        };
+        if let Some(sink) = self.sink.as_ref() {
+            sink.append(source);
+            self.prefetched_next = Some((next_path, duration));
+        }
+    }
+
+    /// Adopt a track that is already playing via sink prefetch (no restart).
+    fn adopt_prefetched(&mut self, path: &str, duration: Option<Duration>) {
+        self.current_path = Some(PathBuf::from(path));
+        self.clock = PlaybackClock {
+            started_at: Some(Instant::now()),
+            elapsed_before_start: Duration::ZERO,
+            duration,
+        };
+        self.prefetched_next = None;
+        self.prefetch_next_into_sink();
     }
 
     pub fn pause(&mut self) -> Result<(), AudioError> {
@@ -605,6 +663,7 @@ impl AudioPlayer {
             sink.stop();
         }
         self.current_path = None;
+        self.prefetched_next = None;
         self.clock = PlaybackClock::stopped();
         Ok(())
     }
@@ -620,6 +679,8 @@ impl AudioPlayer {
                 let was_playing = self.is_playing();
                 self.clock.elapsed_before_start = offset;
                 self.clock.started_at = was_playing.then(Instant::now);
+                // Seeking invalidates any sink-prefetched follow-up track.
+                self.prefetched_next = None;
 
                 Ok(())
             }
@@ -650,6 +711,66 @@ impl AudioPlayer {
             Some(sink) => sink.is_paused(),
             None => false,
         }
+    }
+
+    /// True when the sink has drained (natural end-of-track).
+    pub fn sink_exhausted(&self) -> bool {
+        match &self.sink {
+            Some(sink) => sink.empty(),
+            None => self.current_path.is_some(),
+        }
+    }
+
+    /// True when the current track has reached end-of-stream and should advance.
+    ///
+    /// On some Android/cpal backends the sink never reports empty (or pauses
+    /// instead), so we also treat wall-clock past known duration as finished.
+    /// When the next track was prefetched into the sink, duration-end means the
+    /// prefetched source is already audible and we only need to adopt it.
+    pub fn should_auto_advance(&self) -> bool {
+        if self.current_path.is_none() {
+            return false;
+        }
+
+        let at_duration_end = self.clock.duration.is_some_and(|duration| {
+            let grace = Duration::from_millis(350);
+            self.clock.raw_elapsed() >= duration.saturating_add(grace)
+        });
+
+        // Prefetched next is already in the sink — advance once the current
+        // source is done so metadata/queue stay aligned without restarting audio.
+        if self.prefetched_next.is_some() {
+            if at_duration_end {
+                return true;
+            }
+            // Decoder didn't report duration: treat a single remaining source
+            // after we've actually been playing as the handoff point.
+            let handed_off = self.clock.raw_elapsed() >= Duration::from_secs(1)
+                && self
+                    .sink
+                    .as_ref()
+                    .is_some_and(|sink| !sink.is_paused() && sink.len() <= 1);
+            if handed_off {
+                return true;
+            }
+        }
+
+        if self.is_paused() {
+            // Some Android backends pause when the source ends rather than
+            // leaving an idle non-paused empty sink.
+            return self.sink_exhausted() || at_duration_end;
+        }
+
+        if !self.is_playing() {
+            return true;
+        }
+
+        at_duration_end
+    }
+
+    /// Back-compat alias used by older call sites.
+    pub fn has_finished_naturally(&self) -> bool {
+        self.should_auto_advance()
     }
 
     pub fn get_current_path(&self) -> Option<&PathBuf> {
@@ -720,6 +841,19 @@ impl AudioPlayer {
                 return Ok(Some(path_str));
             }
         }
+
+        // If we already appended the next source, adopt it without tearing down
+        // the sink — keeps audio continuous when the app is backgrounded.
+        if let Some((prefetched, duration)) = self.prefetched_next.clone() {
+            let path = self.queue.next(&self.repeat).map(str::to_string);
+            if path.as_deref() == Some(prefetched.as_str()) {
+                self.adopt_prefetched(&prefetched, duration);
+                return Ok(Some(prefetched));
+            }
+            // Queue and prefetch diverged (shuffle/repeat changed) — restart.
+            self.prefetched_next = None;
+        }
+
         let path = self.queue.next(&self.repeat).map(str::to_string);
         if let Some(ref next_path) = path {
             self.play(next_path)?;
