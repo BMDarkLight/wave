@@ -238,6 +238,11 @@ impl Library {
     }
 
     pub fn add_track_to_playlist(&self, playlist_id: &str, path: String) -> Result<Track, String> {
+        let is_default = self
+            .default_playlist_id_cache
+            .get()
+            .map_or(false, |id| id == playlist_id);
+
         let existing = {
             let connection = self.lock_connection()?;
             connection
@@ -258,6 +263,21 @@ impl Library {
             Some(track) => track,
             None => extract_track(&path)?,
         };
+
+        // "All Local Files" is virtual — just ensure the track exists in the
+        // tracks table. No playlist_tracks entry is needed.
+        if is_default {
+            let mut connection = self.lock_connection()?;
+            let tx = connection
+                .transaction()
+                .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+            let track_id = upsert_track(&tx, &track)?;
+            track.id = track_id;
+            tx.commit()
+                .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+            return Ok(track);
+        }
+
         let now = now_timestamp();
         let mut connection = self.lock_connection()?;
         let tx = connection
@@ -295,20 +315,52 @@ impl Library {
         Ok(track)
     }
 
-    pub fn remove_track_from_default_playlist(&self, path: String) -> Result<(), String> {
-        let playlist_id = self.default_playlist_id()?;
-        self.remove_track_from_playlist_by_path(&playlist_id, &path)
-    }
-
     pub fn remove_track_from_playlist_by_path(
         &self,
         playlist_id: &str,
         path: &str,
     ) -> Result<(), String> {
+        let is_default = self
+            .default_playlist_id_cache
+            .get()
+            .map_or(false, |id| id == playlist_id);
+
         let mut connection = self.lock_connection()?;
         let tx = connection
             .transaction()
             .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
+        if is_default {
+            // "All Local Files" is virtual — remove the track entirely
+            let track_id: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM tracks WHERE path = ?1",
+                    params![path],
+                    |row| row.get(0),
+                )
+                .ok();
+
+            let track_id = match track_id {
+                Some(id) => id,
+                None => return Err("Track not found".to_string()),
+            };
+
+            tx.execute(
+                "DELETE FROM playlist_tracks WHERE track_id = ?1",
+                params![track_id],
+            )
+            .map_err(|e| format!("Failed to remove from playlist_tracks: {e}"))?;
+
+            tx.execute(
+                "DELETE FROM tracks WHERE id = ?1",
+                params![track_id],
+            )
+            .map_err(|e| format!("Failed to remove track: {e}"))?;
+
+            tx.commit()
+                .map_err(|e| format!("Failed to commit transaction: {e}"))?;
+            return Ok(());
+        }
 
         let deleted = tx
             .execute(
@@ -336,17 +388,13 @@ impl Library {
     pub fn get_playlist_tracks(&self, playlist_id: &str) -> Result<Vec<Track>, String> {
         let connection = self.lock_connection()?;
 
-        // "All Local Files" is an aggregate of every track across all playlists
+        // "All Local Files" returns every track in the library
         if self.default_playlist_id_cache.get().map_or(false, |id| id == playlist_id) {
             let mut statement = connection
                 .prepare(
                     &format!(
                         "SELECT {TRACK_SELECT_COLUMNS}
                      FROM tracks t
-                     WHERE t.id IN (
-                         SELECT DISTINCT pt.track_id
-                         FROM playlist_tracks pt
-                     )
                      ORDER BY t.name"
                     ),
                 )
@@ -570,6 +618,15 @@ impl Library {
 
     pub fn list_playlists(&self, profile_id: Option<String>) -> Result<Vec<PlaylistInfo>, String> {
         let connection = self.lock_connection()?;
+
+        // For the default playlist ("All Local Files"), count from tracks table
+        // since it's virtual and doesn't rely on playlist_tracks.
+        let default_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
+            .unwrap_or(0);
+
+        let default_id = self.default_playlist_id_cache.get().cloned();
+
         let mut sql = "
             SELECT p.id, p.profile_id, p.name, COUNT(pt.track_id), p.created_at, p.updated_at
             FROM playlists p
@@ -587,15 +644,27 @@ impl Library {
             .prepare(&sql)
             .map_err(|error| format!("Failed to prepare playlists query: {error}"))?;
 
-        let rows = if let Some(profile_id) = profile_id {
+        let rows: Vec<PlaylistInfo> = if let Some(profile_id) = profile_id {
             statement.query_map(params![profile_id], row_to_playlist)
         } else {
             statement.query_map([], row_to_playlist)
         }
-        .map_err(|error| format!("Failed to query playlists: {error}"))?;
+        .map_err(|error| format!("Failed to query playlists: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Failed to read playlists: {error}"))?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("Failed to read playlists: {error}"))
+        // Patch the default playlist count
+        let rows = rows
+            .into_iter()
+            .map(|mut p| {
+                if Some(&p.id) == default_id.as_ref() {
+                    p.track_count = default_count;
+                }
+                p
+            })
+            .collect();
+
+        Ok(rows)
     }
 
     // ── Playlist CRUD ────────────────────────────────────────────────────────
@@ -750,13 +819,31 @@ impl Library {
     }
 
     pub fn clear_playlist(&self, playlist_id: &str) -> Result<(), String> {
-        let connection = self.lock_connection()?;
-        connection
-            .execute(
+        let is_default = self
+            .default_playlist_id_cache
+            .get()
+            .map_or(false, |id| id == playlist_id);
+
+        let mut connection = self.lock_connection()?;
+        let tx = connection
+            .transaction()
+            .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
+        if is_default {
+            tx.execute("DELETE FROM playlist_tracks", [])
+                .map_err(|e| format!("Failed to clear playlist_tracks: {e}"))?;
+            tx.execute("DELETE FROM tracks", [])
+                .map_err(|e| format!("Failed to clear tracks: {e}"))?;
+        } else {
+            tx.execute(
                 "DELETE FROM playlist_tracks WHERE playlist_id = ?1",
                 params![playlist_id],
             )
             .map_err(|error| format!("Failed to clear playlist: {error}"))?;
+        }
+
+        tx.commit()
+            .map_err(|e| format!("Failed to commit transaction: {e}"))?;
         Ok(())
     }
 

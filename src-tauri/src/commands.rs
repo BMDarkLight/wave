@@ -509,7 +509,9 @@ pub async fn remove_track_from_playlist(
     path: String,
     library: tauri::State<'_, LibraryState>,
 ) -> Result<(), String> {
-    lock_library(&library)?.remove_track_from_default_playlist(path)
+    let lib = lock_library(&library)?;
+    let playlist_id = lib.default_playlist_id()?;
+    lib.remove_track_from_playlist_by_path(&playlist_id, &path)
 }
 
 #[tauri::command]

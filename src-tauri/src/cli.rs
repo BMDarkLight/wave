@@ -635,7 +635,10 @@ fn cmd_tracks_remove(track_id: String, playlist_id: Option<String>) {
     let result = if let Some(pid) = playlist_id {
         library.remove_track_from_playlist_by_path(&pid, &path)
     } else {
-        library.remove_track_from_default_playlist(path)
+        match library.default_playlist_id() {
+            Ok(pid) => library.remove_track_from_playlist_by_path(&pid, &path),
+            Err(e) => Err(e),
+        }
     };
     match result {
         Ok(()) => println!("Track removed from playlist."),
