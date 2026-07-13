@@ -1,6 +1,5 @@
 package app.bmdarklight.wave;
 
-import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
@@ -9,6 +8,7 @@ import android.os.Build;
 import android.provider.DocumentsContract;
 import android.util.Log;
 
+import androidx.activity.ComponentActivity;
 import androidx.activity.result.ActivityResult;
 import androidx.activity.result.ActivityResultCallback;
 import androidx.activity.result.ActivityResultLauncher;
@@ -28,7 +28,7 @@ public class FolderPickerCallback implements ActivityResultCallback<ActivityResu
     
     private final CompletableFuture<FolderPickerResult> future = new CompletableFuture<>();
     private ActivityResultLauncher<Intent> launcher;
-    private final Activity activity;
+    private final ComponentActivity activity;
 
     public static class FolderPickerResult {
         public final String uri;
@@ -40,7 +40,7 @@ public class FolderPickerCallback implements ActivityResultCallback<ActivityResu
         }
     }
 
-    public FolderPickerCallback(Activity activity) {
+    public FolderPickerCallback(ComponentActivity activity) {
         this.activity = activity;
     }
 
@@ -64,7 +64,7 @@ public class FolderPickerCallback implements ActivityResultCallback<ActivityResu
 
     @Override
     public void onActivityResult(ActivityResult result) {
-        if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
+        if (result.getResultCode() == ComponentActivity.RESULT_OK && result.getData() != null) {
             Uri treeUri = result.getData().getData();
             if (treeUri != null) {
                 // Persist the URI permission

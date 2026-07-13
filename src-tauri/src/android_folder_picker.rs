@@ -35,7 +35,7 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
         .map_err(|e| format!("Failed to find FolderPickerCallback class: {}", e))?;
 
     // Create an instance of FolderPickerCallback
-    let callback_obj = env.new_object(&callback_class, "(Landroid/app/Activity;)V", &[JValue::Object(&activity_obj)])
+    let callback_obj = env.new_object(&callback_class, "(Landroidx/activity/ComponentActivity;)V", &[JValue::Object(&activity_obj)])
         .map_err(|e| format!("Failed to create FolderPickerCallback instance: {}", e))?;
 
     // Call pickFolder() to get the CompletableFuture
@@ -74,7 +74,7 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
         let uri_string_obj: JString = uri_obj_l.into();
         let java_str = env.get_string(&uri_string_obj)
             .map_err(|e| format!("Failed to convert uri to string: {}", e))?;
-        java_str.to_string().into_owned()
+        java_str.to_string_lossy().into_owned()
     };
 
     // Get the displayName field
@@ -92,7 +92,7 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
             let display_name_string_obj: JString = display_name_obj_l.into();
             let java_str = env.get_string(&display_name_string_obj)
                 .map_err(|e| format!("Failed to convert displayName to string: {}", e))?;
-            Some(java_str.to_string().into_owned())
+            Some(java_str.to_string_lossy().into_owned())
         }
     };
 
