@@ -12,8 +12,8 @@ pub struct FolderPickerResult {
 /// Opens the Android Storage Access Framework folder picker.
 /// Returns a content:// URI with persistable URI permission.
 #[cfg(target_os = "android")]
-pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
-    use jni::objects::{JObject, JValue, JString};
+pub fn pick_folder(app: &AppHandle) -> Result<FolderPickerResult, String> {
+    use jni::objects::{JObject, JValue};
     use jni::JavaVM;
     use ndk_context::android_context;
 
@@ -45,12 +45,42 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
     let future = future_obj.l()
         .map_err(|e| format!("Failed to get CompletableFuture object: {}", e))?;
 
-    // Call get() on the future
-    let result_obj = env.call_method(&future, "get", "()Ljava/lang/Object;", &[])
-        .map_err(|e| format!("Failed to call get() on future: {}", e))?;
+    // Use a channel to receive the result from the callback
+    let (tx, rx) = mpsc::channel::<Result<FolderPickerResult, String>>();
+
+    // Create a global reference to the future for the callback
+    let future_global = env.new_global_ref(&future)
+        .map_err(|e| format!("Failed to create global ref: {}", e))?;
+
+    // Clone for the closure
+    let vm_ptr = vm.get_java_vm_pointer();
+    
+    // Get the future class and the get method with timeout
+    let future_class = env.find_class("java/util/concurrent/CompletableFuture")
+        .map_err(|e| format!("Failed to find CompletableFuture class: {}", e))?;
+
+    // Use get(long, TimeUnit) with 60 second timeout to avoid blocking forever
+    let get_method = env.get_method_id(&future_class, "get", "(JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;")
+        .map_err(|e| format!("Failed to get get method: {}", e))?;
+
+    let time_unit_class = env.find_class("java/util/concurrent/TimeUnit")
+        .map_err(|e| format!("Failed to find TimeUnit class: {}", e))?;
+
+    let seconds_field = env.get_static_field_id(&time_unit_class, "SECONDS", "Ljava/util/concurrent/TimeUnit;")
+        .map_err(|e| format!("Failed to get SECONDS field: {}", e))?;
+
+    let seconds_obj = env.get_static_field(&time_unit_class, seconds_field, "Ljava/util/concurrent/TimeUnit;")
+        .map_err(|e| format!("Failed to get SECONDS object: {}", e))?;
+
+    // Call get with 60 second timeout
+    let result_obj = env.call_method(&future, get_method, &[JValue::Long(60), JValue::Object(&seconds_obj.l().unwrap())])
+        .map_err(|e| format!("Failed to call get with timeout: {}", e))?;
 
     let result = result_obj.l()
         .map_err(|e| format!("Failed to get result object: {}", e))?;
+
+    // Clean up global ref
+    env.delete_global_ref(future_global).ok();
 
     // Check if result is null (user cancelled)
     if result.is_null() {
@@ -59,41 +89,44 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
 
     // Result is a FolderPickerResult object
     // Get the uri field
-    let uri_obj = env.get_field(&result, "uri", "Ljava/lang/String;")
+    let result_class = env.get_object_class(&result)
+        .map_err(|e| format!("Failed to get result class: {}", e))?;
+
+    let uri_field = env.get_field_id(&result_class, "uri", "Ljava/lang/String;")
+        .map_err(|e| format!("Failed to get uri field: {}", e))?;
+
+    let uri_obj = env.get_field(&result, uri_field, "Ljava/lang/String;")
         .map_err(|e| format!("Failed to get uri field value: {}", e))?;
 
-    // Check if uri is null and extract string
-    let uri_string: String = {
-        let uri_obj_l = uri_obj.l()
-            .map_err(|e| format!("Failed to get uri object: {}", e))?;
-        
-        if uri_obj_l.is_null() {
-            return Err("Folder picker returned null URI".to_string());
-        }
-        
-        let uri_string_obj: JString = uri_obj_l.into();
-        let java_str = env.get_string(&uri_string_obj)
-            .map_err(|e| format!("Failed to convert uri to string: {}", e))?;
-        java_str.to_string_lossy().into_owned()
+    let uri_string: String = if uri_obj.l().map_or(true, |o| o.is_null()) {
+        return Err("Folder picker returned null URI".to_string());
+    } else {
+        let uri_string_obj: jni::objects::JString = uri_obj.l()
+            .map_err(|e| format!("Failed to get uri object: {}", e))?
+            .into();
+        env.get_string(&uri_string_obj)
+            .map_err(|e| format!("Failed to convert uri to string: {}", e))?
+            .to_string_lossy()
+            .into_owned()
     };
 
     // Get the displayName field
-    let display_name_obj = env.get_field(&result, "displayName", "Ljava/lang/String;")
+    let display_name_field = env.get_field_id(&result_class, "displayName", "Ljava/lang/String;")
+        .map_err(|e| format!("Failed to get displayName field: {}", e))?;
+
+    let display_name_obj = env.get_field(&result, display_name_field, "Ljava/lang/String;")
         .map_err(|e| format!("Failed to get displayName field value: {}", e))?;
 
-    // Check if displayName is null and extract string
-    let display_name = {
-        let display_name_obj_l = display_name_obj.l()
-            .map_err(|e| format!("Failed to get displayName object: {}", e))?;
-        
-        if display_name_obj_l.is_null() {
-            None
-        } else {
-            let display_name_string_obj: JString = display_name_obj_l.into();
-            let java_str = env.get_string(&display_name_string_obj)
-                .map_err(|e| format!("Failed to convert displayName to string: {}", e))?;
-            Some(java_str.to_string_lossy().into_owned())
-        }
+    let display_name = if display_name_obj.l().map_or(true, |o| o.is_null()) {
+        None
+    } else {
+        let display_name_string_obj: jni::objects::JString = display_name_obj.l()
+            .map_err(|e| format!("Failed to get displayName object: {}", e))?
+            .into();
+        Some(env.get_string(&display_name_string_obj)
+            .map_err(|e| format!("Failed to convert displayName to string: {}", e))?
+            .to_string_lossy()
+            .into_owned())
     };
 
     Ok(FolderPickerResult {

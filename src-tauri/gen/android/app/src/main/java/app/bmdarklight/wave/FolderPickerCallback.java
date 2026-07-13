@@ -24,7 +24,7 @@ public class FolderPickerCallback implements ActivityResultCallback<Uri> {
     private static final String TAG = "FolderPickerCallback";
     
     private final CompletableFuture<FolderPickerResult> future = new CompletableFuture<>();
-    private ActivityResultLauncher<Uri> launcher;
+    private ActivityResultLauncher<Intent> launcher;
     private final ComponentActivity activity;
 
     public static class FolderPickerResult {
@@ -53,8 +53,8 @@ public class FolderPickerCallback implements ActivityResultCallback<Uri> {
             );
         }
         
-        // OpenDocumentTree takes an optional initial Uri; null = default location
-        launcher.launch(null);
+        // Launch the picker with an empty intent
+        launcher.launch(new Intent());
         
         return future;
     }
