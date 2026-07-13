@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 use crate::audio::dsp::EqConfig;
+use crate::audio::player::RepeatMode;
 use crate::dto::CloseAction;
 
 const SETTINGS_FILE: &str = "wave-settings.json";
@@ -16,6 +17,12 @@ pub struct AppSettings {
     pub close_action: CloseAction,
     pub volume: f32,
     pub equalizer: EqConfig,
+    // Playback state — saved on close, restored on launch.
+    pub last_track_path: Option<String>,
+    pub last_queue: Vec<String>,
+    pub last_queue_index: Option<usize>,
+    pub shuffle: bool,
+    pub repeat: RepeatMode,
 }
 
 impl Default for AppSettings {
@@ -24,6 +31,11 @@ impl Default for AppSettings {
             close_action: CloseAction::Quit,
             volume: 0.8,
             equalizer: EqConfig::default(),
+            last_track_path: None,
+            last_queue: Vec::new(),
+            last_queue_index: None,
+            shuffle: false,
+            repeat: RepeatMode::Off,
         }
     }
 }

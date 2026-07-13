@@ -203,6 +203,12 @@ impl Library {
             tracing::warn!("Failed to repair playlist positions on startup: {error}");
         }
 
+        // Remove duplicate tracks (same artist + album + title), keeping the
+        // earliest indexed copy.
+        if let Err(error) = deduplicate_tracks(&connection) {
+            tracing::warn!("Failed to deduplicate tracks on startup: {error}");
+        }
+
         Ok(())
     }
 
@@ -1714,6 +1720,72 @@ fn repair_all_playlist_positions(connection: &Connection) -> Result<(), String> 
         compact_playlist_positions(&tx, &playlist_id)?;
         tx.commit()
             .map_err(|error| format!("Failed to commit playlist repair transaction: {error}"))?;
+    }
+
+    Ok(())
+}
+
+/// Remove duplicate tracks that share the same artist, album, and title,
+/// keeping the earliest indexed copy.
+fn deduplicate_tracks(connection: &Connection) -> Result<(), String> {
+    let keep_ids: Vec<String> = {
+        let mut stmt = connection
+            .prepare(
+                "SELECT MIN(id) FROM tracks
+                 GROUP BY artist, album, title",
+            )
+            .map_err(|e| format!("Failed to prepare dedup query: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| format!("Failed to query dedup keepers: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read dedup keepers: {e}"))?;
+        rows
+    };
+
+    if keep_ids.is_empty() {
+        return Ok(());
+    }
+
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|e| format!("Failed to begin dedup transaction: {e}"))?;
+
+    // Build a temporary table of ids to keep for efficient NOT IN filtering
+    tx.execute_batch("CREATE TEMPORARY TABLE IF NOT EXISTS _dedup_keep (id TEXT PRIMARY KEY)")
+        .map_err(|e| format!("Failed to create dedup temp table: {e}"))?;
+    tx.execute("DELETE FROM _dedup_keep", [])
+        .map_err(|e| format!("Failed to clear dedup temp table: {e}"))?;
+    for id in &keep_ids {
+        tx.execute("INSERT INTO _dedup_keep (id) VALUES (?1)", params![id])
+            .map_err(|e| format!("Failed to insert dedup keeper: {e}"))?;
+    }
+
+    // Remove orphaned playlist_tracks entries first
+    tx.execute(
+        "DELETE FROM playlist_tracks
+         WHERE track_id NOT IN (SELECT id FROM _dedup_keep)",
+        [],
+    )
+    .map_err(|e| format!("Failed to remove duplicate playlist tracks: {e}"))?;
+
+    // Remove the duplicate tracks themselves
+    let removed = tx
+        .execute(
+            "DELETE FROM tracks
+             WHERE id NOT IN (SELECT id FROM _dedup_keep)",
+            [],
+        )
+        .map_err(|e| format!("Failed to remove duplicate tracks: {e}"))?;
+
+    tx.execute("DROP TABLE IF EXISTS _dedup_keep", [])
+        .map_err(|e| format!("Failed to drop dedup temp table: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("Failed to commit dedup transaction: {e}"))?;
+
+    if removed > 0 {
+        tracing::info!("Removed {removed} duplicate track(s) on startup");
     }
 
     Ok(())

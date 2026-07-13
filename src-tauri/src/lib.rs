@@ -59,6 +59,19 @@ pub fn run() {
             player.set_volume(settings.volume)?;
             player.set_eq_bands(settings.equalizer.bands);
             player.set_eq_enabled(settings.equalizer.enabled);
+
+            // Restore playback state from last session.
+            if !settings.last_queue.is_empty() {
+                player.queue.set_tracks(settings.last_queue.clone());
+                if let Some(idx) = settings.last_queue_index {
+                    if idx < settings.last_queue.len() {
+                        let _ = player.queue.jump(idx);
+                    }
+                }
+            }
+            player.queue.set_shuffle(settings.shuffle);
+            player.repeat = settings.repeat.clone();
+
             app.manage(PlayerState(std::sync::Mutex::new(Some(player))));
 
             app.manage(AppSettingsState(std::sync::Mutex::new(settings)));
@@ -107,6 +120,29 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
+
+                // Persist playback state before closing.
+                if let Some(player_state) = app.try_state::<commands::PlayerState>() {
+                    if let Ok(player_guard) = player_state.0.lock() {
+                        if let Some(player) = player_guard.as_ref() {
+                            if let Some(settings_state) = app.try_state::<AppSettingsState>() {
+                                if let Ok(mut settings) = settings_state.0.lock() {
+                                    settings.last_track_path = player
+                                        .get_current_path()
+                                        .map(|p| p.to_string_lossy().into_owned());
+                                    settings.last_queue =
+                                        player.queue.tracks().to_vec();
+                                    settings.last_queue_index =
+                                        player.queue.current_index();
+                                    settings.shuffle = player.queue.is_shuffled();
+                                    settings.repeat = player.repeat.clone();
+                                    let _ = settings.save(app);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let action = app
                     .try_state::<AppSettingsState>()
                     .and_then(|state| state.0.lock().ok().map(|s| s.close_action))

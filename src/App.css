@@ -674,6 +674,10 @@ img.track-thumb {
   text-align: right;
 }
 
+.track-list.track-list-compact .track-list-header .track-duration-header {
+  grid-column: auto;
+}
+
 .track-actions-cell {
   position: relative;
   display: flex;

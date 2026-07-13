@@ -136,7 +136,7 @@ export default function AlbumPage({
           </div>
         ) : (
           <div
-            className="track-list"
+            className="track-list track-list-compact"
             style={
               {
                 "--track-grid": "48px minmax(80px, 1fr) 60px",
