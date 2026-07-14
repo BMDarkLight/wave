@@ -473,9 +473,6 @@ function App() {
     | null
   >(null);
   const [playlistNameInput, setPlaylistNameInput] = useState("");
-  const [playlistSyncFolder, setPlaylistSyncFolderInput] = useState<
-    string | null
-  >(null);
   const [playlistDialogError, setPlaylistDialogError] = useState<string | null>(
     null,
   );
@@ -1574,7 +1571,6 @@ function App() {
   const openCreatePlaylistDialog = () => {
     setMobileNavOpen(false);
     setPlaylistNameInput("");
-    setPlaylistSyncFolderInput(null);
     setPlaylistDialogError(null);
     setPlaylistDialog({ mode: "create" });
   };
@@ -1585,30 +1581,13 @@ function App() {
   ) => {
     setMobileNavOpen(false);
     setPlaylistNameInput(currentName);
-    setPlaylistSyncFolderInput(null);
     setPlaylistDialogError(null);
     setPlaylistDialog({ mode: "rename", playlistId, currentName });
   };
 
   const closePlaylistDialog = () => {
     setPlaylistDialog(null);
-    setPlaylistSyncFolderInput(null);
     setPlaylistDialogError(null);
-  };
-
-  const pickPlaylistSyncFolder = async () => {
-    try {
-      const directory = await selectAudioFolder();
-      if (!directory) return;
-      setPlaylistSyncFolderInput(directory);
-      if (!playlistNameInput.trim()) {
-        setPlaylistNameInput(getFileName(directory));
-      }
-    } catch (err) {
-      setPlaylistDialogError(
-        formatInvokeError(err, "Failed to select folder"),
-      );
-    }
   };
 
   const submitPlaylistDialog = async () => {
@@ -1625,44 +1604,11 @@ function App() {
       setPlaylistDialogError(null);
 
       if (playlistDialog.mode === "create") {
-        const info = await createPlaylist(name, playlistSyncFolder);
+        const info = await createPlaylist(name);
         await loadPlaylists();
         setActivePlaylistId(info.id);
         await loadPlaylistTracks(info.id);
-        if (playlistSyncFolder) {
-          closePlaylistDialog();
-          const paths = androidHost
-            ? await scanDirectoryRecursive(playlistSyncFolder)
-            : await scanDirectory(playlistSyncFolder);
-          if (!paths.length) {
-            setError(`No audio files found in the selected folder.`);
-            return;
-          }
-          if (androidHost) {
-            setIsScanningFolder(true);
-            setFolderScanIsSync(false);
-            const BATCH = 10;
-            let failCount = 0;
-            for (let i = 0; i < paths.length; i += BATCH) {
-              const batch = paths.slice(i, i + BATCH);
-              try {
-                const result = await importScannedAudio(batch, info.id);
-                failCount += result.errors.length;
-              } catch {
-                failCount += batch.length;
-              }
-            }
-            setIsScanningFolder(false);
-            if (failCount > 0) {
-              setError(`Imported with ${failCount} error(s).`);
-            }
-            await loadPlaylistTracks(info.id);
-            await loadPlaylists();
-          } else {
-            runFolderImport(paths, info.id).catch(() => {});
-          }
-          return;
-        }
+        closePlaylistDialog();
       } else {
         await renamePlaylist(playlistDialog.playlistId, name);
         await loadPlaylists();
@@ -2385,15 +2331,21 @@ function App() {
             >
               {playbackState.is_playing ? <BiPause /> : <BiPlay />}
             </button>
-            {selectedPlaylist?.name !== "Favorites" && (
+{selectedPlaylist?.name !== "Favorites" && (
               <div className="add-track-wrap">
                 <button
                   ref={addTrackBtnRef}
                   className="btn-secondary"
-                  onClick={() => {
+                  onClick={async () => {
                     if (androidHost) {
-                      // On Android, open folder picker for media scanning.
-                      void handleAddFolderAndroid();
+                      // On Android, Library playlist uses folder picker for media scanning,
+                      // other playlists use multiple file picker
+                      const isLibrary = isLibraryPlaylistName(selectedPlaylist?.name);
+                      if (isLibrary) {
+                        void handleAddFolderAndroid();
+                      } else {
+                        void handleAddTrack(true);
+                      }
                       return;
                     }
                     if (addTrackBtnRef.current) {
@@ -2408,7 +2360,11 @@ function App() {
                   }}
                   disabled={isAddingTracks}
                   type="button"
-                  title={androidHost ? "Scan media folder" : "Add tracks"}
+                  title={androidHost
+                    ? isLibraryPlaylistName(selectedPlaylist?.name)
+                      ? "Scan media folder"
+                      : "Add audio files"
+                    : "Add tracks"}
                 >
                   <BiPlus />
                 </button>
@@ -3260,41 +3216,6 @@ function App() {
                 placeholder="My playlist"
                 autoComplete="off"
               />
-              {playlistDialog.mode === "create" && (
-                <div className="playlist-sync-field">
-                  <span className="modal-label">Sync with folder</span>
-                  <p className="modal-hint">
-                    Optional. Keep this playlist tied to a music folder
-                    {androidHost ? " (media scan)" : ""}.
-                  </p>
-                  {playlistSyncFolder ? (
-                    <div className="playlist-sync-selected">
-                      <BiSync className="playlist-sync-icon" />
-                      <span
-                        className="playlist-sync-path"
-                        title={playlistSyncFolder}
-                      >
-                        {getFileName(playlistSyncFolder)}
-                      </span>
-                      <button
-                        type="button"
-                        className="btn-ghost btn-sm"
-                        onClick={() => setPlaylistSyncFolderInput(null)}
-                      >
-                        Clear
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn-secondary playlist-sync-pick"
-                      onClick={() => void pickPlaylistSyncFolder()}
-                    >
-                      <BiFolderOpen /> Choose folder
-                    </button>
-                  )}
-                </div>
-              )}
               {playlistDialogError && (
                 <p className="modal-error">{playlistDialogError}</p>
               )}

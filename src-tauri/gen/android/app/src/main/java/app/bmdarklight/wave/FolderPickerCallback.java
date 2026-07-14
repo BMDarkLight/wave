@@ -1,5 +1,3 @@
-package app.bmdarklight.wave;
-
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.Intent;
@@ -26,7 +24,8 @@ public class FolderPickerCallback implements ActivityResultCallback<ActivityResu
 
     private final CompletableFuture<FolderPickerResult> future = new CompletableFuture<>();
     private ActivityResultLauncher<Intent> launcher;
-    private final ComponentActivity activity;
+    private final Activity activity;
+    private final ComponentActivity componentActivity;
 
     public static class FolderPickerResult {
         public final String uri;
@@ -38,8 +37,10 @@ public class FolderPickerCallback implements ActivityResultCallback<ActivityResu
         }
     }
 
-    public FolderPickerCallback(ComponentActivity activity) {
+    public FolderPickerCallback(Activity activity) {
         this.activity = activity;
+        // Cast to ComponentActivity for registerForActivityResult
+        this.componentActivity = (activity instanceof ComponentActivity) ? (ComponentActivity) activity : null;
     }
 
     /**
@@ -48,7 +49,11 @@ public class FolderPickerCallback implements ActivityResultCallback<ActivityResu
     public CompletableFuture<FolderPickerResult> pickFolder() {
         // Register the activity result launcher if not already registered
         if (launcher == null) {
-            launcher = activity.registerForActivityResult(
+            if (componentActivity == null) {
+                future.completeExceptionally(new RuntimeException("Activity is not a ComponentActivity"));
+                return future;
+            }
+            launcher = componentActivity.registerForActivityResult(
                 new ActivityResultContracts.StartActivityForResult(),
                 this
             );
