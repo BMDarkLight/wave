@@ -51,7 +51,7 @@ import {
   getPlaylistTracksById,
   getQueueTracks,
   importPlaylist,
-isTrackInPlaylist,
+  isTrackInPlaylist,
   scanDirectory,
   listPlaylists,
   listenToMediaControls,
@@ -473,6 +473,9 @@ function App() {
     | null
   >(null);
   const [playlistNameInput, setPlaylistNameInput] = useState("");
+  const [playlistSyncFolder, setPlaylistSyncFolderInput] = useState<
+    string | null
+  >(null);
   const [playlistDialogError, setPlaylistDialogError] = useState<string | null>(
     null,
   );
@@ -653,7 +656,8 @@ function App() {
     setLyricsPanelTrack(null);
     if (
       currentTrack.lyrics &&
-      (parseTimedLyrics(currentTrack.lyrics) || currentTrack.lyrics_source === "lrclib")
+      (parseTimedLyrics(currentTrack.lyrics) ||
+        currentTrack.lyrics_source === "lrclib")
     ) {
       setLyricsFetchPath(null);
       return;
@@ -694,7 +698,11 @@ function App() {
         }));
         setLyricsPanelTrack((prev) =>
           prev && prev.path === path
-            ? { ...prev, lyrics: updated.lyrics, lyrics_source: updated.lyrics_source }
+            ? {
+                ...prev,
+                lyrics: updated.lyrics,
+                lyrics_source: updated.lyrics_source,
+              }
             : prev,
         );
       })
@@ -996,7 +1004,11 @@ function App() {
         onRepeat: async () => {
           const mode = await getPlaybackMode();
           const next =
-            mode.repeat === "off" ? "all" : mode.repeat === "all" ? "one" : "off";
+            mode.repeat === "off"
+              ? "all"
+              : mode.repeat === "all"
+                ? "one"
+                : "off";
           await setRepeat(next);
           await loadPlaybackMode();
         },
@@ -1173,6 +1185,23 @@ function App() {
       setAddTrackMenuAnchor(null);
       setError(formatInvokeError(err, "Failed to add folder as playlist"));
       setIsAddingTracks(false);
+    }
+  };
+
+  const handleSyncPlaylistFolder = async (playlistId: string) => {
+    if (!selectedPlaylist?.sync_folder) return;
+    try {
+      setError(null);
+      setIsScanningFolder(true);
+      setFolderScanIsSync(true);
+      await syncPlaylistFolder(playlistId);
+      await loadPlaylistTracks(playlistId);
+      await loadPlaylists();
+    } catch (err) {
+      setError(formatInvokeError(err, "Failed to sync folder"));
+    } finally {
+      setIsScanningFolder(false);
+      setFolderScanIsSync(false);
     }
   };
 
@@ -1571,6 +1600,7 @@ function App() {
   const openCreatePlaylistDialog = () => {
     setMobileNavOpen(false);
     setPlaylistNameInput("");
+    setPlaylistSyncFolderInput(null);
     setPlaylistDialogError(null);
     setPlaylistDialog({ mode: "create" });
   };
@@ -1581,13 +1611,28 @@ function App() {
   ) => {
     setMobileNavOpen(false);
     setPlaylistNameInput(currentName);
+    setPlaylistSyncFolderInput(null);
     setPlaylistDialogError(null);
     setPlaylistDialog({ mode: "rename", playlistId, currentName });
   };
 
   const closePlaylistDialog = () => {
     setPlaylistDialog(null);
+    setPlaylistSyncFolderInput(null);
     setPlaylistDialogError(null);
+  };
+
+  const pickPlaylistSyncFolder = async () => {
+    try {
+      const directory = await selectAudioFolder();
+      if (!directory) return;
+      setPlaylistSyncFolderInput(directory);
+      if (!playlistNameInput.trim()) {
+        setPlaylistNameInput(getFileName(directory));
+      }
+    } catch (err) {
+      setPlaylistDialogError(formatInvokeError(err, "Failed to select folder"));
+    }
   };
 
   const submitPlaylistDialog = async () => {
@@ -1604,11 +1649,47 @@ function App() {
       setPlaylistDialogError(null);
 
       if (playlistDialog.mode === "create") {
-        const info = await createPlaylist(name);
+        const info = await createPlaylist(
+          name,
+          playlistSyncFolder || undefined,
+        );
         await loadPlaylists();
         setActivePlaylistId(info.id);
         await loadPlaylistTracks(info.id);
-        closePlaylistDialog();
+        if (playlistSyncFolder) {
+          closePlaylistDialog();
+          const paths = androidHost
+            ? await scanDirectoryRecursive(playlistSyncFolder)
+            : await scanDirectory(playlistSyncFolder);
+          if (!paths.length) {
+            setError(`No audio files found in the selected folder.`);
+            return;
+          }
+          if (androidHost) {
+            setIsScanningFolder(true);
+            setFolderScanIsSync(false);
+            const BATCH = 10;
+            let failCount = 0;
+            for (let i = 0; i < paths.length; i += BATCH) {
+              const batch = paths.slice(i, i + BATCH);
+              try {
+                const result = await importScannedAudio(batch, info.id);
+                failCount += result.errors.length;
+              } catch {
+                failCount += batch.length;
+              }
+            }
+            setIsScanningFolder(false);
+            if (failCount > 0) {
+              setError(`Imported with ${failCount} error(s).`);
+            }
+            await loadPlaylistTracks(info.id);
+            await loadPlaylists();
+          } else {
+            runFolderImport(paths, info.id).catch(() => {});
+          }
+          return;
+        }
       } else {
         await renamePlaylist(playlistDialog.playlistId, name);
         await loadPlaylists();
@@ -2028,7 +2109,9 @@ function App() {
       historyPushedRef.current = true;
     } else if (!isAnyOverlayOpen() && historyPushedRef.current) {
       historyPushedRef.current = false;
-      if ((window.history.state as { waveOverlay?: boolean } | null)?.waveOverlay) {
+      if (
+        (window.history.state as { waveOverlay?: boolean } | null)?.waveOverlay
+      ) {
         window.history.back();
       }
     }
@@ -2165,13 +2248,24 @@ function App() {
                   onClick={() => handleSelectPlaylist(pl.id)}
                 >
                   <span className="playlist-item-name" title={pl.name}>
-                    {(isScanningFolder &&
+                    {pl.sync_folder && !(
+                      isScanningFolder &&
+                      folderScanIsSync &&
+                      (selectedPlaylistId === pl.id || isLibraryPlaylistName(pl.name))
+                    ) ? (
+                      <BiSync
+                        className="playlist-sync-icon"
+                        title="Click to sync with folder"
+                        aria-label="Click to sync with folder"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleSyncPlaylistFolder(pl.id);
+                        }}
+                      />
+                    ) : isScanningFolder &&
+                      folderScanIsSync &&
                       (pl.sync_folder || isLibraryPlaylistName(pl.name)) &&
-                      (selectedPlaylistId === pl.id ||
-                        isLibraryPlaylistName(pl.name))) ||
-                    (isImporting &&
-                      pl.sync_folder &&
-                      selectedPlaylistId === pl.id) ? (
+                      (selectedPlaylistId === pl.id || isLibraryPlaylistName(pl.name)) ? (
                       <BiSync
                         className="playlist-sync-icon playlist-sync-spin"
                         title="Syncing with folder"
@@ -2291,336 +2385,344 @@ function App() {
           playbackState={playbackState}
         />
       ) : (
-      <main className="main-content">
-        <div className="hero-copy">
-          <h1>{selectedPlaylist?.name ?? LIBRARY_PLAYLIST_NAME}</h1>
-          <p>
-            {playlist.length
-              ? `${playlist.length} tracks in this playlist`
-              : isLoadingPlaylist
-                ? "Loading tracks…"
-                : "No tracks in this playlist"}
-            {(isScanningFolder &&
-              (selectedPlaylist?.sync_folder ||
-                isLibraryPlaylistName(selectedPlaylist?.name))) ||
-            (isImporting && selectedPlaylist?.sync_folder) ? (
-              <>
-                {" · "}
-                <span className="playlist-sync-badge playlist-sync-badge-active">
-                  <BiSync className="playlist-sync-spin" /> Syncing…
-                </span>
-              </>
-            ) : selectedPlaylist?.sync_folder ? (
-              <>
-                {" · "}
-                <span
-                  className="playlist-sync-badge"
-                  title={selectedPlaylist.sync_folder}
-                >
-                  <BiSync /> Synced folder
-                </span>
-              </>
-            ) : null}
-          </p>
-          <div className="hero-actions">
-            <button
-              className="big-play"
-              onClick={handlePlayPause}
-              type="button"
-              title="Play or pause"
-            >
-              {playbackState.is_playing ? <BiPause /> : <BiPlay />}
-            </button>
-{selectedPlaylist?.name !== "Favorites" && (
-              <div className="add-track-wrap">
-                <button
-                  ref={addTrackBtnRef}
-                  className="btn-secondary"
-                  onClick={async () => {
-                    if (androidHost) {
-                      // On Android, Library playlist uses folder picker for media scanning,
-                      // other playlists use multiple file picker
-                      const isLibrary = isLibraryPlaylistName(selectedPlaylist?.name);
-                      if (isLibrary) {
-                        void handleAddFolderAndroid();
-                      } else {
-                        void handleAddTrack(true);
-                      }
-                      return;
-                    }
-                    if (addTrackBtnRef.current) {
-                      const rect =
-                        addTrackBtnRef.current.getBoundingClientRect();
-                      setAddTrackMenuAnchor({
-                        top: rect.bottom + 6,
-                        left: rect.left,
-                      });
-                    }
-                    setShowAddTrackMenu((v) => !v);
-                  }}
-                  disabled={isAddingTracks}
-                  type="button"
-                  title={androidHost
-                    ? isLibraryPlaylistName(selectedPlaylist?.name)
-                      ? "Scan media folder"
-                      : "Add audio files"
-                    : "Add tracks"}
-                >
-                  <BiPlus />
-                </button>
-              </div>
-            )}
-            {playlist.length > 0 &&
-              !isLibraryPlaylistName(selectedPlaylist?.name) &&
-              selectedPlaylist?.name !== "Favorites" &&
-              !selectedPlaylist?.sync_folder && (
-                <button
-                  className="btn-ghost"
-                  onClick={handleClearPlaylist}
-                  type="button"
-                >
-                  Clear
-                </button>
-              )}
-          </div>
-        </div>
-
-        <section className="playlist-container">
-          {playlist.length === 0 && isLoadingPlaylist ? (
-            <div className="empty-state">
-              <div className="empty-icon">
-                <span className="import-spinner" />
-              </div>
-              <h2>Loading…</h2>
-            </div>
-          ) : playlist.length === 0 && isImporting ? (
-            <div className="empty-state">
-              <div className="empty-icon">
-                <span className="import-spinner" />
-              </div>
-              <h2>
-                Importing songs
-                {importedCount > 0 ? ` (${importedCount} added)` : ""}…
-              </h2>
-              <p className="import-subtitle">
-                Your songs will appear here as they are added.
-              </p>
-            </div>
-          ) : playlist.length === 0 ? (
-            <div className="empty-state">
-              <div className="empty-icon">
-                <BiMusic />
-              </div>
-              <h2>Your playlist is empty</h2>
-              {!isLibraryPlaylistName(selectedPlaylist?.name) &&
-                selectedPlaylist?.name !== "Favorites" && (
+        <main className="main-content">
+          <div className="hero-copy">
+            <h1>{selectedPlaylist?.name ?? LIBRARY_PLAYLIST_NAME}</h1>
+            <p>
+              {playlist.length
+                ? `${playlist.length} tracks in this playlist`
+                : isLoadingPlaylist
+                  ? "Loading tracks…"
+                  : "No tracks in this playlist"}
+              {(isScanningFolder &&
+                (selectedPlaylist?.sync_folder ||
+                  isLibraryPlaylistName(selectedPlaylist?.name))) ||
+              (isImporting && selectedPlaylist?.sync_folder) ? (
+                <>
+                  {" · "}
+                  <span className="playlist-sync-badge playlist-sync-badge-active">
+                    <BiSync className="playlist-sync-spin" /> Syncing…
+                  </span>
+                </>
+              ) : selectedPlaylist?.sync_folder ? (
+                <>
+                  {" · "}
+                  <span
+                    className="playlist-sync-badge"
+                    title={selectedPlaylist.sync_folder}
+                    onClick={() => handleSyncPlaylistFolder(selectedPlaylist!.id)}
+                    style={{ cursor: "pointer" }}
+                  >
+                    <BiSync /> Synced folder
+                  </span>
+                </>
+              ) : null}
+            </p>
+            <div className="hero-actions">
+              <button
+                className="big-play"
+                onClick={handlePlayPause}
+                type="button"
+                title="Play or pause"
+              >
+                {playbackState.is_playing ? <BiPause /> : <BiPlay />}
+              </button>
+              {selectedPlaylist?.name !== "Favorites" && (
+                <div className="add-track-wrap">
                   <button
-                    className="btn-primary"
-                    onClick={() => handleAddTrack(false)}
+                    ref={addTrackBtnRef}
+                    className="btn-secondary"
+                    onClick={async () => {
+                      if (androidHost) {
+                        // On Android, Library playlist uses folder picker for media scanning,
+                        // other playlists use multiple file picker
+                        const isLibrary = isLibraryPlaylistName(
+                          selectedPlaylist?.name,
+                        );
+                        if (isLibrary) {
+                          void handleAddFolderAndroid();
+                        } else {
+                          void handleAddTrack(true);
+                        }
+                        return;
+                      }
+                      if (addTrackBtnRef.current) {
+                        const rect =
+                          addTrackBtnRef.current.getBoundingClientRect();
+                        setAddTrackMenuAnchor({
+                          top: rect.bottom + 6,
+                          left: rect.left,
+                        });
+                      }
+                      setShowAddTrackMenu((v) => !v);
+                    }}
                     disabled={isAddingTracks}
                     type="button"
+                    title={
+                      androidHost
+                        ? isLibraryPlaylistName(selectedPlaylist?.name)
+                          ? "Scan media folder"
+                          : "Add audio files"
+                        : "Add tracks"
+                    }
                   >
-                    Add your first track
+                    <BiPlus />
+                  </button>
+                </div>
+              )}
+              {playlist.length > 0 &&
+                !isLibraryPlaylistName(selectedPlaylist?.name) &&
+                selectedPlaylist?.name !== "Favorites" &&
+                !selectedPlaylist?.sync_folder && (
+                  <button
+                    className="btn-ghost"
+                    onClick={handleClearPlaylist}
+                    type="button"
+                  >
+                    Clear
                   </button>
                 )}
             </div>
-          ) : (
-            <div
-              className="track-list"
-              style={{ "--track-grid": trackGridCols } as React.CSSProperties}
-            >
-              <div className="track-list-header">
-                <div
-                  className="track-col-index sort-header"
-                  onClick={() => handleSort("index")}
-                >
-                  #
-                  {sortColumn === "index" && sortDirection !== "none"
-                    ? sortDirection === "asc"
-                      ? " ▲"
-                      : " ▼"
-                    : ""}
+          </div>
+
+          <section className="playlist-container">
+            {playlist.length === 0 && isLoadingPlaylist ? (
+              <div className="empty-state">
+                <div className="empty-icon">
+                  <span className="import-spinner" />
                 </div>
-                <div
-                  className="track-title-cell sort-header"
-                  onClick={() => handleSort("title")}
-                >
-                  Title
-                  {sortColumn === "title" && sortDirection !== "none"
-                    ? sortDirection === "asc"
-                      ? " ▲"
-                      : " ▼"
-                    : ""}
-                  <div
-                    className="resize-handle"
-                    onMouseDown={handleAlbumColResizeStart}
-                    onClick={(e) => e.stopPropagation()}
-                    title="Resize columns"
-                    role="separator"
-                    aria-orientation="vertical"
-                    aria-label="Resize title and album columns"
-                  />
-                </div>
-                <div
-                  className="track-album sort-header"
-                  onClick={() => handleSort("album")}
-                >
-                  Album
-                  {sortColumn === "album" && sortDirection !== "none"
-                    ? sortDirection === "asc"
-                      ? " ▲"
-                      : " ▼"
-                    : ""}
-                </div>
-                <div className="track-duration track-duration-header">
-                  Duration
-                </div>
+                <h2>Loading…</h2>
               </div>
-              {sortedPlaylist.map((track) => (
-                <div
-                  key={track.id}
-                  className={`track-item ${isCurrentTrack(track) ? "active" : ""}`}
-                  onClick={() =>
-                    handlePlayTrack(
-                      sortedPlaylist.findIndex((t) => t.path === track.path),
-                    )
-                  }
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    openTrackContextMenu(track.path, {
-                      top: event.clientY,
-                      left: event.clientX,
-                    });
-                  }}
-                >
-                  <div className="track-col-index">
-                    {isCurrentTrack(track) && playbackState.is_playing ? (
-                      <span className="mini-bars">
-                        <i />
-                        <i />
-                        <i />
-                      </span>
-                    ) : (
-                      playlist.findIndex((t) => t.path === track.path) + 1
-                    )}
-                  </div>
-                  <div className="track-title-cell">
-                    <Artwork
-                      track={track}
-                      fallback={getTrackTitle(track).slice(0, 1).toUpperCase()}
-                      className="track-thumb"
-                    />
-                    <div>
-                      <div className="track-name">{getTrackTitle(track)}</div>
-                      <div className="track-meta">
-                        <button
-                          className="track-meta-link"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setViewingArtist(track.artist);
-                          }}
-                          type="button"
-                        >
-                          {track.artist}
-                        </button>
-                        {track.lyrics ? " · lyrics" : ""}
-                        {track.cover_art_source === "cover-art-archive"
-                          ? " · online cover"
-                          : ""}
-                      </div>
-                    </div>
+            ) : playlist.length === 0 && isImporting ? (
+              <div className="empty-state">
+                <div className="empty-icon">
+                  <span className="import-spinner" />
+                </div>
+                <h2>
+                  Importing songs
+                  {importedCount > 0 ? ` (${importedCount} added)` : ""}…
+                </h2>
+                <p className="import-subtitle">
+                  Your songs will appear here as they are added.
+                </p>
+              </div>
+            ) : playlist.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-icon">
+                  <BiMusic />
+                </div>
+                <h2>Your playlist is empty</h2>
+                {!isLibraryPlaylistName(selectedPlaylist?.name) &&
+                  selectedPlaylist?.name !== "Favorites" && (
+                    <button
+                      className="btn-primary"
+                      onClick={() => handleAddTrack(false)}
+                      disabled={isAddingTracks}
+                      type="button"
+                    >
+                      Add your first track
+                    </button>
+                  )}
+              </div>
+            ) : (
+              <div
+                className="track-list"
+                style={{ "--track-grid": trackGridCols } as React.CSSProperties}
+              >
+                <div className="track-list-header">
+                  <div
+                    className="track-col-index sort-header"
+                    onClick={() => handleSort("index")}
+                  >
+                    #
+                    {sortColumn === "index" && sortDirection !== "none"
+                      ? sortDirection === "asc"
+                        ? " ▲"
+                        : " ▼"
+                      : ""}
                   </div>
                   <div
-                    className="track-album"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setViewingAlbum({
-                        name: track.album,
-                        albumArtist: track.album_artist || track.artist,
+                    className="track-title-cell sort-header"
+                    onClick={() => handleSort("title")}
+                  >
+                    Title
+                    {sortColumn === "title" && sortDirection !== "none"
+                      ? sortDirection === "asc"
+                        ? " ▲"
+                        : " ▼"
+                      : ""}
+                    <div
+                      className="resize-handle"
+                      onMouseDown={handleAlbumColResizeStart}
+                      onClick={(e) => e.stopPropagation()}
+                      title="Resize columns"
+                      role="separator"
+                      aria-orientation="vertical"
+                      aria-label="Resize title and album columns"
+                    />
+                  </div>
+                  <div
+                    className="track-album sort-header"
+                    onClick={() => handleSort("album")}
+                  >
+                    Album
+                    {sortColumn === "album" && sortDirection !== "none"
+                      ? sortDirection === "asc"
+                        ? " ▲"
+                        : " ▼"
+                      : ""}
+                  </div>
+                  <div className="track-duration track-duration-header">
+                    Duration
+                  </div>
+                </div>
+                {sortedPlaylist.map((track) => (
+                  <div
+                    key={track.id}
+                    className={`track-item ${isCurrentTrack(track) ? "active" : ""}`}
+                    onClick={() =>
+                      handlePlayTrack(
+                        sortedPlaylist.findIndex((t) => t.path === track.path),
+                      )
+                    }
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      openTrackContextMenu(track.path, {
+                        top: event.clientY,
+                        left: event.clientX,
                       });
                     }}
                   >
-                    {track.album}
-                  </div>
-                  <div className="track-duration">
-                    {formatTime(track.duration_seconds)}
-                  </div>
-                  <div className="track-actions-cell">
-                    <div className="track-actions-hover">
-                      <button
-                        className="track-action-btn"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          if (menuTrackPath === track.path) {
-                            setMenuTrackPath(null);
-                            setMenuAnchor(null);
-                            setAddToPlaylistTrack(null);
-                          } else {
-                            const rect =
-                              event.currentTarget.getBoundingClientRect();
-                            openTrackContextMenu(track.path, {
-                              top: rect.bottom + 4,
-                              right: window.innerWidth - rect.right,
-                            });
-                          }
-                        }}
-                        title="More"
-                        type="button"
-                      >
-                        <BiDotsHorizontalRounded />
-                      </button>
-                      {!isLibraryPlaylistName(selectedPlaylist?.name) && (
+                    <div className="track-col-index">
+                      {isCurrentTrack(track) && playbackState.is_playing ? (
+                        <span className="mini-bars">
+                          <i />
+                          <i />
+                          <i />
+                        </span>
+                      ) : (
+                        playlist.findIndex((t) => t.path === track.path) + 1
+                      )}
+                    </div>
+                    <div className="track-title-cell">
+                      <Artwork
+                        track={track}
+                        fallback={getTrackTitle(track)
+                          .slice(0, 1)
+                          .toUpperCase()}
+                        className="track-thumb"
+                      />
+                      <div>
+                        <div className="track-name">{getTrackTitle(track)}</div>
+                        <div className="track-meta">
+                          <button
+                            className="track-meta-link"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setViewingArtist(track.artist);
+                            }}
+                            type="button"
+                          >
+                            {track.artist}
+                          </button>
+                          {track.lyrics ? " · lyrics" : ""}
+                          {track.cover_art_source === "cover-art-archive"
+                            ? " · online cover"
+                            : ""}
+                        </div>
+                      </div>
+                    </div>
+                    <div
+                      className="track-album"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setViewingAlbum({
+                          name: track.album,
+                          albumArtist: track.album_artist || track.artist,
+                        });
+                      }}
+                    >
+                      {track.album}
+                    </div>
+                    <div className="track-duration">
+                      {formatTime(track.duration_seconds)}
+                    </div>
+                    <div className="track-actions-cell">
+                      <div className="track-actions-hover">
+                        <button
+                          className="track-action-btn"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (menuTrackPath === track.path) {
+                              setMenuTrackPath(null);
+                              setMenuAnchor(null);
+                              setAddToPlaylistTrack(null);
+                            } else {
+                              const rect =
+                                event.currentTarget.getBoundingClientRect();
+                              openTrackContextMenu(track.path, {
+                                top: rect.bottom + 4,
+                                right: window.innerWidth - rect.right,
+                              });
+                            }
+                          }}
+                          title="More"
+                          type="button"
+                        >
+                          <BiDotsHorizontalRounded />
+                        </button>
+                        {!isLibraryPlaylistName(selectedPlaylist?.name) && (
+                          <button
+                            className="track-action-btn track-remove-action"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void handleRemoveFromPlaylist(track.path);
+                            }}
+                            title="Remove from playlist"
+                            type="button"
+                          >
+                            <BiMinus />
+                          </button>
+                        )}
                         <button
                           className="track-action-btn track-remove-action"
                           onClick={(event) => {
                             event.stopPropagation();
-                            void handleRemoveFromPlaylist(track.path);
+                            void handleRemoveFromLibrary(track.path);
                           }}
-                          title="Remove from playlist"
+                          title="Remove from library"
                           type="button"
                         >
-                          <BiMinus />
+                          <BiTrash />
                         </button>
-                      )}
+                      </div>
                       <button
-                        className="track-action-btn track-remove-action"
+                        className={`track-action-btn favorite-btn ${favoritePaths.has(track.path) ? "active" : ""}`}
                         onClick={(event) => {
                           event.stopPropagation();
-                          void handleRemoveFromLibrary(track.path);
+                          handleToggleFavorite(track.path);
                         }}
-                        title="Remove from library"
+                        title={
+                          favoritePaths.has(track.path)
+                            ? "Remove from Favorites"
+                            : "Add to Favorites"
+                        }
                         type="button"
                       >
-                        <BiTrash />
+                        {favoritePaths.has(track.path) ? (
+                          <BiSolidHeart />
+                        ) : (
+                          <BiHeart />
+                        )}
                       </button>
                     </div>
-                    <button
-                      className={`track-action-btn favorite-btn ${favoritePaths.has(track.path) ? "active" : ""}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        handleToggleFavorite(track.path);
-                      }}
-                      title={
-                        favoritePaths.has(track.path)
-                          ? "Remove from Favorites"
-                          : "Add to Favorites"
-                      }
-                      type="button"
-                    >
-                      {favoritePaths.has(track.path) ? (
-                        <BiSolidHeart />
-                      ) : (
-                        <BiHeart />
-                      )}
-                    </button>
                   </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-      </main>
+                ))}
+              </div>
+            )}
+          </section>
+        </main>
       )}
 
       {(rightPanelOpen || rightPanelClosing) && (
@@ -3216,6 +3318,42 @@ function App() {
                 placeholder="My playlist"
                 autoComplete="off"
               />
+              {!androidHost && playlistDialog.mode === "create" && (
+                <div className="playlist-sync-field">
+                  <div className="playlist-sync-inline">
+                    <span className="modal-label">Sync with folder</span>
+                    <span className="modal-hint inline-hint">
+                      Optional. Keep this playlist tied to a music folder.
+                    </span>
+                    {playlistSyncFolder ? (
+                      <div className="playlist-sync-selected">
+                        <BiSync className="playlist-sync-icon" />
+                        <span
+                          className="playlist-sync-path"
+                          title={playlistSyncFolder}
+                        >
+                          {getFileName(playlistSyncFolder)}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn-ghost btn-sm"
+                          onClick={() => setPlaylistSyncFolderInput(null)}
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="playlist-sync-pick"
+                        onClick={() => void pickPlaylistSyncFolder()}
+                      >
+                        <BiFolderOpen /> Choose
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
               {playlistDialogError && (
                 <p className="modal-error">{playlistDialogError}</p>
               )}
@@ -3402,7 +3540,8 @@ function App() {
                 if (currentTrack?.album)
                   setViewingAlbum({
                     name: currentTrack.album,
-                    albumArtist: currentTrack.album_artist || currentTrack.artist,
+                    albumArtist:
+                      currentTrack.album_artist || currentTrack.artist,
                   });
               }}
               type="button"
@@ -3659,11 +3798,6 @@ function App() {
                   </div>
                 ))}
               </div>
-              <div className="eq-scale">
-                <span>+12 dB</span>
-                <span>0</span>
-                <span>−12 dB</span>
-              </div>
             </div>
           </>,
           document.body,
@@ -3671,10 +3805,7 @@ function App() {
 
       {showFolderSetup && androidHost && (
         <div className="modal-backdrop" onClick={() => {}}>
-          <div
-            className="modal-dialog"
-            onClick={(e) => e.stopPropagation()}
-          >
+          <div className="modal-dialog" onClick={(e) => e.stopPropagation()}>
             <h2>Welcome to Wave</h2>
             <p className="modal-desc">
               Select a folder containing your music to get started. Wave will
@@ -3693,7 +3824,7 @@ function App() {
                 onClick={() => void handleAddFolderAndroid()}
                 type="button"
               >
-                <BiFolderOpen /> Select Music Folder
+                <BiFolderOpen /> Select Media Source
               </button>
             </div>
           </div>
