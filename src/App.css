@@ -2081,6 +2081,182 @@ img.queue-thumb {
   opacity: 0.45;
 }
 
+.eq-crossfade {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.eq-crossfade-label {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 72px;
+  text-align: right;
+}
+
+.eq-crossfade input[type="range"] {
+  flex: 1;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.eq-crossfade input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.eq-crossfade input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25), 0 2px 6px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.eq-crossfade input[type="range"]:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25), 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+
+.eq-crossfade input[type="range"]::-moz-range-track {
+  height: 6px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.eq-crossfade input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25), 0 2px 6px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+
+.eq-crossfade input[type="range"]:hover::-moz-range-thumb {
+  transform: scale(1.15);
+}
+
+.eq-crossfade-value {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  min-width: 38px;
+  text-align: right;
+}
+
+.queue-eq-mini-crossfade {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  width: 100%;
+}
+
+.queue-eq-mini-crossfade-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.queue-eq-mini-crossfade input[type="range"] {
+  flex: 1 1 auto;
+  width: 100%;
+  max-width: none;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.queue-eq-mini-crossfade input[type="range"]::-webkit-slider-runnable-track {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.queue-eq-mini-crossfade input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -5.5px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25), 0 2px 4px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+
+.queue-eq-mini-crossfade input[type="range"]:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+
+.queue-eq-mini-crossfade input[type="range"]::-moz-range-track {
+  height: 5px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.queue-eq-mini-crossfade input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25), 0 2px 4px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+
+.queue-eq-mini-crossfade input[type="range"]:hover::-moz-range-thumb {
+  transform: scale(1.15);
+}
+
+.queue-eq-mini-crossfade-value {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  min-width: 32px;
+  text-align: right;
+}
+
 .eq-band {
   display: flex;
   flex-direction: column;
@@ -2535,6 +2711,15 @@ img.queue-thumb {
 
 .track-meta-link:hover {
   text-decoration-color: currentColor;
+}
+
+@media (max-width: 900px) {
+  /* Artist under the title is too easy to mis-tap while playing a row. */
+  .track-list .track-meta-link {
+    pointer-events: none;
+    cursor: inherit;
+    text-decoration: none;
+  }
 }
 
 .now-playing-artist,

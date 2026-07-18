@@ -51,7 +51,6 @@ import {
   getPlaylistTracksById,
   getQueueTracks,
   importPlaylist,
-  isTrackInPlaylist,
   scanDirectory,
   listPlaylists,
   listenToMediaControls,
@@ -88,6 +87,8 @@ import {
   getEqSettings,
   setEqBands,
   setEqEnabled,
+  getCrossfadeDuration,
+  setCrossfadeDuration,
   EQ_BAND_LABELS,
   EQ_PRESETS,
   listMediaFolders,
@@ -277,6 +278,8 @@ function App() {
     bands: Array(10).fill(0),
     enabled: false,
   });
+  const [crossfadeDuration, setCrossfadeDurationState] = useState(0.0);
+  const crossfadeSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [eqAnchor, setEqAnchor] = useState<{
     bottom: number;
     right: number;
@@ -903,6 +906,13 @@ function App() {
   // queue keeps going on Android even when sink-empty detection is flaky.
   // Frontend only polls playback state for the UI.
 
+  // When the playing track changes (including crossfade handoff), refresh the
+  // queue highlight immediately instead of waiting for the slow poll.
+  useEffect(() => {
+    if (!playbackState.current_path) return;
+    loadQueueTracks().catch(() => {});
+  }, [playbackState.current_path]);
+
   // Poll queue more frequently while the panel is open
   useEffect(() => {
     if (!showQueue) return;
@@ -1194,7 +1204,12 @@ function App() {
       setError(null);
       setIsScanningFolder(true);
       setFolderScanIsSync(true);
-      await syncPlaylistFolder(playlistId);
+      const folder = selectedPlaylist.sync_folder;
+      // Android SAF folders need a JS-side recursive scan; desktop Rust walks the path.
+      const paths = androidHost
+        ? await scanDirectoryRecursive(folder)
+        : null;
+      await syncPlaylistFolder(playlistId, paths);
       await loadPlaylistTracks(playlistId);
       await loadPlaylists();
     } catch (err) {
@@ -1285,83 +1300,39 @@ function App() {
     }
   };
 
-  const isTrackPlayable = async (
-    path: string | null | undefined,
-  ): Promise<boolean> => {
-    if (!path) return false;
-    try {
-      return await isTrackInPlaylist(path);
-    } catch {
-      return false;
-    }
-  };
-
-  const ensureTrackPlayableOrPick = async (
-    path: string | null | undefined,
-  ): Promise<boolean> => {
-    if (await isTrackPlayable(path)) return true;
-    await stopTrack();
-    setSeekValue(0);
-    await handleAddTrack(false);
-    return false;
-  };
-
   const handlePlayPause = async () => {
     try {
       setError(null);
       if (playbackState.is_playing) {
         await pauseTrack();
-      } else if (playbackState.is_paused) {
-        if (!(await ensureTrackPlayableOrPick(playbackState.current_path)))
-          return;
+      } else if (playbackState.is_paused && playbackState.current_path) {
+        // Resume whatever is loaded — do not gate on playlist membership
+        // (materialized Android paths often differ from library URIs).
         await resumeTrack();
-      } else if (
-        playbackState.current_path &&
-        playbackState.duration_seconds != null &&
-        playbackState.position_seconds < playbackState.duration_seconds - 1
-      ) {
-        if (!(await ensureTrackPlayableOrPick(playbackState.current_path)))
-          return;
-        await playTrack(playbackState.current_path);
-      } else if (
-        !playbackState.current_path &&
-        playlist.length > 0 &&
-        selectedPlaylistId
-      ) {
-        await playTrackFromSpecificPlaylist(selectedPlaylistId, 0);
+      } else if (playbackState.current_path) {
+        try {
+          await playTrack(playbackState.current_path);
+        } catch {
+          // File may be gone; fall through to queue / playlist / picker.
+          if (hasActiveQueue && queueData.current_index != null) {
+            await playTrackFromQueue(queueData.current_index);
+          } else if (hasActiveQueue) {
+            await playTrackFromQueue(0);
+          } else if (playlist.length > 0 && selectedPlaylistId) {
+            await playTrackFromSpecificPlaylist(selectedPlaylistId, 0);
+          } else {
+            await handleAddTrack(false);
+            return;
+          }
+        }
       } else if (hasActiveQueue && queueData.current_index != null) {
-        const nextIdx = queueData.current_index + 1;
-        if (
-          nextIdx < queueData.tracks.length &&
-          (await isTrackPlayable(queueData.tracks[nextIdx]?.path))
-        ) {
-          await playTrackFromQueue(nextIdx);
-        } else if (selectedPlaylistId && playlist.length > 0) {
-          const nextIndex =
-            currentPlaylistIndex >= 0
-              ? (currentPlaylistIndex + 1) % playlist.length
-              : 0;
-          await playTrackFromSpecificPlaylist(selectedPlaylistId, nextIndex);
-        } else if (
-          await isTrackPlayable(queueData.tracks[queueData.current_index]?.path)
-        ) {
-          await playTrackFromQueue(queueData.current_index);
-        } else {
-          await handleAddTrack(false);
-          return;
-        }
+        await playTrackFromQueue(queueData.current_index);
       } else if (hasActiveQueue) {
-        if (await isTrackPlayable(queueData.tracks[0]?.path)) {
-          await playTrackFromQueue(0);
-        } else if (playlist.length > 0 && selectedPlaylistId) {
-          await playTrackFromSpecificPlaylist(selectedPlaylistId, 0);
-        } else {
-          await handleAddTrack(false);
-          return;
-        }
+        await playTrackFromQueue(0);
       } else if (playlist.length > 0 && selectedPlaylistId) {
         await playTrackFromSpecificPlaylist(selectedPlaylistId, 0);
       } else {
+        // Absolutely nothing loaded — invite the user to add music.
         await handleAddTrack(false);
         return;
       }
@@ -1387,12 +1358,22 @@ function App() {
     try {
       setError(null);
       const path = await playPrevious();
-      if (!path && selectedPlaylistId && playlist.length > 0) {
+      if (!path && selectedPlaylistId && sortedPlaylist.length > 0) {
+        const orderedPaths = sortedPlaylist.map((t) => t.path);
+        const fromIndex = sortedPlaylist.findIndex(
+          (track) => track.path === playbackState.current_path,
+        );
         const prevIndex =
-          currentPlaylistIndex > 0
-            ? currentPlaylistIndex - 1
-            : playlist.length - 1;
-        await playTrackFromSpecificPlaylist(selectedPlaylistId, prevIndex);
+          fromIndex > 0
+            ? fromIndex - 1
+            : fromIndex === 0
+              ? sortedPlaylist.length - 1
+              : Math.max(0, sortedPlaylist.length - 1);
+        await playTrackFromSpecificPlaylist(
+          selectedPlaylistId,
+          prevIndex,
+          sortDirection !== "none" ? orderedPaths : undefined,
+        );
       }
       await updatePlaybackState();
       await loadQueueTracks();
@@ -1406,12 +1387,18 @@ function App() {
     try {
       setError(null);
       const path = await playNext();
-      if (!path && selectedPlaylistId && playlist.length > 0) {
+      if (!path && selectedPlaylistId && sortedPlaylist.length > 0) {
+        const orderedPaths = sortedPlaylist.map((t) => t.path);
+        const fromIndex = sortedPlaylist.findIndex(
+          (track) => track.path === playbackState.current_path,
+        );
         const nextIndex =
-          currentPlaylistIndex >= 0
-            ? (currentPlaylistIndex + 1) % playlist.length
-            : 0;
-        await playTrackFromSpecificPlaylist(selectedPlaylistId, nextIndex);
+          fromIndex >= 0 ? (fromIndex + 1) % sortedPlaylist.length : 0;
+        await playTrackFromSpecificPlaylist(
+          selectedPlaylistId,
+          nextIndex,
+          sortDirection !== "none" ? orderedPaths : undefined,
+        );
       }
       await updatePlaybackState();
       await loadQueueTracks();
@@ -1506,6 +1493,8 @@ function App() {
         (_, i) => settings.bands[i] ?? 0,
       );
       setEqSettings({ bands, enabled: settings.enabled });
+      const crossfade = await getCrossfadeDuration();
+      setCrossfadeDurationState(crossfade);
     } catch (err) {
       console.error("Failed to load EQ settings", err);
     }
@@ -1571,6 +1560,21 @@ function App() {
     await handleEqPreset("flat");
   };
 
+  const handleCrossfadeChange = (duration: number) => {
+    const clamped = Math.max(0, Math.min(8, duration));
+    setCrossfadeDurationState(clamped);
+    if (crossfadeSaveTimer.current) {
+      clearTimeout(crossfadeSaveTimer.current);
+    }
+    // Debounce disk/IPC writes so dragging the slider stays responsive.
+    crossfadeSaveTimer.current = setTimeout(() => {
+      setCrossfadeDuration(clamped).catch(async (err) => {
+        setError(formatInvokeError(err, "Failed to set crossfade duration"));
+        await loadEqSettings();
+      });
+    }, 120);
+  };
+
   const handleClearPlaylist = async () => {
     if (selectedPlaylist?.sync_folder) {
       setError("Synced playlists cannot be cleared.");
@@ -1624,6 +1628,15 @@ function App() {
 
   const pickPlaylistSyncFolder = async () => {
     try {
+      if (androidHost) {
+        const result = await selectMediaFolder();
+        if (!result) return;
+        setPlaylistSyncFolderInput(result.uri);
+        if (!playlistNameInput.trim()) {
+          setPlaylistNameInput(result.displayName || getFileName(result.uri));
+        }
+        return;
+      }
       const directory = await selectAudioFolder();
       if (!directory) return;
       setPlaylistSyncFolderInput(directory);
@@ -2042,9 +2055,9 @@ function App() {
     );
   };
 
-  // Closes whichever overlay is "on top" — small popovers/context menus
-  // first, then modals, then the mobile sidebar/right panel — and reports
-  // whether anything was actually closed.
+  // Closes whichever overlay is "on top" — transient menus first, then modals,
+  // then floating panels, then nested content pages (album → artist), then the
+  // mobile nav drawer. Reports whether anything was actually closed.
   const closeTopOverlay = (): boolean => {
     const s = overlaySnapshotRef.current;
     if (s.menuTrackPath || s.queueMenuIndex != null) {
@@ -2078,20 +2091,22 @@ function App() {
       setAddToPlaylistTrack(null);
       return true;
     }
+    // Floating panels sit above content pages.
+    if (s.rightPanelOpen) {
+      closeRightPanelDelayed();
+      return true;
+    }
     if (s.mobileNavOpen) {
       setMobileNavOpen(false);
       return true;
     }
+    // Nested library navigation: album may sit on top of artist.
     if (s.viewingAlbum) {
       setViewingAlbum(null);
       return true;
     }
     if (s.viewingArtist) {
       setViewingArtist(null);
-      return true;
-    }
-    if (s.rightPanelOpen) {
-      closeRightPanelDelayed();
       return true;
     }
     return false;
@@ -2379,7 +2394,7 @@ function App() {
             });
           }}
           onAlbumClick={(name, albumArtist) => {
-            setViewingArtist(null);
+            // Keep artist underneath so hardware/UI back returns to it.
             setViewingAlbum({ name, albumArtist });
           }}
           playbackState={playbackState}
@@ -2620,6 +2635,11 @@ function App() {
                             className="track-meta-link"
                             onClick={(e) => {
                               e.stopPropagation();
+                              // On responsive layouts the artist name sits under
+                              // the title — taps here should play the row, not
+                              // navigate away (pointer-events also disabled in CSS).
+                              if (window.innerWidth <= 900) return;
+                              setViewingAlbum(null);
                               setViewingArtist(track.artist);
                             }}
                             type="button"
@@ -2637,6 +2657,8 @@ function App() {
                       className="track-album"
                       onClick={(e) => {
                         e.stopPropagation();
+                        if (window.innerWidth <= 900) return;
+                        setViewingArtist(null);
                         setViewingAlbum({
                           name: track.album,
                           albumArtist: track.album_artist || track.artist,
@@ -2899,6 +2921,29 @@ function App() {
                   </div>
                 ))}
               </div>
+              <div
+                className="queue-eq-mini-crossfade"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <span className="queue-eq-mini-crossfade-label">Crossfade</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={8}
+                  step={0.5}
+                  value={crossfadeDuration}
+                  onChange={(event) =>
+                    handleCrossfadeChange(Number(event.target.value))
+                  }
+                  aria-label="Crossfade duration in seconds"
+                />
+                <span className="queue-eq-mini-crossfade-value">
+                  {crossfadeDuration === 0
+                    ? "Off"
+                    : `${crossfadeDuration.toFixed(1)}s`}
+                </span>
+              </div>
             </div>
           </div>
         )}
@@ -2932,6 +2977,7 @@ function App() {
                     <button
                       className="lyrics-link"
                       onClick={() => {
+                        setViewingAlbum(null);
                         setViewingArtist(lyricsPanelTrack.artist);
                         closeRightPanelDelayed();
                       }}
@@ -2947,6 +2993,7 @@ function App() {
                     <button
                       className="lyrics-link"
                       onClick={() => {
+                        setViewingArtist(null);
                         setViewingAlbum({
                           name: lyricsPanelTrack.album,
                           albumArtist:
@@ -3159,6 +3206,7 @@ function App() {
                   type="button"
                   onClick={() => {
                     closeTrackContextMenu();
+                    setViewingArtist(null);
                     setViewingAlbum({
                       name: menuTrack.album,
                       albumArtist: menuTrack.album_artist || menuTrack.artist,
@@ -3173,6 +3221,7 @@ function App() {
                   type="button"
                   onClick={() => {
                     closeTrackContextMenu();
+                    setViewingAlbum(null);
                     setViewingArtist(menuTrack.artist);
                   }}
                 >
@@ -3524,7 +3573,9 @@ function App() {
             <button
               className="now-playing-artist"
               onClick={() => {
-                if (currentTrack?.artist) setViewingArtist(currentTrack.artist);
+                if (!currentTrack?.artist) return;
+                setViewingAlbum(null);
+                setViewingArtist(currentTrack.artist);
               }}
               type="button"
               disabled={!currentTrack?.artist}
@@ -3537,12 +3588,13 @@ function App() {
             <button
               className="now-playing-path"
               onClick={() => {
-                if (currentTrack?.album)
-                  setViewingAlbum({
-                    name: currentTrack.album,
-                    albumArtist:
-                      currentTrack.album_artist || currentTrack.artist,
-                  });
+                if (!currentTrack?.album) return;
+                setViewingArtist(null);
+                setViewingAlbum({
+                  name: currentTrack.album,
+                  albumArtist:
+                    currentTrack.album_artist || currentTrack.artist,
+                });
               }}
               type="button"
               disabled={!currentTrack?.album}
@@ -3797,6 +3849,29 @@ function App() {
                     <span className="eq-band-label">{label}</span>
                   </div>
                 ))}
+              </div>
+              <div
+                className="eq-crossfade"
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <label className="eq-crossfade-label">Crossfade</label>
+                <input
+                  type="range"
+                  min={0}
+                  max={8}
+                  step={0.5}
+                  value={crossfadeDuration}
+                  onChange={(event) =>
+                    handleCrossfadeChange(Number(event.target.value))
+                  }
+                  aria-label="Crossfade duration in seconds"
+                />
+                <span className="eq-crossfade-value">
+                  {crossfadeDuration === 0
+                    ? "Off"
+                    : `${crossfadeDuration.toFixed(1)}s`}
+                </span>
               </div>
             </div>
           </>,

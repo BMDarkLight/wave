@@ -98,6 +98,10 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
     private var currentCanSeek: Boolean = true
     private var currentShuffleEnabled: Boolean = false
     private var currentRepeatMode: String = "off"
+    // ElapsedRealtime of the last PlaybackState setState call — used to
+    // extrapolate position when updateState rebuilds without a fresh position
+    // (shuffle/repeat/metadata), so the notification scrubber doesn't jump.
+    private var lastStateUpdateRealtime: Long = 0L
 
     // Dynamic identifiers derived from the host app
     private val channelId: String by lazy { "${activity.packageName}.media" }
@@ -143,6 +147,13 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
         requestNotificationPermission()
 
         // ── Merge incoming args with stored state ───────────────────
+        // When position is omitted (metadata / shuffle / repeat updates),
+        // advance the stored position to "now" before re-anchoring so the
+        // scrubber doesn't jump backward to a stale value.
+        if (args.position == null) {
+            advanceStoredPositionToNow()
+        }
+
         args.title?.trim()?.let { currentTitle = it }
         args.artist?.trim()?.let { currentArtist = it }
         args.album?.trim()?.let { currentAlbum = it }
@@ -155,6 +166,12 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
         args.canSeek?.let { currentCanSeek = it }
         args.shuffleEnabled?.let { currentShuffleEnabled = it }
         args.repeatMode?.let { currentRepeatMode = it }
+
+        if (currentDuration > 0.0) {
+            currentPosition = currentPosition.coerceIn(0.0, currentDuration)
+        } else if (currentPosition < 0.0) {
+            currentPosition = 0.0
+        }
 
         val artworkUrl = args.artworkUrl
 
@@ -236,7 +253,26 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
 
     // ── State builders ──────────────────────────────────────────────────
 
+    /**
+     * Advance [currentPosition] by the wall-clock time since the last
+     * PlaybackState update. Call before rebuilding state when the caller did
+     * not supply a fresh position (e.g. shuffle/repeat/metadata-only updates).
+     */
+    private fun advanceStoredPositionToNow() {
+        if (lastStateUpdateRealtime == 0L) return
+        if (!currentIsPlaying || currentPlaybackSpeed == 0.0) return
+        val now = SystemClock.elapsedRealtime()
+        val deltaSec = (now - lastStateUpdateRealtime) / 1000.0 * currentPlaybackSpeed
+        if (deltaSec <= 0.0) return
+        currentPosition += deltaSec
+        if (currentDuration > 0.0) {
+            currentPosition = currentPosition.coerceAtMost(currentDuration)
+        }
+    }
+
     private fun buildPlaybackState(): PlaybackStateCompat {
+        val now = SystemClock.elapsedRealtime()
+        lastStateUpdateRealtime = now
         val positionMs = (currentPosition * 1000.0).toLong()
         val state = if (currentIsPlaying) PlaybackStateCompat.STATE_PLAYING
                     else PlaybackStateCompat.STATE_PAUSED
@@ -244,7 +280,7 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
 
         val builder = PlaybackStateCompat.Builder()
             .setActions(buildAvailableActions())
-            .setState(state, positionMs, speed, SystemClock.elapsedRealtime())
+            .setState(state, positionMs, speed, now)
             .addCustomAction(
                 ACTION_SHUFFLE,
                 if (currentShuffleEnabled) "Shuffle on" else "Shuffle off",
@@ -332,6 +368,7 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
         currentDuration = 0.0; currentPosition = 0.0; currentPlaybackSpeed = 1.0
         currentIsPlaying = false; currentCanPrev = false; currentCanNext = false; currentCanSeek = true
         currentShuffleEnabled = false; currentRepeatMode = "off"
+        lastStateUpdateRealtime = 0L
 
         recycleCachedArtworkBitmap()
         cachedArtworkUrl = null

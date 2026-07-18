@@ -60,6 +60,7 @@ pub fn run() {
             player.set_volume(settings.volume)?;
             player.set_eq_bands(settings.equalizer.bands);
             player.set_eq_enabled(settings.equalizer.enabled);
+            player.set_crossfade_duration(settings.equalizer.crossfade_duration);
 
             // Restore playback state from last session.
             if !settings.last_queue.is_empty() {
@@ -236,6 +237,8 @@ pub fn run() {
             commands::set_eq_enabled,
             commands::export_eq_settings,
             commands::import_eq_settings,
+            commands::get_crossfade_duration,
+            commands::set_crossfade_duration,
             commands::get_close_action,
             commands::set_close_action,
             commands::toggle_close_action,

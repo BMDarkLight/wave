@@ -34,9 +34,13 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
     let callback_class = env.find_class("app/bmdarklight/wave/FolderPickerCallback")
         .map_err(|e| format!("Failed to find FolderPickerCallback class: {}", e))?;
 
-    // Create an instance of FolderPickerCallback
-    let callback_obj = env.new_object(&callback_class, "(Landroidx/activity/ComponentActivity;)V", &[JValue::Object(&activity_obj)])
-        .map_err(|e| format!("Failed to create FolderPickerCallback instance: {}", e))?;
+    // Create an instance of FolderPickerCallback (Activity constructor; ComponentActivity also available)
+    let callback_obj = env.new_object(
+        &callback_class,
+        "(Landroid/app/Activity;)V",
+        &[JValue::Object(&activity_obj)],
+    )
+    .map_err(|e| format!("Failed to create FolderPickerCallback instance: {}", e))?;
 
     // Call pickFolder() to get the CompletableFuture
     let future_obj = env.call_method(&callback_obj, "pickFolder", "()Ljava/util/concurrent/CompletableFuture;", &[])

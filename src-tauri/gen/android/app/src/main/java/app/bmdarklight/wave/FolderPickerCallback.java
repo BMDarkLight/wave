@@ -1,8 +1,6 @@
 import android.app.Activity;
-import android.content.ContentResolver;
 import android.content.Intent;
 import android.net.Uri;
-import android.os.Build;
 import android.provider.DocumentsContract;
 import android.util.Log;
 
@@ -22,7 +20,7 @@ import java.util.concurrent.CompletableFuture;
 public class FolderPickerCallback implements ActivityResultCallback<ActivityResult> {
     private static final String TAG = "FolderPickerCallback";
 
-    private final CompletableFuture<FolderPickerResult> future = new CompletableFuture<>();
+    private CompletableFuture<FolderPickerResult> future = new CompletableFuture<>();
     private ActivityResultLauncher<Intent> launcher;
     private final Activity activity;
     private final ComponentActivity componentActivity;
@@ -39,15 +37,25 @@ public class FolderPickerCallback implements ActivityResultCallback<ActivityResu
 
     public FolderPickerCallback(Activity activity) {
         this.activity = activity;
-        // Cast to ComponentActivity for registerForActivityResult
-        this.componentActivity = (activity instanceof ComponentActivity) ? (ComponentActivity) activity : null;
+        this.componentActivity = (activity instanceof ComponentActivity)
+            ? (ComponentActivity) activity
+            : null;
+    }
+
+    /** JNI-friendly constructor matching ComponentActivity hosts. */
+    public FolderPickerCallback(ComponentActivity activity) {
+        this((Activity) activity);
     }
 
     /**
      * Launches the folder picker and returns a future that completes when the user selects a folder.
      */
     public CompletableFuture<FolderPickerResult> pickFolder() {
-        // Register the activity result launcher if not already registered
+        // Always start a fresh future so repeated picks work after complete/cancel.
+        if (future.isDone()) {
+            future = new CompletableFuture<>();
+        }
+
         if (launcher == null) {
             if (componentActivity == null) {
                 future.completeExceptionally(new RuntimeException("Activity is not a ComponentActivity"));
@@ -59,7 +67,6 @@ public class FolderPickerCallback implements ActivityResultCallback<ActivityResu
             );
         }
 
-        // Launch the picker with ACTION_OPEN_DOCUMENT_TREE intent
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
         intent.addFlags(
             Intent.FLAG_GRANT_READ_URI_PERMISSION |
@@ -76,29 +83,16 @@ public class FolderPickerCallback implements ActivityResultCallback<ActivityResu
         if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
             Uri treeUri = result.getData().getData();
             if (treeUri != null) {
-                // Persist the URI permission
                 persistUriPermission(treeUri);
-
-                // Get display name
                 String displayName = getDisplayName(treeUri);
-
-                FolderPickerResult pickerResult = new FolderPickerResult(
-                    treeUri.toString(),
-                    displayName
-                );
-
-                future.complete(pickerResult);
+                future.complete(new FolderPickerResult(treeUri.toString(), displayName));
                 return;
             }
         }
 
-        // User cancelled or error
         future.completeExceptionally(new RuntimeException("Folder picker cancelled or failed"));
     }
 
-    /**
-     * Persist the URI permission so we can access the folder across app restarts.
-     */
     private void persistUriPermission(Uri uri) {
         try {
             final int takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
@@ -112,9 +106,6 @@ public class FolderPickerCallback implements ActivityResultCallback<ActivityResu
         }
     }
 
-    /**
-     * Get the display name of the selected folder.
-     */
     private String getDisplayName(Uri uri) {
         try (android.database.Cursor cursor = activity.getContentResolver()
                 .query(uri, null, null, null, null)) {

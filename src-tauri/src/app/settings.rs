@@ -91,6 +91,10 @@ impl AppSettings {
             }
             *gain = gain.clamp(-24.0, 24.0);
         }
+        if !self.equalizer.crossfade_duration.is_finite() {
+            self.equalizer.crossfade_duration = 0.0;
+        }
+        self.equalizer.crossfade_duration = self.equalizer.crossfade_duration.clamp(0.0, 8.0);
     }
 }
 

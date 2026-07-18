@@ -215,14 +215,23 @@ fn resolve_track(library: &Library, path: &str) -> Track {
 
 /// Push track metadata (and current shuffle/repeat mode) to the OS media bridge.
 fn sync_bridge_now_playing(app: &tauri::AppHandle, track: &Track) {
+    sync_bridge_now_playing_at(app, track, 0.0);
+}
+
+/// Like [`sync_bridge_now_playing`], but anchors the media session scrubber at
+/// `position_secs` (needed after a crossfade handoff mid-track).
+fn sync_bridge_now_playing_at(app: &tauri::AppHandle, track: &Track, position_secs: f64) {
     let bridge = app.state::<MediaBridgeState>();
-    bridge.0.now_playing(TrackMetadata {
-        title: Some(track.title.clone()),
-        artist: Some(track.artist.clone()),
-        album: Some(track.album.clone()),
-        duration_seconds: track.duration_seconds,
-        cover_url: track.cover_art_data_url.clone(),
-    });
+    bridge.0.now_playing_at(
+        TrackMetadata {
+            title: Some(track.title.clone()),
+            artist: Some(track.artist.clone()),
+            album: Some(track.album.clone()),
+            duration_seconds: track.duration_seconds,
+            cover_url: track.cover_art_data_url.clone(),
+        },
+        position_secs,
+    );
     sync_bridge_playback_mode(app, &bridge);
 }
 
@@ -230,6 +239,39 @@ fn sync_bridge_now_playing(app: &tauri::AppHandle, track: &Track) {
 /// Call periodically from a background thread so Android/desktop keep playing
 /// the queue when a track ends — without relying on frontend polling alone.
 pub(crate) fn tick_auto_advance(app: &tauri::AppHandle) {
+    // Crossfade handoff can happen while the sink is still playing — check
+    // independently of should_auto_advance so UI/queue/media stay in sync.
+    let handoff = {
+        let state = app.state::<PlayerState>();
+        let mut slot = match state.0.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!("Player mutex was poisoned during auto-advance, recovering");
+                poisoned.into_inner()
+            }
+        };
+        let Some(player) = slot.as_mut() else {
+            return;
+        };
+        if player.check_crossfade_track_switch() {
+            let path = player
+                .get_current_path()
+                .map(|p| p.to_string_lossy().into_owned());
+            let position = player.position_seconds();
+            path.map(|p| (p, position))
+        } else {
+            None
+        }
+    };
+
+    if let Some((path, position)) = handoff {
+        let track = match app.state::<LibraryState>().0.lock() {
+            Ok(lib) => resolve_track(&lib, &path),
+            Err(_) => placeholder_track(&path),
+        };
+        sync_bridge_now_playing_at(app, &track, position);
+    }
+
     let advanced = {
         let state = app.state::<PlayerState>();
         let mut slot = match state.0.lock() {
@@ -653,9 +695,47 @@ pub async fn import_eq_settings(
         let mut player = lock_player(&state)?;
         player.set_eq_bands(eq.bands);
         player.set_eq_enabled(eq.enabled);
+        // Preserve the live crossfade unless the preset file explicitly set one.
+        if eq.crossfade_duration > 0.0 {
+            player.set_crossfade_duration(eq.crossfade_duration);
+        }
     }
     let mut settings = lock_settings(&settings_state)?;
+    let keep_crossfade = settings.equalizer.crossfade_duration;
     settings.equalizer = eq;
+    if settings.equalizer.crossfade_duration <= 0.0 {
+        settings.equalizer.crossfade_duration = keep_crossfade;
+    }
+    settings.save(&app)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_crossfade_duration(
+    state: tauri::State<'_, PlayerState>,
+) -> Result<f32, String> {
+    let guard = lock_player_state(&state);
+    let duration = match guard.as_ref() {
+        Some(player) => player.crossfade_duration(),
+        None => 0.0,
+    };
+    Ok(duration)
+}
+
+#[tauri::command]
+pub async fn set_crossfade_duration(
+    duration: f32,
+    state: tauri::State<'_, PlayerState>,
+    settings_state: tauri::State<'_, AppSettingsState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    if !duration.is_finite() {
+        return Err("Crossfade duration must be a finite number".to_string());
+    }
+    let duration = duration.clamp(0.0, 8.0);
+    lock_player(&state)?.set_crossfade_duration(duration);
+    let mut settings = lock_settings(&settings_state)?;
+    settings.equalizer.crossfade_duration = duration;
     settings.save(&app)?;
     Ok(())
 }
@@ -1240,51 +1320,70 @@ pub async fn play_track_from_specific_playlist(
     })
     .await?;
 
-    let queue_paths: Vec<String> = if let Some(ref paths) = ordered_paths {
+    let original_paths: Vec<String> = if let Some(ref paths) = ordered_paths {
         paths.clone()
     } else {
         raw_tracks.iter().map(|t| t.path.clone()).collect()
     };
 
-    let app_clone = app.clone();
-    let queue_clone = queue_paths.clone();
-    let local_path = {
-        let path = queue_paths
-            .get(index)
-            .cloned()
-            .ok_or_else(|| format!("Track not found at index {index}"))?;
-        let app2 = app_clone.clone();
-        blocking(move || {
-            Ok(crate::android_import::materialize_audio_source(&app2, &path)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|e| {
-                    tracing::warn!("Failed to materialize track {path}: {e}");
-                    path
-                }))
-        })
-        .await?
-    };
-
-    if local_path.is_empty() {
-        return Err(format!("Audio file not found for track at index {index}"));
+    if index >= original_paths.len() {
+        return Err(format!("Track not found at index {index}"));
     }
 
+    // Materialize every queue entry so next/prev/auto-advance never hit raw
+    // content:// URIs on Android.
+    let app_clone = app.clone();
+    let paths_to_materialize = original_paths.clone();
+    let materialized = blocking(move || {
+        Ok::<_, String>(
+            paths_to_materialize
+                .into_iter()
+                .map(|path| {
+                    crate::android_import::materialize_audio_source(&app_clone, &path)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|e| {
+                            tracing::warn!("Failed to materialize track {path}: {e}");
+                            path
+                        })
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await?;
+
+    let local_path = materialized
+        .get(index)
+        .cloned()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| format!("Audio file not found for track at index {index}"))?;
+
+    let original_path = original_paths[index].clone();
     let track = raw_tracks
         .iter()
-        .find(|t| t.path == queue_paths.get(index).map(|s| s.as_str()).unwrap_or(""))
+        .find(|t| t.path == original_path)
         .cloned()
-        .unwrap_or_else(|| placeholder_track(&queue_paths[index]));
+        .unwrap_or_else(|| placeholder_track(&original_path));
 
-    let played_path = local_path.clone();
+    let play_path = local_path.clone();
+    let queue_for_sync = materialized;
+    let originals_for_filter = original_paths;
     let app_clone = app.clone();
-    let queue_for_sync = queue_clone.clone();
     blocking(move || {
         with_app_player(&app_clone, |player| {
-            let old_paths: Vec<String> = player.queue.tracks().to_vec();
-            let manual: Vec<String> = old_paths
-                .into_iter()
-                .filter(|p| !queue_for_sync.contains(p))
+            let playlist_set: std::collections::HashSet<&str> =
+                queue_for_sync.iter().map(String::as_str).collect();
+            let original_set: std::collections::HashSet<&str> =
+                originals_for_filter.iter().map(String::as_str).collect();
+            let manual: Vec<String> = player
+                .queue
+                .tracks()
+                .iter()
+                .filter(|p| {
+                    !playlist_set.contains(p.as_str()) && !original_set.contains(p.as_str())
+                })
+                .cloned()
                 .collect();
+
             player.queue.set_tracks(queue_for_sync);
             if player.queue.jump(index).is_none() {
                 tracing::warn!("Failed to align playback queue with playlist index {index}");
@@ -1292,13 +1391,15 @@ pub async fn play_track_from_specific_playlist(
             for path in manual {
                 player.queue.enqueue(path);
             }
-            player.play(&local_path).map_err(|e| format!("Playback failed: {e}"))
+            player
+                .play(&play_path)
+                .map_err(|e| format!("Playback failed: {e}"))
         })
     })
     .await?;
 
     let mut played_track = track;
-    played_track.path = played_path;
+    played_track.path = local_path;
     sync_bridge_now_playing(&app, &played_track);
     Ok(())
 }

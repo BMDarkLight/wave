@@ -274,9 +274,9 @@ impl MediaBridge {
         }
     }
 
-    fn now_playing(&mut self, meta: &TrackMetadata) {
+    fn now_playing_at(&mut self, meta: &TrackMetadata, position_secs: f64) {
         self.set_metadata(meta);
-        self.set_playing(0.0);
+        self.set_playing(position_secs);
     }
 
     fn set_playing(&mut self, position_secs: f64) {
@@ -530,7 +530,11 @@ impl MediaBridgeState {
     }
 
     pub fn now_playing(&self, meta: TrackMetadata) {
-        self.run_on_ui_thread(move |bridge| bridge.now_playing(&meta));
+        self.now_playing_at(meta, 0.0);
+    }
+
+    pub fn now_playing_at(&self, meta: TrackMetadata, position_secs: f64) {
+        self.run_on_ui_thread(move |bridge| bridge.now_playing_at(&meta, position_secs));
     }
 
     pub fn set_playing(&self, position_secs: f64) {

@@ -599,6 +599,14 @@ export const setEqEnabled = (enabled: boolean): Promise<void> => {
   return safeInvoke("set_eq_enabled", { enabled });
 };
 
+export const getCrossfadeDuration = (): Promise<number> => {
+  return safeInvoke<number>("get_crossfade_duration");
+};
+
+export const setCrossfadeDuration = (duration: number): Promise<void> => {
+  return safeInvoke("set_crossfade_duration", { duration });
+};
+
 // ── Audio Output Devices ──────────────────────────────────────────────────────
 
 export const listOutputDevices = (): Promise<string[]> => {
