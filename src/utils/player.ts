@@ -251,8 +251,18 @@ export const selectMediaFolder = async (): Promise<{ uri: string; displayName?: 
     const result = await invokeFn<{ uri: string; display_name?: string }>("pick_media_folder");
     return { uri: result.uri, displayName: result.display_name };
   } catch (err) {
+    const message =
+      typeof err === "string"
+        ? err
+        : err instanceof Error
+          ? err.message
+          : String(err ?? "Failed to pick media folder");
+    // Cancel is not a failure — return null so callers can no-op quietly.
+    if (/cancel/i.test(message)) {
+      return null;
+    }
     console.error("Failed to pick media folder:", err);
-    return null;
+    throw new Error(message);
   }
 };
 

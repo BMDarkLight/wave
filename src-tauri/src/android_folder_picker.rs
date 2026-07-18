@@ -1,8 +1,8 @@
-//! Android folder picker using Storage Access Framework (SAF) via JNI
+//! Android folder picker using Storage Access Framework (SAF) via JNI.
 
 use tauri::AppHandle;
 
-/// Result from the folder picker
+/// Result from the folder picker.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FolderPickerResult {
     pub uri: String,
@@ -13,99 +13,232 @@ pub struct FolderPickerResult {
 /// Returns a content:// URI with persistable URI permission.
 #[cfg(target_os = "android")]
 pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
-    use jni::objects::{JObject, JValue, JString};
+    use jni::objects::{JObject, JString, JThrowable, JValue, JValueOwned};
     use jni::JavaVM;
     use ndk_context::android_context;
 
-    // Get the JavaVM and Activity from ndk_context
-    let ctx = android_context();
-    let vm = unsafe { JavaVM::from_raw(ctx.vm() as *mut _) }
-        .map_err(|e| format!("Failed to get JavaVM: {}", e))?;
-    let activity = ctx.context();
-
-    // Attach current thread to JVM
-    let mut env = vm.attach_current_thread()
-        .map_err(|e| format!("Failed to attach thread: {}", e))?;
-
-    // Get the activity object
-    let activity_obj = unsafe { JObject::from_raw(activity as *mut _) };
-
-    // Find our FolderPickerCallback class
-    let callback_class = env.find_class("app/bmdarklight/wave/FolderPickerCallback")
-        .map_err(|e| format!("Failed to find FolderPickerCallback class: {}", e))?;
-
-    // Create an instance of FolderPickerCallback (Activity constructor; ComponentActivity also available)
-    let callback_obj = env.new_object(
-        &callback_class,
-        "(Landroid/app/Activity;)V",
-        &[JValue::Object(&activity_obj)],
-    )
-    .map_err(|e| format!("Failed to create FolderPickerCallback instance: {}", e))?;
-
-    // Call pickFolder() to get the CompletableFuture
-    let future_obj = env.call_method(&callback_obj, "pickFolder", "()Ljava/util/concurrent/CompletableFuture;", &[])
-        .map_err(|e| format!("Failed to call pickFolder: {}", e))?;
-
-    let future = future_obj.l()
-        .map_err(|e| format!("Failed to get CompletableFuture object: {}", e))?;
-
-    // Get TimeUnit.SECONDS first
-    let time_unit_class = env.find_class("java/util/concurrent/TimeUnit")
-        .map_err(|e| format!("Failed to find TimeUnit class: {}", e))?;
-    let seconds_obj = env.get_static_field(&time_unit_class, "SECONDS", "Ljava/util/concurrent/TimeUnit;")
-        .map_err(|e| format!("Failed to get SECONDS object: {}", e))?;
-
-// Use get(long, TimeUnit) with 60 second timeout
-    let result_obj = env.call_method(&future, "get", "(JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;", &[
-        JValue::Long(60),
-        JValue::Object(&seconds_obj.l().map_err(|e| format!("Failed to get SECONDS object: {}", e))?)
-    ])
-        .map_err(|e| format!("Failed to call get with timeout: {}", e))?;
-
-    let result = result_obj.l()
-        .map_err(|e| format!("Failed to get result object: {}", e))?;
-
-    // Check if result is null (user cancelled)
-    if result.is_null() {
-        return Err("User cancelled folder picker".to_string());
+    fn jstring_to_owned(env: &mut jni::JNIEnv<'_>, obj: JObject<'_>) -> Option<String> {
+        if obj.is_null() {
+            return None;
+        }
+        let js: JString = obj.into();
+        env.get_string(&js)
+            .ok()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| !s.is_empty())
     }
 
-    // Result is a FolderPickerResult object
-    // Get the uri field
-    let uri_obj = env.get_field(&result, "uri", "Ljava/lang/String;")
-        .map_err(|e| format!("Failed to get uri field value: {}", e))?;
-
-    // Check if uri is null and extract string
-    let uri_string: String = {
-        let uri_obj_l = uri_obj.l()
-            .map_err(|e| format!("Failed to get uri object: {}", e))?;
-        
-        if uri_obj_l.is_null() {
-            return Err("Folder picker returned null URI".to_string());
+    fn throwable_message(
+        env: &mut jni::JNIEnv<'_>,
+        ex: JThrowable<'_>,
+        depth: u8,
+    ) -> Option<String> {
+        if depth > 6 {
+            return Some("Folder picker: nested Java exception".into());
         }
-        
-        let uri_string_obj: JString = uri_obj_l.into();
-        let java_str = env.get_string(&uri_string_obj)
-            .map_err(|e| format!("Failed to convert uri to string: {}", e))?;
-        java_str.to_string_lossy().into_owned()
+        // Unwrap ExecutionException / InvocationTargetException causes first.
+        match env.call_method(&ex, "getCause", "()Ljava/lang/Throwable;", &[]) {
+            Ok(cause_v) => {
+                if let Ok(cause) = cause_v.l() {
+                    if !cause.is_null() {
+                        let cause_t: JThrowable = cause.into();
+                        if let Some(inner) = throwable_message(env, cause_t, depth + 1) {
+                            return Some(inner);
+                        }
+                    }
+                }
+            }
+            Err(_) => {
+                let _ = env.exception_clear();
+            }
+        }
+
+        match env.call_method(&ex, "getMessage", "()Ljava/lang/String;", &[]) {
+            Ok(msg_v) => {
+                if let Ok(obj) = msg_v.l() {
+                    if let Some(msg) = jstring_to_owned(env, obj) {
+                        return Some(msg);
+                    }
+                }
+            }
+            Err(_) => {
+                let _ = env.exception_clear();
+            }
+        }
+
+        match env.call_method(&ex, "toString", "()Ljava/lang/String;", &[]) {
+            Ok(v) => v.l().ok().and_then(|obj| jstring_to_owned(env, obj)),
+            Err(_) => {
+                let _ = env.exception_clear();
+                None
+            }
+        }
+    }
+
+    fn jni_error(env: &mut jni::JNIEnv<'_>, fallback: &str) -> String {
+        match env.exception_occurred() {
+            Ok(ex) if !ex.is_null() => {
+                let _ = env.exception_clear();
+                throwable_message(env, ex, 0).unwrap_or_else(|| fallback.to_string())
+            }
+            _ => {
+                let _ = env.exception_clear();
+                fallback.to_string()
+            }
+        }
+    }
+
+    fn call_checked<'local>(
+        env: &mut jni::JNIEnv<'local>,
+        call: impl FnOnce(&mut jni::JNIEnv<'local>) -> jni::errors::Result<JValueOwned<'local>>,
+        what: &str,
+    ) -> Result<JValueOwned<'local>, String> {
+        // Clear any stale exception before the call so we attribute failures correctly.
+        if env.exception_check().unwrap_or(false) {
+            return Err(jni_error(env, what));
+        }
+        match call(env) {
+            Ok(value) => {
+                if env.exception_check().unwrap_or(false) {
+                    Err(jni_error(env, what))
+                } else {
+                    Ok(value)
+                }
+            }
+            Err(err) => {
+                if env.exception_check().unwrap_or(false) {
+                    Err(jni_error(env, &format!("{what} ({err})")))
+                } else {
+                    Err(format!("{what}: {err}"))
+                }
+            }
+        }
+    }
+
+    // Get the JavaVM and Activity from ndk_context.
+    let ctx = android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm() as *mut _) }
+        .map_err(|e| format!("Folder picker: failed to get JavaVM: {e}"))?;
+    let activity = ctx.context();
+    if activity.is_null() {
+        return Err("Folder picker: Android Activity context is null".into());
+    }
+
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| format!("Folder picker: failed to attach JNI thread: {e}"))?;
+
+    let activity_obj = unsafe { JObject::from_raw(activity as *mut _) };
+
+    // static CompletableFuture pick(Activity)
+    let future_value = call_checked(
+        &mut env,
+        |env| {
+            env.call_static_method(
+                "app/bmdarklight/wave/FolderPickerCallback",
+                "pick",
+                "(Landroid/app/Activity;)Ljava/util/concurrent/CompletableFuture;",
+                &[JValue::Object(&activity_obj)],
+            )
+        },
+        "Folder picker: FolderPickerCallback.pick() failed",
+    )?;
+
+    let future = future_value
+        .l()
+        .map_err(|e| format!("Folder picker: bad CompletableFuture: {e}"))?;
+    if future.is_null() {
+        return Err("Folder picker: pick() returned null future".into());
+    }
+
+    let time_unit_class = env
+        .find_class("java/util/concurrent/TimeUnit")
+        .map_err(|e| format!("Folder picker: TimeUnit not found: {e}"))?;
+    if env.exception_check().unwrap_or(false) {
+        return Err(jni_error(&mut env, "Folder picker: TimeUnit lookup failed"));
+    }
+
+    let seconds_field = env
+        .get_static_field(&time_unit_class, "SECONDS", "Ljava/util/concurrent/TimeUnit;")
+        .map_err(|e| format!("Folder picker: TimeUnit.SECONDS missing: {e}"))?;
+    if env.exception_check().unwrap_or(false) {
+        return Err(jni_error(&mut env, "Folder picker: TimeUnit.SECONDS failed"));
+    }
+    let seconds = seconds_field
+        .l()
+        .map_err(|e| format!("Folder picker: bad TimeUnit.SECONDS: {e}"))?;
+
+    // future.get(120, SECONDS) — long enough for the system picker UI.
+    let result_value = call_checked(
+        &mut env,
+        |env| {
+            env.call_method(
+                &future,
+                "get",
+                "(JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;",
+                &[JValue::Long(120), JValue::Object(&seconds)],
+            )
+        },
+        "Folder picker failed (cancelled, timed out, or internal error)",
+    );
+
+    let result = match result_value {
+        Ok(v) => v
+            .l()
+            .map_err(|e| format!("Folder picker: bad result object: {e}"))?,
+        Err(msg) => {
+            // Unwrap ExecutionException cause when present for a clearer message.
+            return Err(msg);
+        }
     };
 
-    // Get the displayName field
-    let display_name_obj = env.get_field(&result, "displayName", "Ljava/lang/String;")
-        .map_err(|e| format!("Failed to get displayName field value: {}", e))?;
+    // Null => user cancelled.
+    if result.is_null() {
+        return Err("Folder picker cancelled".into());
+    }
 
-    // Check if displayName is null and extract string
+    let uri_field = env
+        .get_field(&result, "uri", "Ljava/lang/String;")
+        .map_err(|e| format!("Folder picker: missing uri field: {e}"))?;
+    if env.exception_check().unwrap_or(false) {
+        return Err(jni_error(&mut env, "Folder picker: reading uri failed"));
+    }
+    let uri_obj = uri_field
+        .l()
+        .map_err(|e| format!("Folder picker: bad uri field: {e}"))?;
+    if uri_obj.is_null() {
+        return Err("Folder picker returned null URI".into());
+    }
+    let uri_jstring: JString = uri_obj.into();
+    let uri_string = env
+        .get_string(&uri_jstring)
+        .map_err(|e| format!("Folder picker: uri string convert failed: {e}"))?
+        .to_string_lossy()
+        .into_owned();
+
+    let display_name_field = env
+        .get_field(&result, "displayName", "Ljava/lang/String;")
+        .map_err(|e| format!("Folder picker: missing displayName field: {e}"))?;
+    if env.exception_check().unwrap_or(false) {
+        return Err(jni_error(
+            &mut env,
+            "Folder picker: reading displayName failed",
+        ));
+    }
     let display_name = {
-        let display_name_obj_l = display_name_obj.l()
-            .map_err(|e| format!("Failed to get displayName object: {}", e))?;
-        
-        if display_name_obj_l.is_null() {
+        let obj = display_name_field
+            .l()
+            .map_err(|e| format!("Folder picker: bad displayName field: {e}"))?;
+        if obj.is_null() {
             None
         } else {
-            let display_name_string_obj: JString = display_name_obj_l.into();
-            let java_str = env.get_string(&display_name_string_obj)
-                .map_err(|e| format!("Failed to convert displayName to string: {}", e))?;
-            Some(java_str.to_string_lossy().into_owned())
+            let js: JString = obj.into();
+            let name = env
+                .get_string(&js)
+                .map_err(|e| format!("Folder picker: displayName convert failed: {e}"))?
+                .to_string_lossy()
+                .into_owned();
+            Some(name)
         }
     };
 
@@ -115,7 +248,7 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
     })
 }
 
-/// Fallback for non-Android targets
+/// Fallback for non-Android targets.
 #[cfg(not(target_os = "android"))]
 pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
     Err("Folder picker is only available on Android".to_string())

@@ -112,8 +112,12 @@ import ArtistPage from "./components/ArtistPage";
 import "./App.css";
 
 function formatInvokeError(err: unknown, fallback: string): string {
-  if (err instanceof Error) return err.message;
+  if (err instanceof Error && err.message.trim()) return err.message;
   if (typeof err === "string" && err.trim()) return err;
+  if (err && typeof err === "object" && "message" in err) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
   return fallback;
 }
 
@@ -728,12 +732,6 @@ function App() {
     setLyricsFetchPath(null);
   };
 
-  const currentPlaylistIndex = useMemo(
-    () =>
-      playlist.findIndex((track) => track.path === playbackState.current_path),
-    [playlist, playbackState.current_path],
-  );
-
   const hasActiveQueue = queueData.tracks.length > 0;
   const canSkip = hasActiveQueue || playlist.length > 0;
   const displayDuration =
@@ -1110,9 +1108,15 @@ function App() {
     try {
       setError(null);
       // Keep the user-gesture chain intact for the SAF folder picker.
-      const result = await selectMediaFolder();
-      setShowFolderSetup(false);
+      let result;
+      try {
+        result = await selectMediaFolder();
+      } catch (err) {
+        setError(formatInvokeError(err, "Failed to open folder picker"));
+        return;
+      }
       if (!result?.uri) return;
+      setShowFolderSetup(false);
 
       const directory = result.uri;
 

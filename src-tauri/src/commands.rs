@@ -395,7 +395,8 @@ pub async fn import_audio_sources(
 pub async fn pick_media_folder(
     app: tauri::AppHandle,
 ) -> Result<crate::android_folder_picker::FolderPickerResult, String> {
-    crate::android_folder_picker::pick_folder(&app)
+    // Block off the async runtime — the JNI side waits on the system picker.
+    blocking(move || crate::android_folder_picker::pick_folder(&app)).await
 }
 
 /// Pick a folder using Android Storage Access Framework (SAF).
