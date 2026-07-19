@@ -130,12 +130,61 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
 
     let activity_obj = unsafe { JObject::from_raw(activity as *mut _) };
 
+    // Android's JNI FindClass (used by call_static_method with a class name)
+    // often cannot see app classes from a native thread. Load via the
+    // Activity ClassLoader instead.
+    let picker_class = {
+        let loader_v = call_checked(
+            &mut env,
+            |env| {
+                env.call_method(
+                    &activity_obj,
+                    "getClassLoader",
+                    "()Ljava/lang/ClassLoader;",
+                    &[],
+                )
+            },
+            "Folder picker: getClassLoader failed",
+        )?;
+        let loader = loader_v
+            .l()
+            .map_err(|e| format!("Folder picker: bad ClassLoader: {e}"))?;
+        if loader.is_null() {
+            return Err("Folder picker: Activity ClassLoader is null".into());
+        }
+
+        let class_name = env
+            .new_string("app.bmdarklight.wave.FolderPickerCallback")
+            .map_err(|e| format!("Folder picker: class name string failed: {e}"))?;
+        let class_v = call_checked(
+            &mut env,
+            |env| {
+                env.call_method(
+                    &loader,
+                    "loadClass",
+                    "(Ljava/lang/String;)Ljava/lang/Class;",
+                    &[(&class_name).into()],
+                )
+            },
+            "Folder picker: loadClass(FolderPickerCallback) failed",
+        )?;
+        let class_obj = class_v
+            .l()
+            .map_err(|e| format!("Folder picker: bad Class object: {e}"))?;
+        if class_obj.is_null() {
+            return Err(
+                "Folder picker: FolderPickerCallback class missing from APK".into(),
+            );
+        }
+        jni::objects::JClass::from(class_obj)
+    };
+
     // static CompletableFuture pick(Activity)
     let future_value = call_checked(
         &mut env,
         |env| {
             env.call_static_method(
-                "app/bmdarklight/wave/FolderPickerCallback",
+                &picker_class,
                 "pick",
                 "(Landroid/app/Activity;)Ljava/util/concurrent/CompletableFuture;",
                 &[JValue::Object(&activity_obj)],

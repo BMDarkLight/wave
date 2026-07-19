@@ -240,6 +240,23 @@ export const selectAudioFolder = async (): Promise<string | null> => {
   return null;
 };
 
+function invokeErrorMessage(err: unknown, fallback: string): string {
+  if (typeof err === "string" && err.trim()) return err;
+  if (err instanceof Error && err.message.trim()) return err.message;
+  if (err && typeof err === "object") {
+    const obj = err as Record<string, unknown>;
+    for (const key of ["message", "error", "data"] as const) {
+      const value = obj[key];
+      if (typeof value === "string" && value.trim()) return value;
+      if (value && typeof value === "object" && "message" in (value as object)) {
+        const nested = (value as { message?: unknown }).message;
+        if (typeof nested === "string" && nested.trim()) return nested;
+      }
+    }
+  }
+  return fallback;
+}
+
 export const selectMediaFolder = async (): Promise<{ uri: string; displayName?: string } | null> => {
   await tauriInitialized;
 
@@ -251,12 +268,7 @@ export const selectMediaFolder = async (): Promise<{ uri: string; displayName?: 
     const result = await invokeFn<{ uri: string; display_name?: string }>("pick_media_folder");
     return { uri: result.uri, displayName: result.display_name };
   } catch (err) {
-    const message =
-      typeof err === "string"
-        ? err
-        : err instanceof Error
-          ? err.message
-          : String(err ?? "Failed to pick media folder");
+    const message = invokeErrorMessage(err, "Failed to pick media folder");
     // Cancel is not a failure — return null so callers can no-op quietly.
     if (/cancel/i.test(message)) {
       return null;
@@ -829,6 +841,8 @@ export const dismissFolderSetup = (): Promise<void> =>
 export const scanDirectoryRecursive = async (dirUri: string): Promise<string[]> => {
   const { readDir } = await import("@tauri-apps/plugin-fs");
   const results: string[] = [];
+  let rootError: unknown = null;
+  let readableDirs = 0;
 
   const AUDIO_EXTENSIONS = new Set([
     "mp3", "flac", "ogg", "opus", "wav", "m4a", "m4b", "aac",
@@ -854,22 +868,36 @@ export const scanDirectoryRecursive = async (dirUri: string): Promise<string[]> 
   const childDocUri = (parentUri: string, childName: string): string =>
     parentUri.replace("/tree/", "/document/") + "%2F" + encodeURIComponent(childName);
 
-  const walk = async (uri: string) => {
+  const walk = async (uri: string, isRoot: boolean) => {
     try {
       const entries = await readDir(uri);
+      readableDirs += 1;
       for (const entry of entries) {
         if (!entry.name) continue;
         if (entry.isDirectory) {
-          await walk(childTreeUri(uri, entry.name));
+          await walk(childTreeUri(uri, entry.name), false);
         } else if (isAudioFile(entry.name)) {
           results.push(childDocUri(uri, entry.name));
         }
       }
-    } catch {
-      // Skip directories we can't read (permission denied, etc.)
+    } catch (err) {
+      if (isRoot) {
+        rootError = err;
+      }
+      // Skip nested directories we can't read (permission denied, etc.)
     }
   };
 
-  await walk(dirUri);
+  await walk(dirUri, true);
+
+  if (rootError != null && readableDirs === 0) {
+    throw new Error(
+      invokeErrorMessage(
+        rootError,
+        "Failed to read the selected folder (permission or unsupported URI)",
+      ),
+    );
+  }
+
   return results;
 };

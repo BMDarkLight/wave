@@ -338,6 +338,112 @@ pub(crate) fn tick_auto_advance(app: &tauri::AppHandle) {
     }
 }
 
+/// Apply a media-session action from the Android native JNI bridge.
+/// Used when the WebView is frozen in the background and JS handlers cannot run.
+#[cfg(target_os = "android")]
+pub(crate) fn handle_native_media_action(app: &tauri::AppHandle, action: &str) -> Result<(), String> {
+    use crate::audio::player::RepeatMode;
+
+    if let Some(seconds) = action.strip_prefix("seek:") {
+        let seconds: f64 = seconds
+            .parse()
+            .map_err(|e| format!("invalid seek payload: {e}"))?;
+        let playing = with_app_player(app, |player| {
+            player.seek(seconds).map_err(|e| e.to_string())?;
+            Ok(player.is_playing())
+        })?;
+        app.state::<MediaBridgeState>()
+            .0
+            .update_position(seconds, playing);
+        return Ok(());
+    }
+
+    match action {
+        "play" => {
+            let position = with_app_player(app, |player| {
+                if player.get_current_path().is_none() {
+                    return Ok(None);
+                }
+                if !player.is_playing() {
+                    player.resume().map_err(|e| e.to_string())?;
+                }
+                Ok(Some(player.position_seconds()))
+            })?;
+            if let Some(position) = position {
+                app.state::<MediaBridgeState>().0.set_playing(position);
+            }
+            Ok(())
+        }
+        "pause" => {
+            let position = with_app_player(app, |player| {
+                let position = player.position_seconds();
+                player.pause().map_err(|e| e.to_string())?;
+                Ok(position)
+            })?;
+            app.state::<MediaBridgeState>().0.set_paused(position);
+            Ok(())
+        }
+        "stop" => {
+            with_app_player(app, |player| player.stop().map_err(|e| e.to_string()))?;
+            app.state::<MediaBridgeState>().0.set_stopped();
+            Ok(())
+        }
+        "next" => {
+            let path = with_app_player(app, |player| {
+                player.play_next().map_err(|e| e.to_string())
+            })?;
+            if let Some(path) = path {
+                let track = match app.state::<LibraryState>().0.lock() {
+                    Ok(lib) => resolve_track(&lib, &path),
+                    Err(_) => placeholder_track(&path),
+                };
+                sync_bridge_now_playing(app, &track);
+            }
+            Ok(())
+        }
+        "previous" => {
+            let path = with_app_player(app, |player| {
+                player.play_previous().map_err(|e| e.to_string())
+            })?;
+            if let Some(path) = path {
+                let track = match app.state::<LibraryState>().0.lock() {
+                    Ok(lib) => resolve_track(&lib, &path),
+                    Err(_) => placeholder_track(&path),
+                };
+                sync_bridge_now_playing(app, &track);
+            }
+            Ok(())
+        }
+        "shuffle" => {
+            with_app_player(app, |player| {
+                let next = !player.queue.is_shuffled();
+                player.queue.set_shuffle(next);
+                Ok(())
+            })?;
+            let bridge = app.state::<MediaBridgeState>();
+            sync_bridge_playback_mode(app, &bridge);
+            Ok(())
+        }
+        "repeat" => {
+            with_app_player(app, |player| {
+                player.repeat = match player.repeat {
+                    RepeatMode::Off => RepeatMode::All,
+                    RepeatMode::All => RepeatMode::One,
+                    RepeatMode::One => RepeatMode::Off,
+                };
+                Ok(())
+            })?;
+            let bridge = app.state::<MediaBridgeState>();
+            sync_bridge_playback_mode(app, &bridge);
+            Ok(())
+        }
+        other => {
+            tracing::debug!("Ignoring unknown Android media action: {other}");
+            Ok(())
+        }
+    }
+}
+
 /// Push the current shuffle/repeat mode to the OS media bridge (e.g. so the
 /// Android notification's shuffle/repeat buttons reflect the right state).
 fn sync_bridge_playback_mode(app: &tauri::AppHandle, bridge: &tauri::State<MediaBridgeState>) {

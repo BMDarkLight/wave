@@ -13,6 +13,8 @@ mod os_media;
 mod android_import;
 mod android_jni;
 mod android_folder_picker;
+#[cfg(target_os = "android")]
+mod android_media_bridge;
 
 pub use app::paths as app_paths;
 pub use app::settings as app_settings;
@@ -121,10 +123,15 @@ pub fn run() {
             // does this for headless mode; the GUI needs its own tick —
             // especially on Android, where sink-empty detection via frontend
             // polling alone is unreliable.
+            #[cfg(target_os = "android")]
+            android_media_bridge::install(app.handle());
+
             let tick_app = app_handle.clone();
             std::thread::spawn(move || {
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(400));
+                    #[cfg(target_os = "android")]
+                    android_media_bridge::drain_actions(&tick_app);
                     commands::tick_auto_advance(&tick_app);
                 }
             });

@@ -67,7 +67,11 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
     init {
         activeInstance = this
         Log.d(TAG, "init")
-        cancelNotificationArtifacts(activity.applicationContext)
+        // Don't wipe an active media notification when the Activity/plugin
+        // is recreated while background playback is still running.
+        if (MediaSessionCleanupService.instance == null) {
+            cancelNotificationArtifacts(activity.applicationContext)
+        }
     }
 
     // Native session & notification
@@ -245,9 +249,14 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
     // ── Lifecycle ───────────────────────────────────────────────────────
 
     override fun onDestroy() {
-        Log.d(TAG, "onDestroy: cleaning up")
-        releaseSession()
-        activeInstance = null
+        // Detach from the Activity without tearing down the FGS / MediaSession
+        // keep-alive — otherwise background playback dies when the Activity is
+        // destroyed under memory pressure. Explicit clear()/forceCleanup still
+        // release resources.
+        Log.d(TAG, "onDestroy: detaching plugin (keeping FGS if active)")
+        if (activeInstance === this) {
+            activeInstance = null
+        }
         super.onDestroy()
     }
 
@@ -343,7 +352,8 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun releaseSession() {
         try {
-            emitAction("pause")
+            // Native pause so audio stops even if JS is unreachable.
+            handleMediaAction("pause")
         } catch (_: Throwable) {
         }
         mediaSession?.let { session ->
@@ -396,7 +406,9 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
         if (mediaSession != null) return mediaSession
 
         Log.d(TAG, "ensureSession: creating new session (tag=$sessionTag, channel=$channelId)")
-        val session = MediaSessionCompat(activity, sessionTag)
+        // Application context outlives the Activity so the session can stay
+        // active while the UI is destroyed/recreated in the background.
+        val session = MediaSessionCompat(activity.applicationContext, sessionTag)
         session.setCallback(sessionCallback)
         session.setFlags(
             MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS or
@@ -693,33 +705,41 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
         Log.d(TAG, "emit: action=\"$action\"")
         val payload = JSObject()
         payload.put("action", action)
-        activity.runOnUiThread { trigger("media_action", payload) }
-    }
-
-    private fun emitSeek(positionMs: Long) {
-        val seekSeconds = positionMs / 1000.0
-        Log.d(TAG, "emit: action=\"seek\", seekPosition=${seekSeconds}s")
-        val payload = JSObject()
-        payload.put("action", "seek")
-        payload.put("seekPosition", seekSeconds)
-        activity.runOnUiThread { trigger("media_action", payload) }
+        try {
+            if (activity.isDestroyed) {
+                Log.w(TAG, "emitAction: activity destroyed, skipping JS for \"$action\"")
+                return
+            }
+            activity.runOnUiThread {
+                try {
+                    trigger("media_action", payload)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "emitAction trigger failed: ${t.message}")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "emitAction failed: ${t.message}")
+        }
     }
 
     private val sessionCallback = object : MediaSessionCompat.Callback() {
-        override fun onPlay() = emitAction("play")
-        override fun onPause() = emitAction("pause")
-        override fun onStop() = emitAction("stop")
-        override fun onSkipToNext() = emitAction("next")
-        override fun onSkipToPrevious() = emitAction("previous")
-        override fun onSeekTo(pos: Long) = emitSeek(pos)
+        override fun onPlay() = MediaSessionPlugin.handleMediaAction("play")
+        override fun onPause() = MediaSessionPlugin.handleMediaAction("pause")
+        override fun onStop() = MediaSessionPlugin.handleMediaAction("stop")
+        override fun onSkipToNext() = MediaSessionPlugin.handleMediaAction("next")
+        override fun onSkipToPrevious() = MediaSessionPlugin.handleMediaAction("previous")
+        override fun onSeekTo(pos: Long) =
+            MediaSessionPlugin.handleMediaAction("seek:${pos / 1000.0}")
         override fun onCustomAction(action: String?, extras: android.os.Bundle?) {
             when (action) {
-                ACTION_SHUFFLE -> emitAction("shuffle")
-                ACTION_REPEAT -> emitAction("repeat")
+                ACTION_SHUFFLE -> MediaSessionPlugin.handleMediaAction("shuffle")
+                ACTION_REPEAT -> MediaSessionPlugin.handleMediaAction("repeat")
             }
         }
-        override fun onSetShuffleMode(shuffleMode: Int) = emitAction("shuffle")
-        override fun onSetRepeatMode(repeatMode: Int) = emitAction("repeat")
+        override fun onSetShuffleMode(shuffleMode: Int) =
+            MediaSessionPlugin.handleMediaAction("shuffle")
+        override fun onSetRepeatMode(repeatMode: Int) =
+            MediaSessionPlugin.handleMediaAction("repeat")
     }
 
     // ── Bitmap helpers ──────────────────────────────────────────────────
@@ -793,24 +813,75 @@ class MediaSessionPlugin(private val activity: Activity) : Plugin(activity) {
         }
 
         internal fun forceCleanup(context: Context) {
+            // Prefer native pause so audio stops even if the WebView is gone.
+            handleMediaAction("pause")
             val plugin = activeInstance
             if (plugin != null) {
-                try {
-                    plugin.emitAction("pause")
-                } catch (_: Throwable) {
-                }
                 plugin.releaseSession()
+            } else {
+                MediaSessionCleanupService.stop()
+                cancelNotificationArtifacts(context, hard = true)
             }
-            cancelNotificationArtifacts(context, hard = true)
         }
 
+        /** Soft notification cleanup without releasing an active playback session. */
+        internal fun cancelNotificationArtifactsOnly(context: Context) {
+            cancelNotificationArtifacts(context, hard = false)
+        }
+
+        /**
+         * Dispatch a transport action.
+         *
+         * Prefers the host app's [MediaNativeBridge] (Rust audio engine) so
+         * controls work while the WebView is frozen. Falls back to JS emit
+         * only when the native bridge is unavailable. Never does both for
+         * transport actions — that would double-fire next/previous.
+         */
         internal fun handleMediaAction(action: String) {
-            val plugin = activeInstance
-            if (plugin == null) {
-                Log.w(TAG, "handleMediaAction: no active plugin instance, ignoring \"$action\"")
+            Log.d(TAG, "handleMediaAction: \"$action\"")
+            var nativeOk = false
+            try {
+                val cls = Class.forName("app.bmdarklight.wave.MediaNativeBridge")
+                val method = cls.getMethod("dispatch", String::class.java)
+                method.invoke(null, action)
+                nativeOk = true
+            } catch (t: Throwable) {
+                Log.w(TAG, "native media bridge unavailable: ${t.message}")
+            }
+
+            if (nativeOk) {
                 return
             }
-            Log.d(TAG, "handleMediaAction: dispatching \"$action\" → JS")
+
+            val plugin = activeInstance
+            if (plugin == null) {
+                Log.w(TAG, "handleMediaAction: no plugin instance for JS fallback \"$action\"")
+                return
+            }
+
+            // Seek payloads are "seek:<seconds>" for the native bridge; JS
+            // expects a structured event.
+            if (action.startsWith("seek:")) {
+                val seconds = action.removePrefix("seek:").toDoubleOrNull() ?: return
+                val payload = JSObject()
+                payload.put("action", "seek")
+                payload.put("seekPosition", seconds)
+                try {
+                    if (!plugin.activity.isDestroyed) {
+                        plugin.activity.runOnUiThread {
+                            try {
+                                plugin.trigger("media_action", payload)
+                            } catch (t: Throwable) {
+                                Log.w(TAG, "seek JS emit failed: ${t.message}")
+                            }
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "seek JS emit failed: ${t.message}")
+                }
+                return
+            }
+
             plugin.emitAction(action)
         }
     }

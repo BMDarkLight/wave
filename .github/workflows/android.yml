@@ -136,6 +136,11 @@ jobs:
       - name: Initialize Tauri Android
         run: npx tauri android init
 
+      # `tauri android init` regenerates gen/android and drops app-owned Java.
+      # Restore FolderPickerCallback, MediaNativeBridge, etc.
+      - name: Patch Android Java sources
+        run: bash ./scripts/patch-android-sources.sh
+
       # `tauri android init` ships default Tauri launcher icons in gen/.
       # Overlay the Wave icons from src-tauri/icons/android into the Android res tree.
       - name: Apply Wave Android icons

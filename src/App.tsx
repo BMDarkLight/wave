@@ -114,9 +114,16 @@ import "./App.css";
 function formatInvokeError(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message.trim()) return err.message;
   if (typeof err === "string" && err.trim()) return err;
-  if (err && typeof err === "object" && "message" in err) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === "string" && message.trim()) return message;
+  if (err && typeof err === "object") {
+    const obj = err as Record<string, unknown>;
+    for (const key of ["message", "error", "data"] as const) {
+      const value = obj[key];
+      if (typeof value === "string" && value.trim()) return value;
+      if (value && typeof value === "object" && "message" in (value as object)) {
+        const nested = (value as { message?: unknown }).message;
+        if (typeof nested === "string" && nested.trim()) return nested;
+      }
+    }
   }
   return fallback;
 }
@@ -1147,19 +1154,28 @@ function App() {
       // Import in batches of 10 to show progress
       const BATCH = 10;
       let failCount = 0;
+      const sampleErrors: string[] = [];
       for (let i = 0; i < paths.length; i += BATCH) {
         const batch = paths.slice(i, i + BATCH);
         try {
           const result = await importScannedAudio(batch, playlistId);
           failCount += result.errors.length;
-        } catch {
+          for (const detail of result.errors) {
+            if (sampleErrors.length < 3) sampleErrors.push(detail);
+          }
+        } catch (err) {
           failCount += batch.length;
+          if (sampleErrors.length < 3) {
+            sampleErrors.push(formatInvokeError(err, "Import batch failed"));
+          }
         }
       }
 
       setIsScanningFolder(false);
       if (failCount > 0) {
-        setError(`Imported with ${failCount} error(s).`);
+        const detail =
+          sampleErrors.length > 0 ? ` — ${sampleErrors.join(" | ")}` : "";
+        setError(`Imported with ${failCount} error(s)${detail}`);
       }
       setActivePlaylistId(playlistId);
       await loadPlaylistTracks(playlistId);

@@ -574,28 +574,45 @@ impl Source for Crossfade {
     }
 
     fn try_seek(&mut self, pos: Duration) -> Result<(), rodio::source::SeekError> {
+        // UI / AudioPlayer hand off to the incoming track at *fade start*
+        // (`signal_fade_start`), while `self.current` is still the outgoing
+        // source until `promote_next`. Seeking must follow the logical track
+        // the UI already shows — otherwise the scrubber jumps the previous song.
+        if self.ui_on_next && self.next.is_some() {
+            let _ = self.promote_next();
+        }
+
         self.current.try_seek(pos)?;
         self.position = pos;
         self.in_crossfade = false;
         self.fade_progress = 0.0;
         self.next_position = Duration::ZERO;
-        self.ui_on_next = false;
         self.fade_from = None;
 
-        // Always rewind the upcoming track. If this seek landed inside the
-        // configured fade region, start a *fresh* shortened fade from `pos`
-        // over whatever time remains — never jump into the middle of next.
-        if let Some(ref mut n) = self.next {
-            n.try_seek(Duration::ZERO)?;
-        }
-        if let Some(dur) = self.current_duration {
-            let fade_secs = self.configured_fade_secs();
-            if fade_secs > 0.0 {
-                let natural_start = dur.saturating_sub(Duration::from_secs_f32(fade_secs));
-                if pos >= natural_start && pos < dur {
-                    self.fade_from = Some(pos);
+        // If we already handed the UI to this track (or just promoted into it),
+        // keep reporting it. Only clear the flag when seeking the outgoing track
+        // before fade-start handoff.
+        if !self.ui_on_next {
+            // Seeking the outgoing track — rewind any attached next source and
+            // optionally start a shortened fade if we landed in the fade window.
+            if let Some(ref mut n) = self.next {
+                n.try_seek(Duration::ZERO)?;
+            }
+            if let Some(dur) = self.current_duration {
+                let fade_secs = self.configured_fade_secs();
+                if fade_secs > 0.0 {
+                    let natural_start = dur.saturating_sub(Duration::from_secs_f32(fade_secs));
+                    if pos >= natural_start && pos < dur {
+                        self.fade_from = Some(pos);
+                    }
                 }
             }
+        } else {
+            // Logical current is the (promoted) incoming track — no outgoing
+            // partner left to fade with from this seek.
+            self.next = None;
+            self.next_path = None;
+            self.next_duration = None;
         }
 
         self.update_crossfade_region();

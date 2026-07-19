@@ -841,6 +841,10 @@ impl AudioPlayer {
                 self.clock.elapsed_before_start = offset;
                 self.clock.started_at = was_playing.then(Instant::now);
                 self.prefetched_next = None;
+                // Crossfade may promote the incoming track inside try_seek when
+                // the UI already handed off at fade-start — adopt that path so
+                // transport and metadata stay on the song the scrubber controls.
+                self.adopt_crossfade_logical_track();
                 if was_playing {
                     self.set_soft_fade_target(1.0);
                 }
@@ -999,6 +1003,39 @@ impl AudioPlayer {
             duration,
         };
         true
+    }
+
+    /// Align `current_path` / duration with the crossfade mixer after a seek.
+    ///
+    /// Unlike [`Self::check_crossfade_track_switch`], this does not require the
+    /// `track_switched` latch — seek may promote the incoming source without
+    /// re-signaling a switch.
+    fn adopt_crossfade_logical_track(&mut self) {
+        let Some(state) = self.crossfade_state.clone() else {
+            return;
+        };
+        let Ok(guard) = state.lock() else {
+            return;
+        };
+        let Some(new_path) = guard.current_path.clone() else {
+            return;
+        };
+        let duration = guard.duration;
+        drop(guard);
+
+        let new_path_buf = PathBuf::from(&new_path);
+        if self.current_path.as_deref() != Some(new_path_buf.as_path()) {
+            let peeked = self.queue.peek_next(&self.repeat).map(str::to_string);
+            if peeked.as_deref() == Some(new_path.as_str()) {
+                let _ = self.queue.next(&self.repeat);
+            } else if let Some(idx) = self.queue.tracks().iter().position(|p| p == &new_path) {
+                let _ = self.queue.jump(idx);
+            }
+            self.current_path = Some(new_path_buf);
+        }
+        if duration.is_some() {
+            self.clock.duration = duration;
+        }
     }
 
     pub fn volume(&self) -> f32 {
