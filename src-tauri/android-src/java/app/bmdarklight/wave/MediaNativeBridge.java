@@ -2,6 +2,8 @@ package app.bmdarklight.wave;
 
 import android.util.Log;
 
+import androidx.annotation.Keep;
+
 /**
  * JNI bridge so media notification / audio-focus / headset events can control
  * the Rust audio engine without going through the WebView.
@@ -9,6 +11,7 @@ import android.util.Log;
  * When the app is backgrounded, Android may freeze the WebView — JS media
  * handlers then never run. Native dispatch keeps play/pause/next working.
  */
+@Keep
 public final class MediaNativeBridge {
     private static final String TAG = "MediaNativeBridge";
 

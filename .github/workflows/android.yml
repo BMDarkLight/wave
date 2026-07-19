@@ -136,26 +136,143 @@ jobs:
       - name: Initialize Tauri Android
         run: npx tauri android init
 
-      # `tauri android init` regenerates gen/android and drops app-owned Java.
-      # Restore FolderPickerCallback, MediaNativeBridge, etc.
-      - name: Patch Android Java sources
-        run: bash ./scripts/patch-android-sources.sh
-
-      # `tauri android init` ships default Tauri launcher icons in gen/.
-      # Overlay the Wave icons from src-tauri/icons/android into the Android res tree.
-      - name: Apply Wave Android icons
+      # Everything after `tauri android init` is applied here in CI — no external
+      # patch scripts. Restores JNI Java, icons, permissions, portrait lock,
+      # and ProGuard keep rules for release minify.
+      - name: Configure Android project
         run: |
-          RES="src-tauri/gen/android/app/src/main/res"
-          SRC="src-tauri/icons/android"
-          if [ ! -d "$SRC" ]; then
-            echo "::error::Missing $SRC — run \`npx tauri icon assets/app-icon.png\` first"
+          set -euo pipefail
+
+          APP_DIR="src-tauri/gen/android/app"
+          JAVA_SRC="src-tauri/android-src/java"
+          JAVA_DEST="$APP_DIR/src/main/java"
+          RES_SRC="src-tauri/icons/android"
+          RES_DEST="$APP_DIR/src/main/res"
+          MANIFEST="$APP_DIR/src/main/AndroidManifest.xml"
+          PROGUARD_SRC="src-tauri/android-src/proguard-wave.pro"
+
+          if [[ ! -d "$JAVA_DEST" ]]; then
+            echo "::error::Missing $JAVA_DEST — tauri android init failed?"
             exit 1
           fi
-          cp -R "$SRC"/. "$RES"/
-          echo "Applied Wave launcher icons into $RES"
+          if [[ ! -d "$JAVA_SRC" ]]; then
+            echo "::error::Missing $JAVA_SRC"
+            exit 1
+          fi
+          if [[ ! -f "$MANIFEST" ]]; then
+            echo "::error::Missing $MANIFEST"
+            exit 1
+          fi
+          if [[ ! -d "$RES_SRC" ]]; then
+            echo "::error::Missing $RES_SRC — run \`npx tauri icon assets/app-icon.png\` first"
+            exit 1
+          fi
 
-      - name: Patch Android permissions
-        run: bash ./scripts/patch-android-manifest.sh
+          # ── JNI / SAF Java sources ──────────────────────────────────────
+          cp -R "$JAVA_SRC"/. "$JAVA_DEST"/
+          echo "Synced Android Java sources from $JAVA_SRC"
+
+          # Strip UTF-8 BOMs (javac rejects \ufeff before `package`).
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path("src-tauri/gen/android/app/src/main/java")
+          bom = b"\xef\xbb\xbf"
+          for path in root.rglob("*.java"):
+              data = path.read_bytes()
+              if data.startswith(bom):
+                  path.write_bytes(data[len(bom):])
+                  print(f"Stripped UTF-8 BOM: {path}")
+          PY
+
+          # ── ProGuard keep rules (JNI entry points) ──────────────────────
+          if [[ -f "$PROGUARD_SRC" ]]; then
+            cp "$PROGUARD_SRC" "$APP_DIR/proguard-wave.pro"
+            for candidate in "$APP_DIR/proguard-rules.pro" "$APP_DIR/proguard-rules.txt"; do
+              if [[ -f "$candidate" ]] && ! grep -q "proguard-wave.pro" "$candidate"; then
+                printf '\n# Wave JNI keep rules\n-include proguard-wave.pro\n' >> "$candidate"
+                echo "Hooked Wave keep rules into $candidate"
+              fi
+            done
+          fi
+
+          # ── Launcher icons ──────────────────────────────────────────────
+          cp -R "$RES_SRC"/. "$RES_DEST"/
+          echo "Applied Wave launcher icons into $RES_DEST"
+
+          # ── Manifest: permissions + portrait lock ───────────────────────
+          python3 - "$MANIFEST" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+
+          permissions = [
+              "android.permission.INTERNET",
+              "android.permission.WAKE_LOCK",
+              "android.permission.FOREGROUND_SERVICE",
+              "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK",
+              "android.permission.MODIFY_AUDIO_SETTINGS",
+              "android.permission.POST_NOTIFICATIONS",
+              "android.permission.READ_MEDIA_AUDIO",
+              "android.permission.READ_EXTERNAL_STORAGE",
+          ]
+
+          inserts = []
+          for perm in permissions:
+              marker = f'android:name="{perm}"'
+              if marker in text:
+                  continue
+              if perm == "android.permission.READ_EXTERNAL_STORAGE":
+                  inserts.append(
+                      f'    <uses-permission android:name="{perm}" android:maxSdkVersion="32" />'
+                  )
+              else:
+                  inserts.append(f'    <uses-permission android:name="{perm}" />')
+
+          if inserts:
+              app_idx = text.find("<application")
+              if app_idx == -1:
+                  print("::error::could not find <application> in AndroidManifest.xml", file=sys.stderr)
+                  sys.exit(1)
+              text = text[:app_idx] + "\n".join(inserts) + "\n" + text[app_idx:]
+              print(f"Patched {len(inserts)} Android permission(s)")
+              for line in inserts:
+                  print(f"  + {line.strip()}")
+          else:
+              print("Android permissions already present")
+
+          orientation = 'android:screenOrientation="portrait"'
+
+          def patch_activity(match: re.Match) -> str:
+              tag = match.group(0)
+              if "android:screenOrientation=" in tag:
+                  return re.sub(
+                      r'android:screenOrientation="[^"]*"',
+                      orientation,
+                      tag,
+                      count=1,
+                  )
+              if tag.endswith("/>"):
+                  return tag[:-2].rstrip() + f"\n            {orientation} />"
+              if tag.endswith(">"):
+                  return tag[:-1].rstrip() + f"\n            {orientation}>"
+              return tag
+
+          patched, count = re.subn(
+              r"<activity\b[^>]*/?>",
+              patch_activity,
+              text,
+              flags=re.IGNORECASE | re.DOTALL,
+          )
+          if count == 0:
+              print("::error::No <activity> tags found in AndroidManifest.xml", file=sys.stderr)
+              sys.exit(1)
+
+          path.write_text(patched, encoding="utf-8")
+          print(f"Locked {count} activity(ies) to portrait")
+          PY
 
       # Signs release APKs via keystore.properties + Gradle signingConfigs.
       # Secrets: ANDROID_KEY_BASE64, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD

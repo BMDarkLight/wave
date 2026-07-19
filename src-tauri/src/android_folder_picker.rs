@@ -36,7 +36,7 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
         if depth > 6 {
             return Some("Folder picker: nested Java exception".into());
         }
-        // Unwrap ExecutionException / InvocationTargetException causes first.
+        // Unwrap ExecutionException / InvocationTargetException / NoSuchMethodError causes.
         match env.call_method(&ex, "getCause", "()Ljava/lang/Throwable;", &[]) {
             Ok(cause_v) => {
                 if let Ok(cause) = cause_v.l() {
@@ -93,7 +93,6 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
         call: impl FnOnce(&mut jni::JNIEnv<'local>) -> jni::errors::Result<JValueOwned<'local>>,
         what: &str,
     ) -> Result<JValueOwned<'local>, String> {
-        // Clear any stale exception before the call so we attribute failures correctly.
         if env.exception_check().unwrap_or(false) {
             return Err(jni_error(env, what));
         }
@@ -115,7 +114,6 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
         }
     }
 
-    // Get the JavaVM and Activity from ndk_context.
     let ctx = android_context();
     let vm = unsafe { JavaVM::from_raw(ctx.vm() as *mut _) }
         .map_err(|e| format!("Folder picker: failed to get JavaVM: {e}"))?;
@@ -130,9 +128,7 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
 
     let activity_obj = unsafe { JObject::from_raw(activity as *mut _) };
 
-    // Android's JNI FindClass (used by call_static_method with a class name)
-    // often cannot see app classes from a native thread. Load via the
-    // Activity ClassLoader instead.
+    // Load via the Activity ClassLoader — system FindClass often misses app classes.
     let picker_class = {
         let loader_v = call_checked(
             &mut env,
@@ -173,122 +169,60 @@ pub fn pick_folder(_app: &AppHandle) -> Result<FolderPickerResult, String> {
             .map_err(|e| format!("Folder picker: bad Class object: {e}"))?;
         if class_obj.is_null() {
             return Err(
-                "Folder picker: FolderPickerCallback class missing from APK".into(),
+                "Folder picker: FolderPickerCallback class missing from APK — rebuild with Android CI (Configure Android project step)".into(),
             );
         }
         jni::objects::JClass::from(class_obj)
     };
 
-    // static CompletableFuture pick(Activity)
-    let future_value = call_checked(
+    // JNI-friendly API: String[] pickForJni(Activity) — avoids CompletableFuture
+    // method descriptors that R8/desugar often break for GetStaticMethodID.
+    let result_value = call_checked(
         &mut env,
         |env| {
             env.call_static_method(
                 &picker_class,
-                "pick",
-                "(Landroid/app/Activity;)Ljava/util/concurrent/CompletableFuture;",
+                "pickForJni",
+                "(Landroid/app/Activity;)[Ljava/lang/String;",
                 &[JValue::Object(&activity_obj)],
             )
         },
-        "Folder picker: FolderPickerCallback.pick() failed",
+        "Folder picker: FolderPickerCallback.pickForJni() failed",
     )?;
 
-    let future = future_value
+    let result_obj = result_value
         .l()
-        .map_err(|e| format!("Folder picker: bad CompletableFuture: {e}"))?;
-    if future.is_null() {
-        return Err("Folder picker: pick() returned null future".into());
-    }
+        .map_err(|e| format!("Folder picker: bad String[] result: {e}"))?;
 
-    let time_unit_class = env
-        .find_class("java/util/concurrent/TimeUnit")
-        .map_err(|e| format!("Folder picker: TimeUnit not found: {e}"))?;
-    if env.exception_check().unwrap_or(false) {
-        return Err(jni_error(&mut env, "Folder picker: TimeUnit lookup failed"));
-    }
-
-    let seconds_field = env
-        .get_static_field(&time_unit_class, "SECONDS", "Ljava/util/concurrent/TimeUnit;")
-        .map_err(|e| format!("Folder picker: TimeUnit.SECONDS missing: {e}"))?;
-    if env.exception_check().unwrap_or(false) {
-        return Err(jni_error(&mut env, "Folder picker: TimeUnit.SECONDS failed"));
-    }
-    let seconds = seconds_field
-        .l()
-        .map_err(|e| format!("Folder picker: bad TimeUnit.SECONDS: {e}"))?;
-
-    // future.get(120, SECONDS) — long enough for the system picker UI.
-    let result_value = call_checked(
-        &mut env,
-        |env| {
-            env.call_method(
-                &future,
-                "get",
-                "(JLjava/util/concurrent/TimeUnit;)Ljava/lang/Object;",
-                &[JValue::Long(120), JValue::Object(&seconds)],
-            )
-        },
-        "Folder picker failed (cancelled, timed out, or internal error)",
-    );
-
-    let result = match result_value {
-        Ok(v) => v
-            .l()
-            .map_err(|e| format!("Folder picker: bad result object: {e}"))?,
-        Err(msg) => {
-            // Unwrap ExecutionException cause when present for a clearer message.
-            return Err(msg);
-        }
-    };
-
-    // Null => user cancelled.
-    if result.is_null() {
+    // null => user cancelled
+    if result_obj.is_null() {
         return Err("Folder picker cancelled".into());
     }
 
-    let uri_field = env
-        .get_field(&result, "uri", "Ljava/lang/String;")
-        .map_err(|e| format!("Folder picker: missing uri field: {e}"))?;
-    if env.exception_check().unwrap_or(false) {
-        return Err(jni_error(&mut env, "Folder picker: reading uri failed"));
+    let array = jni::objects::JObjectArray::from(result_obj);
+    let len = env
+        .get_array_length(&array)
+        .map_err(|e| format!("Folder picker: bad result array length: {e}"))?;
+    if len < 1 {
+        return Err("Folder picker returned an empty result".into());
     }
-    let uri_obj = uri_field
-        .l()
-        .map_err(|e| format!("Folder picker: bad uri field: {e}"))?;
+
+    let uri_obj = env
+        .get_object_array_element(&array, 0)
+        .map_err(|e| format!("Folder picker: reading uri failed: {e}"))?;
     if uri_obj.is_null() {
         return Err("Folder picker returned null URI".into());
     }
-    let uri_jstring: JString = uri_obj.into();
-    let uri_string = env
-        .get_string(&uri_jstring)
-        .map_err(|e| format!("Folder picker: uri string convert failed: {e}"))?
-        .to_string_lossy()
-        .into_owned();
+    let uri_string = jstring_to_owned(&mut env, uri_obj)
+        .ok_or_else(|| "Folder picker returned empty URI".to_string())?;
 
-    let display_name_field = env
-        .get_field(&result, "displayName", "Ljava/lang/String;")
-        .map_err(|e| format!("Folder picker: missing displayName field: {e}"))?;
-    if env.exception_check().unwrap_or(false) {
-        return Err(jni_error(
-            &mut env,
-            "Folder picker: reading displayName failed",
-        ));
-    }
-    let display_name = {
-        let obj = display_name_field
-            .l()
-            .map_err(|e| format!("Folder picker: bad displayName field: {e}"))?;
-        if obj.is_null() {
-            None
-        } else {
-            let js: JString = obj.into();
-            let name = env
-                .get_string(&js)
-                .map_err(|e| format!("Folder picker: displayName convert failed: {e}"))?
-                .to_string_lossy()
-                .into_owned();
-            Some(name)
-        }
+    let display_name = if len >= 2 {
+        let name_obj = env
+            .get_object_array_element(&array, 1)
+            .map_err(|e| format!("Folder picker: reading displayName failed: {e}"))?;
+        jstring_to_owned(&mut env, name_obj)
+    } else {
+        None
     };
 
     Ok(FolderPickerResult {

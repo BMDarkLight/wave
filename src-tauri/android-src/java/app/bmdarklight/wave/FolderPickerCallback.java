@@ -1,21 +1,27 @@
 package app.bmdarklight.wave;
 
-import android.app.Activity;
-import android.content.Intent;
-import android.net.Uri;
-import android.os.Bundle;
-import android.provider.DocumentsContract;
-import android.util.Log;
-
 import androidx.activity.ComponentActivity;
 import androidx.activity.result.ActivityResultLauncher;
-import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.activity.result.contract.ActivityResultContract;
+import androidx.annotation.Keep;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentActivity;
 
+import android.content.Context;
+import android.content.Intent;
+import android.app.Activity;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.provider.DocumentsContract;
+import android.util.Log;
+
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * SAF folder picker that is safe to invoke from JNI at any time.
@@ -24,16 +30,23 @@ import java.util.concurrent.CompletableFuture;
  * short-lived Fragment so registration happens in the Fragment's {@code onCreate}
  * (before that Fragment is STARTED). All failures complete the future instead of
  * throwing out of the Activity.
+ *
+ * JNI must call {@link #pickForJni(Activity)} — not {@link #pick(Activity)}.
+ * The JNI-friendly entry returns {@code String[]} so method lookup does not
+ * depend on {@code CompletableFuture} (which R8 / desugar can break for JNI).
  */
+@Keep
 public final class FolderPickerCallback {
     private static final String TAG = "FolderPickerCallback";
     private static final String FRAGMENT_TAG = "wave_folder_picker";
+    private static final long PICK_TIMEOUT_SECONDS = 120L;
 
     private FolderPickerCallback() {}
 
+    @Keep
     public static class FolderPickerResult {
-        public final String uri;
-        public final String displayName;
+        @Keep public final String uri;
+        @Keep public final String displayName;
 
         public FolderPickerResult(String uri, String displayName) {
             this.uri = uri;
@@ -42,7 +55,48 @@ public final class FolderPickerCallback {
     }
 
     /**
-     * JNI entry: launch the tree picker and return a future.
+     * JNI entry point.
+     *
+     * @return {@code null} if the user cancelled; otherwise
+     *         {@code { uri, displayName }} (displayName may be empty).
+     * @throws Exception on failure (message is surfaced to the app UI)
+     */
+    @Keep
+    @Nullable
+    public static String[] pickForJni(@Nullable Activity activity) throws Exception {
+        if (activity == null) {
+            throw new IllegalStateException("Folder picker: Activity is null");
+        }
+        // Must not run on the main thread — we block on the future below.
+        if (activity.getMainLooper().getThread() == Thread.currentThread()) {
+            throw new IllegalStateException(
+                "Folder picker: pickForJni must not be called on the UI thread");
+        }
+
+        try {
+            FolderPickerResult result = pick(activity).get(PICK_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            if (result == null) {
+                return null; // cancelled
+            }
+            String name = result.displayName != null ? result.displayName : "";
+            return new String[] { result.uri, name };
+        } catch (TimeoutException e) {
+            throw new RuntimeException("Folder picker timed out waiting for a folder", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            String msg = safeMessage(cause);
+            if (cause instanceof Exception) {
+                throw (Exception) cause;
+            }
+            throw new RuntimeException("Folder picker failed: " + msg, cause);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Folder picker interrupted", e);
+        }
+    }
+
+    /**
+     * Launch the tree picker and return a future.
      * Completes with {@code null} on cancel, or exceptionally with a message on failure.
      */
     @NonNull
@@ -107,18 +161,18 @@ public final class FolderPickerCallback {
 
     /** Keep JNI-friendly instance constructors so older call sites still resolve. */
     public FolderPickerCallback(Activity activity) {
-        // no-op; use pick(Activity)
+        // no-op; use pickForJni(Activity)
     }
 
     public FolderPickerCallback(ComponentActivity activity) {
-        // no-op; use pick(Activity)
+        // no-op; use pickForJni(Activity)
     }
 
-    /** @deprecated Use {@link #pick(Activity)} */
+    /** @deprecated Use {@link #pickForJni(Activity)} from JNI. */
     public CompletableFuture<FolderPickerResult> pickFolder() {
         CompletableFuture<FolderPickerResult> future = new CompletableFuture<>();
         future.completeExceptionally(new UnsupportedOperationException(
-            "FolderPickerCallback.pickFolder() is deprecated; JNI must call FolderPickerCallback.pick(Activity)"));
+            "FolderPickerCallback.pickFolder() is deprecated; JNI must call pickForJni(Activity)"));
         return future;
     }
 
@@ -148,8 +202,11 @@ public final class FolderPickerCallback {
         public void onCreate(@Nullable Bundle savedInstanceState) {
             super.onCreate(savedInstanceState);
             try {
+                // Custom contract so the grant includes PERSISTABLE + PREFIX flags.
+                // Stock OpenDocumentTree does not always request those, which makes
+                // takePersistableUriPermission fail or only last for this session.
                 launcher = registerForActivityResult(
-                    new ActivityResultContracts.OpenDocumentTree(),
+                    new PersistableOpenDocumentTree(),
                     this::onTreePicked
                 );
             } catch (Throwable t) {
@@ -225,14 +282,32 @@ public final class FolderPickerCallback {
         }
 
         private static void persistUriPermission(Activity activity, Uri uri) {
+            // takePersistableUriPermission() ONLY accepts READ and/or WRITE flags.
+            // Passing FLAG_GRANT_PERSISTABLE_URI_PERMISSION here throws
+            // IllegalArgumentException (Preconditions.checkFlagsArgument).
+            final int takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
             try {
-                final int takeFlags = Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION;
                 activity.getContentResolver().takePersistableUriPermission(uri, takeFlags);
                 Log.d(TAG, "Persisted URI permission for: " + uri);
             } catch (SecurityException e) {
                 // Non-fatal — scan may still work for this session.
                 Log.w(TAG, "Failed to persist URI permission: " + e.getMessage());
+            } catch (IllegalArgumentException e) {
+                // OEM / flag mismatch — try read-only, then continue without persist.
+                Log.w(TAG, "takePersistableUriPermission(R+W) rejected, retrying READ: "
+                    + e.getMessage());
+                try {
+                    activity.getContentResolver().takePersistableUriPermission(
+                        uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    Log.d(TAG, "Persisted READ URI permission for: " + uri);
+                } catch (Exception retry) {
+                    Log.w(TAG, "Could not persist URI permission (session-only access): "
+                        + retry.getMessage());
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Could not persist URI permission (session-only access): "
+                    + e.getMessage());
             }
         }
 
@@ -250,6 +325,38 @@ public final class FolderPickerCallback {
                 Log.w(TAG, "Failed to get display name: " + e.getMessage());
             }
             return "Selected Folder";
+        }
+    }
+
+    /**
+     * Like {@link ActivityResultContracts.OpenDocumentTree}, but requests
+     * persistable + prefix grants so {@code takePersistableUriPermission}
+     * can keep access after the app restarts.
+     */
+    @Keep
+    static final class PersistableOpenDocumentTree extends ActivityResultContract<Uri, Uri> {
+        @NonNull
+        @Override
+        public Intent createIntent(@NonNull Context context, @Nullable Uri input) {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+            );
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && input != null) {
+                intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, input);
+            }
+            return intent;
+        }
+
+        @Override
+        public Uri parseResult(int resultCode, @Nullable Intent intent) {
+            if (resultCode != Activity.RESULT_OK || intent == null) {
+                return null;
+            }
+            return intent.getData();
         }
     }
 }
