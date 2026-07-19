@@ -5,6 +5,10 @@
     public static *** pick(android.app.Activity);
 }
 -keep class app.bmdarklight.wave.FolderPickerCallback$* { *; }
+-keep class app.bmdarklight.wave.SafMediaScanner { *; }
+-keepclassmembers class app.bmdarklight.wave.SafMediaScanner {
+    public static java.lang.String[] listAudioFiles(android.app.Activity, java.lang.String);
+}
 -keep class app.bmdarklight.wave.MediaNativeBridge { *; }
 -keepclassmembers class app.bmdarklight.wave.MediaNativeBridge {
     public static void dispatch(java.lang.String);

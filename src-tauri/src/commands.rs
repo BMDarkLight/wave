@@ -515,6 +515,16 @@ pub async fn pick_media_folder(
     Err("Folder picker is only available on Android".to_string())
 }
 
+/// Recursively list audio files under a SAF `content://…/tree/…` URI.
+/// Used on Android because `plugin-fs` `readDir` cannot walk content URIs.
+#[tauri::command]
+pub async fn scan_saf_folder(
+    uri: String,
+    app: tauri::AppHandle,
+) -> Result<Vec<String>, String> {
+    blocking(move || crate::android_saf_scan::list_audio_files(&app, &uri)).await
+}
+
 // ── Playback commands ─────────────────────────────────────────────────────────
 
 #[tauri::command]

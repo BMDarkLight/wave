@@ -13,6 +13,7 @@ mod os_media;
 mod android_import;
 mod android_jni;
 mod android_folder_picker;
+mod android_saf_scan;
 #[cfg(target_os = "android")]
 mod android_media_bridge;
 
@@ -260,6 +261,7 @@ pub fn run() {
             commands::is_folder_setup_dismissed,
             commands::dismiss_folder_setup,
             commands::pick_media_folder,
+            commands::scan_saf_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

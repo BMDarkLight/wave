@@ -836,9 +836,26 @@ export const isFolderSetupDismissed = (): Promise<boolean> =>
 export const dismissFolderSetup = (): Promise<void> =>
   safeInvoke("dismiss_folder_setup");
 
-/** Recursively scan a directory URI using @tauri-apps/plugin-fs.
- *  Works with content:// URIs on Android. Returns audio file URIs/paths. */
+/** Recursively scan a directory URI for audio files.
+ *  - Android SAF `content://…/tree/…` → native DocumentsContract walk
+ *    (`tauri-plugin-fs` readDir cannot list content:// trees).
+ *  - Filesystem paths → `@tauri-apps/plugin-fs` readDir. */
 export const scanDirectoryRecursive = async (dirUri: string): Promise<string[]> => {
+  const trimmed = dirUri.trim();
+  if (trimmed.startsWith("content://")) {
+    await tauriInitialized;
+    if (!invokeFn) {
+      throw new Error(TAURI_UNAVAILABLE);
+    }
+    try {
+      return await invokeFn<string[]>("scan_saf_folder", { uri: trimmed });
+    } catch (err) {
+      throw new Error(
+        invokeErrorMessage(err, "Failed to scan the selected folder"),
+      );
+    }
+  }
+
   const { readDir } = await import("@tauri-apps/plugin-fs");
   const results: string[] = [];
   let rootError: unknown = null;
@@ -888,7 +905,7 @@ export const scanDirectoryRecursive = async (dirUri: string): Promise<string[]> 
     }
   };
 
-  await walk(dirUri, true);
+  await walk(trimmed, true);
 
   if (rootError != null && readableDirs === 0) {
     throw new Error(
