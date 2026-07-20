@@ -582,7 +582,7 @@ fn cmd_tracks_info(track_id: String) {
         .get_tracks_by_paths(&[path.clone()])
         .ok()
         .and_then(|v| v.into_iter().next().flatten())
-        .or_else(|| extract_track(&path).ok());
+        .or_else(|| extract_track(None, &path).ok());
 
     match track {
         Some(t) => print_full_metadata(&t),
@@ -1281,7 +1281,7 @@ fn cmd_metadata_get(track_id: String) {
         .get_tracks_by_paths(&[path.clone()])
         .ok()
         .and_then(|v| v.into_iter().next().flatten())
-        .or_else(|| extract_track(&path).ok());
+        .or_else(|| extract_track(None, &path).ok());
     match track {
         Some(t) => print_full_metadata(&t),
         None => {
@@ -1304,7 +1304,7 @@ fn cmd_metadata_cover_export(track_id: String, output: String) {
         .get_tracks_by_paths(&[path.clone()])
         .ok()
         .and_then(|v| v.into_iter().next().flatten())
-        .or_else(|| extract_track(&path).ok());
+        .or_else(|| extract_track(None, &path).ok());
     match track {
         Some(t) => {
             if let Some(data_url) = &t.cover_art_data_url {

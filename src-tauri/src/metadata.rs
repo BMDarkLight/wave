@@ -1,4 +1,3 @@
-use base64::{engine::general_purpose, Engine as _};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,7 +12,7 @@ use symphonia::core::meta::{MetadataOptions, StandardTagKey, StandardVisualKey, 
 use symphonia::core::probe::Hint;
 use uuid::Uuid;
 
-const MAX_EMBEDDED_ART_BYTES: usize = 8 * 1024 * 1024;
+const MAX_EMBEDDED_ART_BYTES: usize = 100 * 1024;
 const ONLINE_LOOKUP_TIMEOUT_SECONDS: u64 = 5;
 const USER_AGENT: &str = "Wave/0.1.0 (local metadata enrichment)";
 
@@ -62,6 +61,7 @@ pub struct Track {
     pub file_size: i64,
     pub modified_at: i64,
     pub indexed_at: i64,
+    pub is_saf_uri: bool,
 }
 
 #[derive(Default)]
@@ -109,7 +109,7 @@ pub fn is_supported_audio_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub fn extract_track(path: &str) -> Result<Track, String> {
+pub fn extract_track(app: Option<&tauri::AppHandle>, path: &str) -> Result<Track, String> {
     let path_buf = PathBuf::from(path);
     if !path_buf.is_file() {
         return Err("Audio file does not exist".to_string());
@@ -194,8 +194,9 @@ pub fn extract_track(path: &str) -> Result<Track, String> {
     let lyrics = tags.lyrics.or_else(|| read_sidecar_lyrics(&path_buf));
     let lyrics_source = lyrics.as_ref().map(|_| "embedded-or-sidecar".to_string());
 
+    let track_id = Uuid::new_v4().to_string();
     let mut track = Track {
-        id: Uuid::new_v4().to_string(),
+        id: track_id.clone(),
         path: path.to_string(),
         name,
         title: tags.title.unwrap_or(fallback.title),
@@ -213,19 +214,43 @@ pub fn extract_track(path: &str) -> Result<Track, String> {
         bit_depth,
         lyrics,
         lyrics_source,
-        cover_art_data_url: cover_art.as_ref().map(|cover| cover.data_url.clone()),
-        cover_art_mime: cover_art.as_ref().map(|cover| cover.mime.clone()),
-        cover_art_source: cover_art.as_ref().map(|cover| cover.source.clone()),
+        cover_art_data_url: None,
+        cover_art_mime: None,
+        cover_art_source: None,
         fingerprint_sha256,
         acoustid_fingerprint: tags.acoustid_fingerprint,
         musicbrainz_recording_id: tags.musicbrainz_recording_id,
         file_size,
         modified_at,
         indexed_at,
+        is_saf_uri: path.starts_with("content://"),
     };
 
+    if let Some(art) = cover_art {
+        if let Some(app_handle) = app {
+            let mime = art.mime.clone();
+            match crate::cover_art::save_cover_art(
+                app_handle,
+                &track_id,
+                crate::cover_art::ExtractedCoverArt {
+                    data: art.data,
+                    mime: mime.clone(),
+                },
+            ) {
+                Ok(data_url) => {
+                    track.cover_art_data_url = Some(data_url);
+                    track.cover_art_mime = Some(mime);
+                    track.cover_art_source = Some(art.source);
+                }
+                Err(e) => tracing::debug!("Cover art save skipped: {e}"),
+            }
+        }
+    }
+
     if track.cover_art_data_url.is_none() {
-        enrich_cover_art_online(&mut track);
+        if let Some(app_handle) = app {
+            enrich_cover_art_online(app_handle, &mut track);
+        }
     }
     Ok(track)
 }
@@ -264,7 +289,7 @@ fn merge_tags(target: &mut Tags, tags: &[Tag]) {
 }
 
 struct CoverArt {
-    data_url: String,
+    data: Vec<u8>,
     mime: String,
     source: String,
 }
@@ -284,9 +309,9 @@ fn extract_cover_art(visuals: &[Visual]) -> Option<CoverArt> {
     } else {
         visual.media_type.clone()
     };
-    let encoded = general_purpose::STANDARD.encode(&visual.data);
+
     Some(CoverArt {
-        data_url: format!("data:{mime};base64,{encoded}"),
+        data: visual.data.to_vec(),
         mime,
         source: "embedded".to_string(),
     })
@@ -330,15 +355,38 @@ fn hash_file_sha256(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn enrich_cover_art_online(track: &mut Track) {
+fn enrich_cover_art_online(app: &tauri::AppHandle, track: &mut Track) {
     let Some(release_id) = find_musicbrainz_release_id(track) else {
         return;
     };
 
-    track.cover_art_data_url = Some(format!(
-        "https://coverartarchive.org/release/{release_id}/front-500"
-    ));
-    track.cover_art_mime = None;
+    let url = format!("https://coverartarchive.org/release/{release_id}/front-500");
+    let client = metadata_client();
+
+    let response = match client.get(&url).send().and_then(|r| r.error_for_status()) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    let bytes = match response.bytes() {
+        Ok(b) => b.to_vec(),
+        Err(_) => return,
+    };
+
+    let data_url = match crate::cover_art::save_cover_art(
+        app,
+        &track.id,
+        crate::cover_art::ExtractedCoverArt {
+            data: bytes,
+            mime: "image/jpeg".to_string(),
+        },
+    ) {
+        Ok(url) => url,
+        Err(_) => return,
+    };
+
+    track.cover_art_data_url = Some(data_url);
+    track.cover_art_mime = Some("image/jpeg".to_string());
     track.cover_art_source = Some("cover-art-archive".to_string());
 }
 

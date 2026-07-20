@@ -200,6 +200,7 @@ fn placeholder_track(path: &str) -> Track {
         file_size: 0,
         modified_at: 0,
         indexed_at: 0,
+        is_saf_uri: false,
     }
 }
 
@@ -488,7 +489,7 @@ pub async fn import_audio_sources(
 ) -> Result<ImportAudioResult, String> {
     let app = app.clone();
     blocking(move || {
-        let (ok, errors) = crate::android_import::materialize_audio_sources(&app, &paths);
+        let (ok, errors) = crate::android::import::materialize_audio_sources(&app, &paths);
         Ok(ImportAudioResult { paths: ok, errors })
     })
     .await
@@ -500,9 +501,9 @@ pub async fn import_audio_sources(
 #[cfg(target_os = "android")]
 pub async fn pick_media_folder(
     app: tauri::AppHandle,
-) -> Result<crate::android_folder_picker::FolderPickerResult, String> {
+) -> Result<crate::android::folder_picker::FolderPickerResult, String> {
     // Block off the async runtime — the JNI side waits on the system picker.
-    blocking(move || crate::android_folder_picker::pick_folder(&app)).await
+    blocking(move || crate::android::folder_picker::pick_folder(&app)).await
 }
 
 /// Pick a folder using Android Storage Access Framework (SAF).
@@ -511,7 +512,7 @@ pub async fn pick_media_folder(
 #[cfg(not(target_os = "android"))]
 pub async fn pick_media_folder(
     _app: tauri::AppHandle,
-) -> Result<crate::android_folder_picker::FolderPickerResult, String> {
+) -> Result<crate::android::folder_picker::FolderPickerResult, String> {
     Err("Folder picker is only available on Android".to_string())
 }
 
@@ -522,7 +523,7 @@ pub async fn scan_saf_folder(
     uri: String,
     app: tauri::AppHandle,
 ) -> Result<Vec<String>, String> {
-    blocking(move || crate::android_saf_scan::list_audio_files(&app, &uri)).await
+    blocking(move || crate::android::saf_scan::list_audio_files(&app, &uri)).await
 }
 
 // ── Playback commands ─────────────────────────────────────────────────────────
@@ -536,13 +537,14 @@ pub async fn play_track(
     let app_clone = app.clone();
     let path_clone = path.clone();
     let local_path = blocking(move || {
-        crate::android_import::materialize_audio_source(&app_clone, &path_clone)
+        crate::android::import::resolve_playback_source(&app_clone, &path_clone)
             .map(|p| p.to_string_lossy().into_owned())
             .map_err(|e| format!("Could not access audio file: {e}"))
     })
     .await?;
 
     let play_path = local_path.clone();
+    let original_path = path.clone();
     let app_clone = app.clone();
     blocking(move || {
         with_app_player(&app_clone, |player| {
@@ -552,11 +554,17 @@ pub async fn play_track(
     .await?;
 
     let app_clone = app.clone();
-    let lookup_path = local_path.clone();
+    let lookup_a = original_path;
+    let lookup_b = local_path;
     let track = blocking(move || {
         let lib = app_clone.state::<LibraryState>();
         let lib = lib.0.lock().map_err(|e| e.to_string())?;
-        Ok::<_, String>(resolve_track(&lib, &lookup_path))
+        match lib.get_tracks_by_paths(&[lookup_a.clone()]) {
+            Ok(results) if results.first().is_some_and(Option::is_some) => {
+                Ok::<_, String>(results.into_iter().next().flatten().unwrap())
+            }
+            _ => Ok(resolve_track(&lib, &lookup_b)),
+        }
     })
     .await?;
     sync_bridge_now_playing(&app, &track);
@@ -586,10 +594,10 @@ pub async fn play_tracks(
             paths_clone
                 .into_iter()
                 .map(|path| {
-                    crate::android_import::materialize_audio_source(&app_clone, &path)
+                    crate::android::import::resolve_playback_source(&app_clone, &path)
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_else(|e| {
-                            tracing::warn!("Failed to materialize track {path}: {e}");
+                            tracing::warn!("Failed to resolve track {path}: {e}");
                             path
                         })
                 })
@@ -866,7 +874,7 @@ pub async fn add_track_to_playlist(
 ) -> Result<Track, String> {
     let app = app.clone();
     blocking(move || {
-        let local = crate::android_import::materialize_audio_source(&app, &path)?;
+        let local = crate::android::import::materialize_audio_source(&app, &path)?;
         let library = app.state::<LibraryState>();
         let lib = library.0.lock().map_err(|e| e.to_string())?;
         lib.add_track_to_default_playlist(local.to_string_lossy().into_owned())
@@ -990,7 +998,7 @@ pub async fn play_track_from_playlist(
         Ok::<_, String>(raw_track_paths
             .into_iter()
             .map(|path| {
-                crate::android_import::materialize_audio_source(&app_clone, &path)
+                crate::android::import::materialize_audio_source(&app_clone, &path)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|e| {
                         tracing::warn!("Failed to materialize track {path}: {e}");
@@ -1262,7 +1270,7 @@ pub async fn add_track_to_playlist_by_id(
 ) -> Result<Track, String> {
     let app = app.clone();
     blocking(move || {
-        let local = crate::android_import::materialize_audio_source(&app, &path)?;
+        let local = crate::android::import::materialize_audio_source(&app, &path)?;
         let library = app.state::<LibraryState>();
         let lib = library.0.lock().map_err(|e| e.to_string())?;
         lib.add_track_to_playlist(&id, local.to_string_lossy().into_owned())
@@ -1456,7 +1464,7 @@ pub async fn play_track_from_specific_playlist(
             paths_to_materialize
                 .into_iter()
                 .map(|path| {
-                    crate::android_import::materialize_audio_source(&app_clone, &path)
+                    crate::android::import::materialize_audio_source(&app_clone, &path)
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_else(|e| {
                             tracing::warn!("Failed to materialize track {path}: {e}");
@@ -1913,6 +1921,9 @@ pub struct ScanImportResult {
     pub errors: Vec<String>,
 }
 
+// Process in batches to avoid OOM/crashes on mobile with large folders
+const IMPORT_BATCH_SIZE: usize = 20;
+
 #[tauri::command]
 pub async fn import_scanned_audio(
     paths: Vec<String>,
@@ -1923,24 +1934,30 @@ pub async fn import_scanned_audio(
     blocking(move || {
         let mut imported = 0u32;
         let mut errors = Vec::new();
-        for path in &paths {
-            match crate::android_import::materialize_audio_source(&app_clone, path) {
-                Ok(local) => {
-                    let library = app_clone.state::<LibraryState>();
-                    let result = library.0.lock().map_err(|e| e.to_string()).and_then(|lib| {
-                        lib.add_track_to_playlist(
-                            &playlist_id,
-                            local.to_string_lossy().into_owned(),
-                        )
-                    });
-                    match result {
-                        Ok(_) => imported += 1,
-                        Err(e) if e.contains("already in the playlist") => imported += 1,
-                        Err(e) => errors.push(format!("{path}: {e}")),
+        
+        // Process in batches to avoid memory pressure on mobile
+        for chunk in paths.chunks(IMPORT_BATCH_SIZE) {
+            for path in chunk {
+                match crate::android::import::materialize_audio_source(&app_clone, path) {
+                    Ok(local) => {
+                        let library = app_clone.state::<LibraryState>();
+                        let result = library.0.lock().map_err(|e| e.to_string()).and_then(|lib| {
+                            lib.add_track_to_playlist(
+                                &playlist_id,
+                                local.to_string_lossy().into_owned(),
+                            )
+                        });
+                        match result {
+                            Ok(_) => imported += 1,
+                            Err(e) if e.contains("already in the playlist") => imported += 1,
+                            Err(e) => errors.push(format!("{path}: {e}")),
+                        }
                     }
+                    Err(e) => errors.push(format!("{path}: {e}")),
                 }
-                Err(e) => errors.push(format!("{path}: {e}")),
             }
+            // Yield to allow other operations (GC, UI) between batches
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         Ok(ScanImportResult { imported, errors })
     })
@@ -1961,13 +1978,15 @@ pub struct SyncPlaylistResult {
 ///
 /// Locks the library only in short bursts so the UI can keep loading / switching
 /// playlists while a large sync runs. Metadata extraction for new files happens
-/// with the library unlocked.
+/// with the library unlocked. Processes in batches to avoid OOM on mobile.
 #[tauri::command]
 pub async fn sync_playlist_folder(
     playlist_id: String,
     scanned_paths: Option<Vec<String>>,
     app: tauri::AppHandle,
 ) -> Result<SyncPlaylistResult, String> {
+    const BATCH_SIZE: usize = 50;
+    
     let app_clone = app.clone();
     let playlist_id_clone = playlist_id.clone();
     blocking(move || {
@@ -2005,20 +2024,23 @@ pub async fn sync_playlist_folder(
         let mut errors = Vec::new();
         let mut desired = Vec::with_capacity(raw_paths.len());
         let mut seen = std::collections::HashSet::new();
-        for path in &raw_paths {
-            match crate::android_import::materialize_audio_source(&app_clone, path) {
-                Ok(local) => {
-                    let local_str = local.to_string_lossy().into_owned();
-                    let key = Path::new(local_str.trim())
-                        .canonicalize()
-                        .map(|p| p.to_string_lossy().into_owned())
-                        .unwrap_or_else(|_| local_str.trim().to_string());
-                    if seen.insert(key.clone()) {
-                        // Prefer the canonical path so membership diffs stay stable.
-                        desired.push(key);
+
+        // Materialize in chunks so a huge SAF tree doesn't spike memory all at once.
+        for chunk in raw_paths.chunks(BATCH_SIZE) {
+            for path in chunk {
+                match crate::android::import::materialize_audio_source(&app_clone, path) {
+                    Ok(local) => {
+                        let local_str = local.to_string_lossy().into_owned();
+                        let key = Path::new(local_str.trim())
+                            .canonicalize()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| local_str.trim().to_string());
+                        if seen.insert(key.clone()) {
+                            desired.push(key);
+                        }
                     }
+                    Err(e) => errors.push(format!("{path}: {e}")),
                 }
-                Err(e) => errors.push(format!("{path}: {e}")),
             }
         }
 
@@ -2043,20 +2065,22 @@ pub async fn sync_playlist_folder(
         // Heavy work with the library unlocked so playlist browsing stays live.
         let mut extracted = Vec::new();
         let mut link_ids = Vec::new();
-        for path in &to_add {
-            let key = Path::new(path.trim())
-                .canonicalize()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| path.trim().to_string());
-            if let Some(id) = existing_ids.get(&key).cloned() {
-                link_ids.push(id);
-                continue;
-            }
-            match crate::metadata::extract_track(path) {
-                Ok(track) => extracted.push(track),
-                Err(e) => {
-                    tracing::warn!("Sync skip (metadata): {path}: {e}");
-                    errors.push(format!("{path}: {e}"));
+        for chunk in to_add.chunks(BATCH_SIZE) {
+            for path in chunk {
+                let key = Path::new(path.trim())
+                    .canonicalize()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| path.trim().to_string());
+                if let Some(id) = existing_ids.get(&key).cloned() {
+                    link_ids.push(id);
+                    continue;
+                }
+                match crate::metadata::extract_track(Some(&app_clone), path) {
+                    Ok(track) => extracted.push(track),
+                    Err(e) => {
+                        tracing::warn!("Sync skip (metadata): {path}: {e}");
+                        errors.push(format!("{path}: {e}"));
+                    }
                 }
             }
         }
@@ -2091,4 +2115,32 @@ pub fn dismiss_folder_setup(
     settings.folder_setup_dismissed = true;
     settings.save(&app)?;
     Ok(())
+}
+
+/// Remove all cached audio imports from app-private storage.
+/// Frees up space used by materialized content:// URI copies.
+#[tauri::command]
+pub fn clear_audio_imports(app: tauri::AppHandle) -> Result<u64, String> {
+    let imports_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {e}"))?
+        .join("imports");
+    
+    if !imports_dir.exists() {
+        return Ok(0);
+    }
+    
+    let mut freed = 0u64;
+    for entry in std::fs::read_dir(&imports_dir)
+        .map_err(|e| format!("Failed to read imports dir: {e}"))?
+        .filter_map(Result::ok)
+    {
+        if let Ok(metadata) = entry.metadata() {
+            freed += metadata.len();
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
+    
+    Ok(freed)
 }

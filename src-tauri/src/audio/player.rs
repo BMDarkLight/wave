@@ -437,57 +437,76 @@ impl AudioPlayer {
 
     /// Open the default output device if it is not open yet.
     pub fn ensure_output(&mut self) -> Result<(), AudioError> {
-        if self.output.is_some() {
-            return Ok(());
+        #[cfg(target_os = "android")]
+        {
+            // ExoPlayer replaces cpal/rodio on Android.
+            crate::android::jni::ensure_jni_thread_attached();
+            return crate::android::audio::ensure_initialized()
+                .map_err(AudioError::StreamCreation);
         }
 
-        crate::android_jni::ensure_jni_thread_attached();
-        if !crate::android_jni::android_audio_ready() {
-            return Err(AudioError::StreamCreation(
-                "Android audio context is not ready yet — try playing again in a moment"
-                    .to_string(),
-            ));
+        #[cfg(not(target_os = "android"))]
+        {
+            if self.output.is_some() {
+                return Ok(());
+            }
+
+            crate::android::jni::ensure_jni_thread_attached();
+            if !crate::android::jni::android_audio_ready() {
+                return Err(AudioError::StreamCreation(
+                    "Android audio context is not ready yet — try playing again in a moment"
+                        .to_string(),
+                ));
+            }
+
+            let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                OutputStream::try_default()
+            }));
+
+            let (stream, handle) = match opened {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(error)) => {
+                    return Err(AudioError::StreamCreation(format!(
+                        "Could not open audio output device: {error}"
+                    )));
+                }
+                Err(payload) => {
+                    let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                        s.to_string()
+                    } else if let Some(s) = payload.downcast_ref::<String>() {
+                        s.clone()
+                    } else {
+                        "unknown panic".to_string()
+                    };
+                    tracing::error!("OutputStream::try_default panicked: {msg}");
+                    return Err(AudioError::StreamCreation(format!(
+                        "Audio system crash: {msg}"
+                    )));
+                }
+            };
+
+            self.output = Some(AudioOutput {
+                _stream: SendableStream(stream),
+                handle,
+            });
+            Ok(())
         }
-
-        let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            OutputStream::try_default()
-        }));
-
-        let (stream, handle) = match opened {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(error)) => {
-                return Err(AudioError::StreamCreation(format!(
-                    "Could not open audio output device: {error}"
-                )));
-            }
-            Err(payload) => {
-                let msg = if let Some(s) = payload.downcast_ref::<&str>() {
-                    s.to_string()
-                } else if let Some(s) = payload.downcast_ref::<String>() {
-                    s.clone()
-                } else {
-                    "unknown panic".to_string()
-                };
-                tracing::error!("OutputStream::try_default panicked: {msg}");
-                return Err(AudioError::StreamCreation(format!(
-                    "Audio system crash: {msg}"
-                )));
-            }
-        };
-
-        self.output = Some(AudioOutput {
-            _stream: SendableStream(stream),
-            handle,
-        });
-        Ok(())
     }
 
     /// Create a player that outputs to a specific audio device (by name).
     pub fn new_with_device(device_name: &str) -> Result<Self, AudioError> {
+        #[cfg(target_os = "android")]
+        {
+            let _ = device_name;
+            return Ok(Self::new_deferred());
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
         use cpal::traits::{DeviceTrait, HostTrait};
 
-        crate::android_jni::ensure_jni_thread_attached();
-        if !crate::android_jni::android_audio_ready() {
+        crate::android::jni::ensure_jni_thread_attached();
+        if !crate::android::jni::android_audio_ready() {
             return Err(AudioError::StreamCreation(
                 "Android audio context is not ready yet — try again in a moment".to_string(),
             ));
@@ -521,12 +540,19 @@ impl AudioPlayer {
             soft_fade: Arc::new(Mutex::new(SoftFadeState::default())),
             prefetched_next: None,
         })
+        }
     }
 
     /// List all available audio output device names.
     pub fn list_output_devices() -> Vec<String> {
+        #[cfg(target_os = "android")]
+        {
+            return vec!["ExoPlayer (system default)".to_string()];
+        }
+        #[cfg(not(target_os = "android"))]
+        {
         use cpal::traits::{DeviceTrait, HostTrait};
-        crate::android_jni::ensure_jni_thread_attached();
+        crate::android::jni::ensure_jni_thread_attached();
         let listed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             match cpal::default_host().output_devices() {
                 Ok(devices) => devices
@@ -537,6 +563,7 @@ impl AudioPlayer {
             }
         }));
         listed.unwrap_or_default()
+        }
     }
 
     fn build_source(
@@ -635,6 +662,13 @@ impl AudioPlayer {
     }
 
     pub fn play(&mut self, path: &str) -> Result<(), AudioError> {
+        #[cfg(target_os = "android")]
+        {
+            return self.play_via_exo(path);
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
         self.ensure_output()?;
         let handle = &self
             .output
@@ -700,6 +734,30 @@ impl AudioPlayer {
         self.prefetch_next_into_sink();
 
         Ok(())
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn play_via_exo(&mut self, path: &str) -> Result<(), AudioError> {
+        self.ensure_output()?;
+        crate::android::audio::exo_play_uri(path).map_err(AudioError::Decode)?;
+        let _ = crate::android::audio::exo_set_volume(self.volume);
+
+        let duration = crate::android::audio::exo_get_duration()
+            .ok()
+            .filter(|&ms| ms > 0)
+            .map(|ms| Duration::from_millis(ms as u64));
+
+        self.sink = None;
+        self.prefetched_next = None;
+        self.crossfade_state = None;
+        self.current_path = Some(PathBuf::from(path));
+        self.clock = PlaybackClock {
+            started_at: Some(Instant::now()),
+            elapsed_before_start: Duration::ZERO,
+            duration,
+        };
+        Ok(())
     }
 
     /// Append the upcoming queue track to the active sink (best-effort).
@@ -757,6 +815,19 @@ impl AudioPlayer {
     }
 
     pub fn pause(&mut self) -> Result<(), AudioError> {
+        #[cfg(target_os = "android")]
+        {
+            if self.current_path.is_none() {
+                return Err(AudioError::NoTrackLoaded);
+            }
+            let position = self.position_seconds();
+            crate::android::audio::exo_pause().map_err(AudioError::Decode)?;
+            self.clock.elapsed_before_start = Duration::from_secs_f64(position.max(0.0));
+            self.clock.started_at = None;
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "android"))]
         match &self.sink {
             Some(sink) => {
                 if !sink.is_paused() {
@@ -772,6 +843,17 @@ impl AudioPlayer {
     }
 
     pub fn resume(&mut self) -> Result<(), AudioError> {
+        #[cfg(target_os = "android")]
+        {
+            if self.current_path.is_none() {
+                return Err(AudioError::NoTrackLoaded);
+            }
+            crate::android::audio::exo_play().map_err(AudioError::Decode)?;
+            self.clock.started_at = Some(Instant::now());
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "android"))]
         match &self.sink {
             Some(sink) => {
                 self.set_soft_fade_target(0.0);
@@ -785,6 +867,19 @@ impl AudioPlayer {
     }
 
     pub fn stop(&mut self) -> Result<(), AudioError> {
+        #[cfg(target_os = "android")]
+        {
+            let _ = crate::android::audio::exo_stop();
+            self.sink = None;
+            self.current_path = None;
+            self.prefetched_next = None;
+            self.crossfade_state = None;
+            self.clock = PlaybackClock::stopped();
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
         if self.sink.is_some() && self.is_playing() {
             self.fade_out_blocking();
         }
@@ -797,9 +892,28 @@ impl AudioPlayer {
         self.set_soft_fade_target(1.0);
         self.clock = PlaybackClock::stopped();
         Ok(())
+        }
     }
 
     pub fn seek(&mut self, seconds: f64) -> Result<(), AudioError> {
+        #[cfg(target_os = "android")]
+        {
+            if self.current_path.is_none() {
+                return Err(AudioError::NoTrackLoaded);
+            }
+            let position_ms = (seconds.max(0.0) * 1000.0) as i64;
+            crate::android::audio::exo_seek(position_ms).map_err(AudioError::Decode)?;
+            self.clock.elapsed_before_start = Duration::from_millis(position_ms as u64);
+            if self.is_playing() {
+                self.clock.started_at = Some(Instant::now());
+            } else {
+                self.clock.started_at = None;
+            }
+            return Ok(());
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
         let offset = Duration::from_secs_f64(seconds.max(0.0));
         let path = self
             .current_path
@@ -853,6 +967,7 @@ impl AudioPlayer {
             }
             None => Err(AudioError::NoTrackLoaded),
         }
+        }
     }
 
     pub fn set_volume(&mut self, volume: f32) -> Result<(), AudioError> {
@@ -860,6 +975,11 @@ impl AudioPlayer {
             return Err(AudioError::InvalidVolume);
         }
         self.volume = volume;
+        #[cfg(target_os = "android")]
+        {
+            let _ = crate::android::audio::exo_set_volume(volume);
+        }
+        #[cfg(not(target_os = "android"))]
         if let Some(ref sink) = self.sink {
             sink.set_volume(volume);
         }
@@ -867,6 +987,14 @@ impl AudioPlayer {
     }
 
     pub fn is_playing(&self) -> bool {
+        #[cfg(target_os = "android")]
+        {
+            if self.current_path.is_some() {
+                return crate::android::audio::exo_is_playing().unwrap_or(false);
+            }
+            return false;
+        }
+        #[cfg(not(target_os = "android"))]
         match &self.sink {
             Some(sink) => !sink.is_paused() && sink.len() > 0,
             None => false,
@@ -874,6 +1002,11 @@ impl AudioPlayer {
     }
 
     pub fn is_paused(&self) -> bool {
+        #[cfg(target_os = "android")]
+        {
+            return self.current_path.is_some() && !self.is_playing();
+        }
+        #[cfg(not(target_os = "android"))]
         match &self.sink {
             Some(sink) => sink.is_paused(),
             None => false,
@@ -882,6 +1015,14 @@ impl AudioPlayer {
 
     /// True when the sink has drained (natural end-of-track).
     pub fn sink_exhausted(&self) -> bool {
+        #[cfg(target_os = "android")]
+        {
+            if self.current_path.is_none() {
+                return false;
+            }
+            return crate::android::audio::exo_playback_ended().unwrap_or(false);
+        }
+        #[cfg(not(target_os = "android"))]
         match &self.sink {
             Some(sink) => sink.empty(),
             None => self.current_path.is_some(),
@@ -899,6 +1040,22 @@ impl AudioPlayer {
             return false;
         }
 
+        #[cfg(target_os = "android")]
+        {
+            if crate::android::audio::exo_playback_ended().unwrap_or(false) {
+                return true;
+            }
+            // Fallback: wall-clock past known duration (ExoPlayer duration may
+            // arrive late after prepare).
+            return self.clock.duration.is_some_and(|duration| {
+                let grace = Duration::from_millis(350);
+                self.clock.raw_elapsed() >= duration.saturating_add(grace)
+                    && !self.is_playing()
+            });
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
         // A crossfade source keeps playing the *next* track in the same sink after
         // the outgoing track ends. Wall-clock / pending_next alone are not enough:
         // once the mixer promotes, pending_next flips false while audio is still
@@ -941,6 +1098,7 @@ impl AudioPlayer {
         }
 
         at_duration_end
+        }
     }
 
     /// Back-compat alias used by older call sites.
@@ -953,10 +1111,26 @@ impl AudioPlayer {
     }
 
     pub fn position_seconds(&self) -> f64 {
+        #[cfg(target_os = "android")]
+        {
+            if self.current_path.is_some() {
+                if let Ok(ms) = crate::android::audio::exo_get_position() {
+                    return ms as f64 / 1000.0;
+                }
+            }
+        }
         self.clock.position().as_secs_f64()
     }
 
     pub fn duration_seconds(&self) -> Option<f64> {
+        #[cfg(target_os = "android")]
+        {
+            if let Ok(ms) = crate::android::audio::exo_get_duration() {
+                if ms > 0 {
+                    return Some(ms as f64 / 1000.0);
+                }
+            }
+        }
         self.clock.duration.map(|duration| duration.as_secs_f64())
     }
 
@@ -1087,6 +1261,12 @@ impl AudioPlayer {
 
     /// Query the current default audio output device name (live, every call).
     pub fn current_output_name() -> String {
+        #[cfg(target_os = "android")]
+        {
+            return "ExoPlayer".to_string();
+        }
+        #[cfg(not(target_os = "android"))]
+        {
         use cpal::traits::{DeviceTrait, HostTrait};
         let name = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             cpal::default_host()
@@ -1095,6 +1275,7 @@ impl AudioPlayer {
                 .unwrap_or_else(|| "Unknown".to_string())
         }));
         name.unwrap_or_else(|_| "Unknown".to_string())
+        }
     }
 
     pub fn play_next(&mut self) -> Result<Option<String>, AudioError> {

@@ -85,6 +85,7 @@ export interface Track {
   file_size: number;
   modified_at: number;
   indexed_at: number;
+  is_saf_uri?: boolean;
 }
 
 export interface QueueState {

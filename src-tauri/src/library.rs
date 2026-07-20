@@ -15,7 +15,7 @@ pub(crate) const TRACK_SELECT_COLUMNS: &str = "t.id, t.path, t.name, t.title, t.
                         t.sample_rate, t.channels, t.bit_depth, t.lyrics, t.lyrics_source,
                         t.cover_art_data_url, t.cover_art_mime, t.cover_art_source,
                         t.fingerprint_sha256, t.acoustid_fingerprint, t.musicbrainz_recording_id,
-                        t.file_size, t.modified_at, t.indexed_at";
+                        t.file_size, t.modified_at, t.indexed_at, t.is_saf_uri";
 
 /// Default virtual playlist that mirrors the full track table.
 pub const LIBRARY_PLAYLIST_NAME: &str = "Library";
@@ -63,6 +63,7 @@ pub struct Library {
     connection: Mutex<Connection>,
     default_playlist_id_cache: OnceLock<String>,
     favorites_playlist_id_cache: OnceLock<String>,
+    app_handle: Option<tauri::AppHandle>,
 }
 
 impl Library {
@@ -82,6 +83,7 @@ impl Library {
             connection: Mutex::new(connection),
             default_playlist_id_cache: OnceLock::new(),
             favorites_playlist_id_cache: OnceLock::new(),
+            app_handle: Some(app_handle.clone()),
         };
         library.initialize()?;
         Ok(library)
@@ -100,6 +102,7 @@ impl Library {
             connection: std::sync::Mutex::new(connection),
             default_playlist_id_cache: OnceLock::new(),
             favorites_playlist_id_cache: OnceLock::new(),
+            app_handle: None,
         };
         library.initialize()?;
         Ok(library)
@@ -198,6 +201,7 @@ impl Library {
         ensure_track_column(&connection, "fingerprint_sha256", "TEXT")?;
         ensure_track_column(&connection, "acoustid_fingerprint", "TEXT")?;
         ensure_track_column(&connection, "musicbrainz_recording_id", "TEXT")?;
+        ensure_track_column(&connection, "is_saf_uri", "INTEGER NOT NULL DEFAULT 0")?;
         ensure_playlist_column(&connection, "sync_folder", "TEXT")?;
 
         // Seed the default profile and playlist. We do this once at startup.
@@ -284,7 +288,7 @@ impl Library {
 
         let mut track = match existing {
             Some(track) => track,
-            None => extract_track(&path)?,
+            None => extract_track(self.app_handle.as_ref(), &path)?,
         };
 
         // "Library" is virtual — just ensure the track exists in the
@@ -604,7 +608,7 @@ impl Library {
 
         let now = now_timestamp();
         for path in &audio_paths {
-            match extract_track(path) {
+            match extract_track(self.app_handle.as_ref(), path) {
                 Ok(mut track) => {
                     let track_id = match upsert_track(&tx, &track) {
                         Ok(id) => id,
@@ -1008,7 +1012,7 @@ impl Library {
             if existing_ids.contains_key(&normalize_path_key(path)) {
                 continue;
             }
-            match extract_track(path) {
+            match extract_track(self.app_handle.as_ref(), path) {
                 Ok(track) => extracted.push(track),
                 Err(e) => tracing::warn!("Sync skip (metadata): {path}: {e}"),
             }
@@ -1862,6 +1866,7 @@ pub(crate) fn row_to_track(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         file_size: row.get(24)?,
         modified_at: row.get(25)?,
         indexed_at: row.get(26)?,
+        is_saf_uri: row.get(27)?,
     })
 }
 
@@ -2151,8 +2156,9 @@ fn upsert_track_deduped(conn: &impl Queryable, track: &Track) -> Result<String, 
                         fingerprint_sha256 = COALESCE(?16, fingerprint_sha256),
                         file_size = ?17,
                         modified_at = ?18,
-                        indexed_at = ?19
-                     WHERE id = ?20",
+                        indexed_at = ?19,
+                        is_saf_uri = ?20
+                     WHERE id = ?21",
                     params![
                         track.path,
                         track.name,
@@ -2173,6 +2179,7 @@ fn upsert_track_deduped(conn: &impl Queryable, track: &Track) -> Result<String, 
                         track.file_size,
                         track.modified_at,
                         track.indexed_at,
+                        track.is_saf_uri as i32,
                         existing_id,
                     ],
                 )
@@ -2193,11 +2200,11 @@ fn upsert_track(conn: &impl Queryable, track: &Track) -> Result<String, String> 
             disc_number, format, duration_seconds, sample_rate, channels, bit_depth,
             lyrics, lyrics_source, cover_art_data_url, cover_art_mime, cover_art_source,
             fingerprint_sha256, acoustid_fingerprint, musicbrainz_recording_id, file_size,
-            modified_at, indexed_at
+            modified_at, indexed_at, is_saf_uri
         ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
-            ?21, ?22, ?23, ?24, ?25, ?26, ?27
+            ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28
         )
         ON CONFLICT(path) DO UPDATE SET
             name = excluded.name,
@@ -2224,7 +2231,8 @@ fn upsert_track(conn: &impl Queryable, track: &Track) -> Result<String, String> 
             musicbrainz_recording_id = excluded.musicbrainz_recording_id,
             file_size = excluded.file_size,
             modified_at = excluded.modified_at,
-            indexed_at = excluded.indexed_at",
+            indexed_at = excluded.indexed_at,
+            is_saf_uri = excluded.is_saf_uri",
         params![
             track.id,
             track.path,
@@ -2252,7 +2260,8 @@ fn upsert_track(conn: &impl Queryable, track: &Track) -> Result<String, String> 
             track.musicbrainz_recording_id,
             track.file_size,
             track.modified_at,
-            track.indexed_at
+            track.indexed_at,
+            track.is_saf_uri as i32
         ],
     )
     .map_err(|error| format!("Failed to upsert track: {error}"))?;
@@ -2485,6 +2494,7 @@ mod tests {
             connection: Mutex::new(connection),
             default_playlist_id_cache: OnceLock::new(),
             favorites_playlist_id_cache: OnceLock::new(),
+            app_handle: None,
         };
         library.initialize()?;
         Ok(library)
@@ -2519,6 +2529,7 @@ mod tests {
             file_size: 1,
             modified_at: 1,
             indexed_at: 1,
+            is_saf_uri: false,
         }
     }
 

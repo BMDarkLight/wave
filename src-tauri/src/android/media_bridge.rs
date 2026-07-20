@@ -15,7 +15,7 @@ use jni::objects::{JClass, JObject, JString};
 use jni::{JNIEnv, JavaVM, NativeMethod};
 use tauri::AppHandle;
 
-use crate::android_jni;
+use crate::android::jni as android_jni;
 use crate::commands;
 
 static PENDING: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());

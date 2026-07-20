@@ -274,6 +274,65 @@ jobs:
           print(f"Locked {count} activity(ies) to portrait")
           PY
 
+          # ── Media3 / ExoPlayer deps for WaveExoPlayer ────────────────────
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          candidates = list(Path("src-tauri/gen/android").rglob("build.gradle.kts"))
+          app_gradle = None
+          for path in candidates:
+              text = path.read_text(encoding="utf-8")
+              if "dependencies" in text and ("tauri" in text.lower() or path.parts[-2] == "app"):
+                  # Prefer the app module gradle
+                  if path.parent.name == "app" or "namespace" in text:
+                      app_gradle = path
+                      break
+                  if app_gradle is None:
+                      app_gradle = path
+
+          if app_gradle is None:
+              # Fall back: app/build.gradle.kts
+              fallback = Path("src-tauri/gen/android/app/build.gradle.kts")
+              if fallback.is_file():
+                  app_gradle = fallback
+
+          if app_gradle is None:
+              raise SystemExit("::error::Could not find Android app build.gradle.kts")
+
+          text = app_gradle.read_text(encoding="utf-8")
+          deps = [
+              'implementation("androidx.media3:media3-exoplayer:1.5.1")',
+              'implementation("androidx.media3:media3-common:1.5.1")',
+          ]
+          missing = [d for d in deps if d not in text]
+          if not missing:
+              print(f"Media3 deps already present in {app_gradle}")
+          else:
+              # Insert before the closing of the dependencies block
+              m = re.search(r"dependencies\s*\{", text)
+              if not m:
+                  raise SystemExit(f"::error::No dependencies {{}} in {app_gradle}")
+              # Find matching closing brace for dependencies
+              start = m.end()
+              depth = 1
+              i = start
+              while i < len(text) and depth:
+                  if text[i] == "{":
+                      depth += 1
+                  elif text[i] == "}":
+                      depth -= 1
+                  i += 1
+              insert_at = i - 1
+              injection = "\n    // Wave ExoPlayer (content:// playback)\n"
+              injection += "\n".join(f"    {d}" for d in missing) + "\n"
+              text = text[:insert_at] + injection + text[insert_at:]
+              app_gradle.write_text(text, encoding="utf-8")
+              print(f"Patched Media3 deps into {app_gradle}")
+              for d in missing:
+                  print(f"  + {d}")
+          PY
+
       # Signs release APKs via keystore.properties + Gradle signingConfigs.
       # Secrets: ANDROID_KEY_BASE64, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD
       # Optional: ANDROID_STORE_PASSWORD (defaults to ANDROID_KEY_PASSWORD)

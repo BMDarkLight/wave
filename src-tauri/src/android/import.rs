@@ -128,6 +128,23 @@ fn content_hash(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize())[..16].to_string())
 }
 
+/// Resolve a source for playback.
+///
+/// On Android, `content://` URIs are returned as-is so ExoPlayer can stream
+/// them without copying into app storage. Import/index paths should still use
+/// [`materialize_audio_source`] so metadata extraction has a real file.
+pub fn resolve_playback_source(app: &AppHandle, source: &str) -> Result<PathBuf, String> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return Err("Audio path is empty".to_string());
+    }
+    #[cfg(target_os = "android")]
+    if is_android_content_uri(trimmed) {
+        return Ok(PathBuf::from(trimmed));
+    }
+    materialize_audio_source(app, trimmed)
+}
+
 /// Resolve a picked path/URI into a local filesystem path suitable for Wave.
 ///
 /// Regular files are returned unchanged. Content URIs (and unresolved `file:`

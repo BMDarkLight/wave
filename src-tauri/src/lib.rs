@@ -2,6 +2,7 @@ mod app;
 mod audio;
 pub mod cli;
 mod commands;
+mod cover_art;
 mod dto;
 mod error;
 mod integrations;
@@ -10,12 +11,7 @@ mod metadata;
 mod path_validation;
 pub mod playback_daemon;
 mod os_media;
-mod android_import;
-mod android_jni;
-mod android_folder_picker;
-mod android_saf_scan;
-#[cfg(target_os = "android")]
-mod android_media_bridge;
+mod android;
 
 pub use app::paths as app_paths;
 pub use app::settings as app_settings;
@@ -125,14 +121,26 @@ pub fn run() {
             // especially on Android, where sink-empty detection via frontend
             // polling alone is unreliable.
             #[cfg(target_os = "android")]
-            android_media_bridge::install(app.handle());
+            android::media_bridge::install(app.handle());
+
+            #[cfg(target_os = "android")]
+            {
+                // Best-effort ExoPlayer warm-up once the Activity exists.
+                let exo_app = app_handle.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Err(e) = crate::android::audio::ensure_initialized() {
+                        tracing::warn!("ExoPlayer init deferred: {e}");
+                    }
+                    let _ = exo_app;
+                });
+            }
 
             let tick_app = app_handle.clone();
             std::thread::spawn(move || {
                 loop {
                     std::thread::sleep(std::time::Duration::from_millis(400));
                     #[cfg(target_os = "android")]
-                    android_media_bridge::drain_actions(&tick_app);
+                    android::media_bridge::drain_actions(&tick_app);
                     commands::tick_auto_advance(&tick_app);
                 }
             });
@@ -262,6 +270,7 @@ pub fn run() {
             commands::dismiss_folder_setup,
             commands::pick_media_folder,
             commands::scan_saf_folder,
+            commands::clear_audio_imports,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -14,7 +14,7 @@ use crate::app_paths::{daemon_state_path, library_db_path};
 use crate::audio::player::{AudioPlayer, RepeatMode};
 use crate::library::Library;
 use crate::media_controls::TrackMetadata;
-use crate::metadata::{extract_track, Track};
+use crate::metadata::Track;
 use crate::path_validation::validate_audio_path;
 
 use std::io::{BufRead, BufReader, Write};
@@ -919,7 +919,6 @@ fn track_for_path(library: &Library, path: &str) -> Option<Track> {
         .get_tracks_by_paths(&[path.to_string()])
         .ok()
         .and_then(|v| v.into_iter().next().flatten())
-        .or_else(|| extract_track(path).ok())
 }
 
 fn track_to_metadata(track: &Track) -> TrackMetadata {
