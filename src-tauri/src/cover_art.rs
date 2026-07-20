@@ -31,8 +31,19 @@ pub fn save_cover_art(
         tracing::debug!("Cover art disk cache skipped: {e}");
     }
 
-    let encoded = general_purpose::STANDARD.encode(&data);
-    Ok(format!("data:{mime};base64,{encoded}"))
+    Ok(to_data_url(&mime, &data))
+}
+
+/// Resize + encode a cover as a `data:` URL without touching disk (CLI / no app).
+pub fn encode_cover_data_url(data: Vec<u8>, mime: &str) -> Result<String, String> {
+    let mime = normalize_mime(mime);
+    let data = resize_if_needed(data, &mime)?;
+    Ok(to_data_url(&mime, &data))
+}
+
+fn to_data_url(mime: &str, data: &[u8]) -> String {
+    let encoded = general_purpose::STANDARD.encode(data);
+    format!("data:{mime};base64,{encoded}")
 }
 
 /// Absolute path to a previously cached cover file, if it exists.

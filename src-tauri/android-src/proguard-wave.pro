@@ -14,6 +14,10 @@
     public static void dispatch(java.lang.String);
     private static native void nativeOnMediaAction(java.lang.String);
 }
+-keep class app.bmdarklight.wave.MediaMetadataProbe { *; }
+-keepclassmembers class app.bmdarklight.wave.MediaMetadataProbe {
+    public static java.lang.String probe(android.app.Activity, java.lang.String);
+}
 -keep class app.bmdarklight.wave.audio.WaveExoPlayer { *; }
 -keepclassmembers class app.bmdarklight.wave.audio.WaveExoPlayer {
     public static app.bmdarklight.wave.audio.WaveExoPlayer getOrCreate(android.content.Context);

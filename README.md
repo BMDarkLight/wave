@@ -9,7 +9,7 @@ It focuses on **performance**, **simplicity**, and **offline-first usage**, whil
 
 - Local music library (folder-based)
 - High-performance audio playback
-- Cross-platform (Windows, macOS, Linux)
+- Cross-platform (Windows, macOS, Linux, Android)
 - Portable & lightweight (no heavy runtime)
 - Designed for future EQ & DSP extensions
 - Offline-first (no server required)
@@ -28,9 +28,8 @@ It focuses on **performance**, **simplicity**, and **offline-first usage**, whil
 
 ### Backend / Audio Engine
 - **Rust**
-- **Rodio** – audio playback
-- **Symphonia** – audio decoding
-- **CPAL** – low-level audio backend
+- **Rodio** + **Symphonia** + **CPAL** – desktop playback
+- **Media3 ExoPlayer** (JNI) – Android playback (`content://` / SAF-friendly)
 
 ### Storage
 - **SQLite** – music library, playlists, settings
@@ -47,12 +46,14 @@ Wave/
 │   ├── hooks/                  # Frontend behavior hooks
 │   ├── lib/                    # Shared frontend utilities
 │   └── utils/player.ts         # Typed wrapper around Tauri backend commands
-├── src-tauri/                  # Rust/Tauri desktop backend
-│   ├── Cargo.toml              # Rust crate manifest
-│   ├── tauri.conf.json         # Tauri app configuration
+├── src-tauri/                  # Rust/Tauri backend
+│   ├── Cargo.toml
+│   ├── tauri.conf.json
+│   ├── android-src/            # Java sources copied into gen/android by CI
 │   └── src/
 │       ├── app/                # App paths, settings, and single-instance runtime logic
-│       ├── audio/              # Playback engine and DSP
+│       ├── android/            # Android JNI: ExoPlayer, SAF, media bridge
+│       ├── audio/              # Playback engine (Rodio on desktop; ExoPlayer hooks on Android)
 │       ├── integrations/       # Tray and OS media-control integration
 │       ├── os_media/           # Windows-specific media integration
 │       ├── cli.rs              # Headless/CLI entry surface
@@ -77,6 +78,7 @@ Wave/
 - `src-tauri/src/main.rs` selects between GUI mode, CLI mode, and the playback daemon at startup.
 - `src/utils/player.ts` is the frontend-facing wrapper around the backend command surface.
 - Detailed backend API docs live in `docs/backend/README.md`.
+- Android ExoPlayer + SAF details: [`docs/backend/android.md`](docs/backend/android.md).
 
 ---
 

@@ -481,7 +481,7 @@ pub struct ImportAudioResult {
     pub errors: Vec<String>,
 }
 
-/// Copy picked files/content URIs into app-private storage and return local paths.
+/// Resolve picked files/content URIs for library use (zero-copy on Android).
 #[tauri::command]
 pub async fn import_audio_sources(
     paths: Vec<String>,
@@ -489,7 +489,14 @@ pub async fn import_audio_sources(
 ) -> Result<ImportAudioResult, String> {
     let app = app.clone();
     blocking(move || {
-        let (ok, errors) = crate::android::import::materialize_audio_sources(&app, &paths);
+        let mut ok = Vec::new();
+        let mut errors = Vec::new();
+        for source in &paths {
+            match crate::android::import::resolve_library_source(&app, source) {
+                Ok(path) => ok.push(path),
+                Err(err) => errors.push(format!("{source}: {err}")),
+            }
+        }
         Ok(ImportAudioResult { paths: ok, errors })
     })
     .await
@@ -874,10 +881,10 @@ pub async fn add_track_to_playlist(
 ) -> Result<Track, String> {
     let app = app.clone();
     blocking(move || {
-        let local = crate::android::import::materialize_audio_source(&app, &path)?;
+        let resolved = crate::android::import::resolve_library_source(&app, &path)?;
         let library = app.state::<LibraryState>();
         let lib = library.0.lock().map_err(|e| e.to_string())?;
-        lib.add_track_to_default_playlist(local.to_string_lossy().into_owned())
+        lib.add_track_to_default_playlist(resolved)
     })
     .await
 }
@@ -998,10 +1005,10 @@ pub async fn play_track_from_playlist(
         Ok::<_, String>(raw_track_paths
             .into_iter()
             .map(|path| {
-                crate::android::import::materialize_audio_source(&app_clone, &path)
+                crate::android::import::resolve_playback_source(&app_clone, &path)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|e| {
-                        tracing::warn!("Failed to materialize track {path}: {e}");
+                        tracing::warn!("Failed to resolve track {path}: {e}");
                         path
                     })
             })
@@ -1263,6 +1270,16 @@ pub async fn get_playlist_tracks_by_id(
 }
 
 #[tauri::command]
+pub async fn search_library_tracks(
+    query: String,
+    limit: Option<u32>,
+    library: tauri::State<'_, LibraryState>,
+) -> Result<Vec<Track>, String> {
+    let capped = limit.unwrap_or(50).min(200);
+    lock_library(&library)?.search_tracks_limited(&query, Some(capped))
+}
+
+#[tauri::command]
 pub async fn add_track_to_playlist_by_id(
     id: String,
     path: String,
@@ -1270,10 +1287,10 @@ pub async fn add_track_to_playlist_by_id(
 ) -> Result<Track, String> {
     let app = app.clone();
     blocking(move || {
-        let local = crate::android::import::materialize_audio_source(&app, &path)?;
+        let resolved = crate::android::import::resolve_library_source(&app, &path)?;
         let library = app.state::<LibraryState>();
         let lib = library.0.lock().map_err(|e| e.to_string())?;
-        lib.add_track_to_playlist(&id, local.to_string_lossy().into_owned())
+        lib.add_track_to_playlist(&id, resolved)
     })
     .await
 }
@@ -1455,8 +1472,7 @@ pub async fn play_track_from_specific_playlist(
         return Err(format!("Track not found at index {index}"));
     }
 
-    // Materialize every queue entry so next/prev/auto-advance never hit raw
-    // content:// URIs on Android.
+    // Resolve every queue entry (Android keeps content:// for ExoPlayer).
     let app_clone = app.clone();
     let paths_to_materialize = original_paths.clone();
     let materialized = blocking(move || {
@@ -1464,10 +1480,10 @@ pub async fn play_track_from_specific_playlist(
             paths_to_materialize
                 .into_iter()
                 .map(|path| {
-                    crate::android::import::materialize_audio_source(&app_clone, &path)
+                    crate::android::import::resolve_playback_source(&app_clone, &path)
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_else(|e| {
-                            tracing::warn!("Failed to materialize track {path}: {e}");
+                            tracing::warn!("Failed to resolve track {path}: {e}");
                             path
                         })
                 })
@@ -1914,7 +1930,7 @@ pub fn scan_media_folder(
 }
 
 /// Import audio files found by a scan into a playlist.
-/// Each path is materialized (content:// URIs → local copies) then added.
+/// On Android, `content://` URIs are indexed in place (zero-copy).
 #[derive(serde::Serialize)]
 pub struct ScanImportResult {
     pub imported: u32,
@@ -1923,6 +1939,17 @@ pub struct ScanImportResult {
 
 // Process in batches to avoid OOM/crashes on mobile with large folders
 const IMPORT_BATCH_SIZE: usize = 20;
+
+fn normalize_import_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.starts_with("content://") {
+        return trimmed.to_string();
+    }
+    Path::new(trimmed)
+        .canonicalize()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| trimmed.to_string())
+}
 
 #[tauri::command]
 pub async fn import_scanned_audio(
@@ -1934,18 +1961,14 @@ pub async fn import_scanned_audio(
     blocking(move || {
         let mut imported = 0u32;
         let mut errors = Vec::new();
-        
-        // Process in batches to avoid memory pressure on mobile
+
         for chunk in paths.chunks(IMPORT_BATCH_SIZE) {
             for path in chunk {
-                match crate::android::import::materialize_audio_source(&app_clone, path) {
-                    Ok(local) => {
+                match crate::android::import::resolve_library_source(&app_clone, path) {
+                    Ok(resolved) => {
                         let library = app_clone.state::<LibraryState>();
                         let result = library.0.lock().map_err(|e| e.to_string()).and_then(|lib| {
-                            lib.add_track_to_playlist(
-                                &playlist_id,
-                                local.to_string_lossy().into_owned(),
-                            )
+                            lib.add_track_to_playlist(&playlist_id, resolved)
                         });
                         match result {
                             Ok(_) => imported += 1,
@@ -1956,7 +1979,6 @@ pub async fn import_scanned_audio(
                     Err(e) => errors.push(format!("{path}: {e}")),
                 }
             }
-            // Yield to allow other operations (GC, UI) between batches
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         Ok(ScanImportResult { imported, errors })
@@ -2025,16 +2047,12 @@ pub async fn sync_playlist_folder(
         let mut desired = Vec::with_capacity(raw_paths.len());
         let mut seen = std::collections::HashSet::new();
 
-        // Materialize in chunks so a huge SAF tree doesn't spike memory all at once.
+        // Resolve in chunks (Android: keep content://; desktop: real paths).
         for chunk in raw_paths.chunks(BATCH_SIZE) {
             for path in chunk {
-                match crate::android::import::materialize_audio_source(&app_clone, path) {
-                    Ok(local) => {
-                        let local_str = local.to_string_lossy().into_owned();
-                        let key = Path::new(local_str.trim())
-                            .canonicalize()
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .unwrap_or_else(|_| local_str.trim().to_string());
+                match crate::android::import::resolve_library_source(&app_clone, path) {
+                    Ok(resolved) => {
+                        let key = normalize_import_path(&resolved);
                         if seen.insert(key.clone()) {
                             desired.push(key);
                         }
@@ -2067,10 +2085,7 @@ pub async fn sync_playlist_folder(
         let mut link_ids = Vec::new();
         for chunk in to_add.chunks(BATCH_SIZE) {
             for path in chunk {
-                let key = Path::new(path.trim())
-                    .canonicalize()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| path.trim().to_string());
+                let key = normalize_import_path(path);
                 if let Some(id) = existing_ids.get(&key).cloned() {
                     link_ids.push(id);
                     continue;

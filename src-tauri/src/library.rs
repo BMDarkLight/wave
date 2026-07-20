@@ -1604,14 +1604,35 @@ impl Library {
 
     /// Search tracks by a query string matching title, artist, or album.
     pub fn search_tracks(&self, query: &str) -> Result<Vec<Track>, String> {
-        let pattern = format!("%{}%", query);
+        self.search_tracks_limited(query, None)
+    }
+
+    /// Search tracks with an optional result limit.
+    pub fn search_tracks_limited(
+        &self,
+        query: &str,
+        limit: Option<u32>,
+    ) -> Result<Vec<Track>, String> {
+        let pattern = format!("%{}%", query.trim());
         let connection = self.lock_connection()?;
-        let mut stmt = connection
-            .prepare(&format!(
+        let sql = if let Some(limit) = limit {
+            format!(
                 "SELECT {TRACK_SELECT_COLUMNS} FROM tracks t
                  WHERE t.title LIKE ?1 OR t.artist LIKE ?1 OR t.album LIKE ?1
+                    OR t.name LIKE ?1
+                 ORDER BY t.artist, t.album, t.track_number
+                 LIMIT {limit}"
+            )
+        } else {
+            format!(
+                "SELECT {TRACK_SELECT_COLUMNS} FROM tracks t
+                 WHERE t.title LIKE ?1 OR t.artist LIKE ?1 OR t.album LIKE ?1
+                    OR t.name LIKE ?1
                  ORDER BY t.artist, t.album, t.track_number"
-            ))
+            )
+        };
+        let mut stmt = connection
+            .prepare(&sql)
             .map_err(|e| format!("Failed to prepare search query: {e}"))?;
         let rows = stmt
             .query_map(params![pattern], row_to_track)
@@ -2468,6 +2489,9 @@ fn compact_playlist_positions(
 /// Stable path key for membership diffs (resolves symlinks when possible).
 fn normalize_path_key(path: &str) -> String {
     let trimmed = path.trim();
+    if trimmed.starts_with("content://") {
+        return trimmed.to_string();
+    }
     Path::new(trimmed)
         .canonicalize()
         .map(|p| p.to_string_lossy().into_owned())

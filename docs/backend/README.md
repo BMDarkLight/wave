@@ -33,7 +33,7 @@ Wave separates three layers:
 |-------|---------|---------|
 | **Library playlist** | SQLite (`wave-library.sqlite`) | Persisted track list for the default "All Local Files" playlist |
 | **Playback queue** | In-memory (Rust) | Order used by `play_next`, `play_previous`, shuffle, and repeat |
-| **Audio engine** | In-memory (Rodio + Symphonia) | Actual decode/play/pause/seek/volume |
+| **Audio engine** | Platform-specific | Desktop: Rodio + Symphonia + CPAL. Android: Media3 ExoPlayer (JNI) for decode/output; Rust still owns the queue |
 
 Important behaviors:
 
@@ -41,6 +41,7 @@ Important behaviors:
 - **`get_queue`** returns the in-memory playback queue (file paths only).
 - **`play_track_from_playlist`** loads the library playlist into the playback queue, sets the current index, and starts playback. Call this (not `play_track`) when the user picks a song from the library UI so next/previous/shuffle/repeat work correctly.
 - **`play_track`** plays a single file by path without updating the queue.
+- On Android, `content://` URIs play directly through ExoPlayer (no copy required for playback). See [Android playback](./android.md).
 
 ## Documentation index
 
@@ -50,6 +51,7 @@ Important behaviors:
 | [Types](./types.md) | Shared request/response shapes (TypeScript-friendly) |
 | [Events](./events.md) | OS media control events emitted by the backend |
 | [DSP](./dsp.md) | Digital Signal Processing (equalizer, biquad filters) |
+| [Android playback](./android.md) | ExoPlayer backend, SAF import, media session bridge |
 
 ## Command summary
 

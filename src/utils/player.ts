@@ -407,8 +407,22 @@ export const getPlaylistTracksById = (id: string): Promise<Track[]> => {
   return safeInvoke<Track[]>("get_playlist_tracks_by_id", { id });
 };
 
+export const searchLibraryTracks = (
+  query: string,
+  limit?: number,
+): Promise<Track[]> => {
+  return safeInvoke<Track[]>("search_library_tracks", {
+    query,
+    limit: limit ?? null,
+  });
+};
+
 export const addTrackToPlaylistById = (id: string, path: string): Promise<Track> => {
   return safeInvoke<Track>("add_track_to_playlist_by_id", { id, path });
+};
+
+export const clearAudioImports = (): Promise<number> => {
+  return safeInvoke<number>("clear_audio_imports");
 };
 
 export const removeTrackFromPlaylistById = (id: string, path: string): Promise<void> => {

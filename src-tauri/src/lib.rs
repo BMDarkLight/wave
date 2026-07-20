@@ -224,6 +224,7 @@ pub fn run() {
             commands::delete_playlist,
             commands::rename_playlist,
             commands::get_playlist_tracks_by_id,
+            commands::search_library_tracks,
             commands::add_track_to_playlist_by_id,
             commands::remove_track_from_playlist_by_id,
             commands::remove_track_from_library,

@@ -131,8 +131,7 @@ fn content_hash(path: &Path) -> Result<String, String> {
 /// Resolve a source for playback.
 ///
 /// On Android, `content://` URIs are returned as-is so ExoPlayer can stream
-/// them without copying into app storage. Import/index paths should still use
-/// [`materialize_audio_source`] so metadata extraction has a real file.
+/// them without copying into app storage.
 pub fn resolve_playback_source(app: &AppHandle, source: &str) -> Result<PathBuf, String> {
     let trimmed = source.trim();
     if trimmed.is_empty() {
@@ -145,10 +144,30 @@ pub fn resolve_playback_source(app: &AppHandle, source: &str) -> Result<PathBuf,
     materialize_audio_source(app, trimmed)
 }
 
+/// Resolve a source for library indexing (import / sync / add-to-playlist).
+///
+/// On Android, `content://` URIs are stored as-is (zero-copy). Desktop and
+/// plain files still resolve to real filesystem paths.
+pub fn resolve_library_source(app: &AppHandle, source: &str) -> Result<String, String> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return Err("Audio path is empty".to_string());
+    }
+    #[cfg(target_os = "android")]
+    if is_android_content_uri(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+    Ok(materialize_audio_source(app, trimmed)?
+        .to_string_lossy()
+        .into_owned())
+}
+
 /// Resolve a picked path/URI into a local filesystem path suitable for Wave.
 ///
 /// Regular files are returned unchanged. Content URIs (and unresolved `file:`
-/// URLs) are copied into the app imports directory.
+/// URLs) are copied into the app imports directory. Prefer
+/// [`resolve_library_source`] for indexing and [`resolve_playback_source`] for
+/// playback so Android stays zero-copy.
 pub fn materialize_audio_source(app: &AppHandle, source: &str) -> Result<PathBuf, String> {
     let trimmed = source.trim();
     if trimmed.is_empty() {

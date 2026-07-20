@@ -12,7 +12,7 @@ use symphonia::core::meta::{MetadataOptions, StandardTagKey, StandardVisualKey, 
 use symphonia::core::probe::Hint;
 use uuid::Uuid;
 
-const MAX_EMBEDDED_ART_BYTES: usize = 100 * 1024;
+const MAX_EMBEDDED_ART_BYTES: usize = 8 * 1024 * 1024;
 const ONLINE_LOOKUP_TIMEOUT_SECONDS: u64 = 5;
 const USER_AGENT: &str = "Wave/0.1.0 (local metadata enrichment)";
 
@@ -110,6 +110,10 @@ pub fn is_supported_audio_file(path: &Path) -> bool {
 }
 
 pub fn extract_track(app: Option<&tauri::AppHandle>, path: &str) -> Result<Track, String> {
+    if path.starts_with("content://") {
+        return extract_track_content_uri(app, path);
+    }
+
     let path_buf = PathBuf::from(path);
     if !path_buf.is_file() {
         return Err("Audio file does not exist".to_string());
@@ -227,23 +231,27 @@ pub fn extract_track(app: Option<&tauri::AppHandle>, path: &str) -> Result<Track
     };
 
     if let Some(art) = cover_art {
-        if let Some(app_handle) = app {
-            let mime = art.mime.clone();
-            match crate::cover_art::save_cover_art(
+        let mime = art.mime.clone();
+        let source = art.source.clone();
+        let saved = if let Some(app_handle) = app {
+            crate::cover_art::save_cover_art(
                 app_handle,
                 &track_id,
                 crate::cover_art::ExtractedCoverArt {
                     data: art.data,
                     mime: mime.clone(),
                 },
-            ) {
-                Ok(data_url) => {
-                    track.cover_art_data_url = Some(data_url);
-                    track.cover_art_mime = Some(mime);
-                    track.cover_art_source = Some(art.source);
-                }
-                Err(e) => tracing::debug!("Cover art save skipped: {e}"),
+            )
+        } else {
+            crate::cover_art::encode_cover_data_url(art.data, &mime)
+        };
+        match saved {
+            Ok(data_url) => {
+                track.cover_art_data_url = Some(data_url);
+                track.cover_art_mime = Some(mime);
+                track.cover_art_source = Some(source);
             }
+            Err(e) => tracing::warn!("Cover art save skipped: {e}"),
         }
     }
 
@@ -252,6 +260,99 @@ pub fn extract_track(app: Option<&tauri::AppHandle>, path: &str) -> Result<Track
             enrich_cover_art_online(app_handle, &mut track);
         }
     }
+    Ok(track)
+}
+
+fn extract_track_content_uri(app: Option<&tauri::AppHandle>, path: &str) -> Result<Track, String> {
+    let Some(app_handle) = app else {
+        return Err("content:// metadata requires an app handle".into());
+    };
+
+    let probed = crate::android::metadata::probe_content_uri(app_handle, path)?;
+    let indexed_at = timestamp(SystemTime::now());
+    let track_id = Uuid::new_v4().to_string();
+
+    let display = probed
+        .display_name
+        .clone()
+        .unwrap_or_else(|| {
+            path.rsplit(['/', ':'])
+                .next()
+                .unwrap_or("Unknown")
+                .to_string()
+        });
+    let stem = display
+        .rsplit_once('.')
+        .map(|(s, _)| s.to_string())
+        .unwrap_or_else(|| display.clone());
+    let format = probed
+        .mime
+        .as_deref()
+        .and_then(|mime| mime.rsplit('/').next())
+        .map(|s| s.to_uppercase())
+        .or_else(|| {
+            display
+                .rsplit_once('.')
+                .map(|(_, ext)| ext.to_uppercase())
+        })
+        .unwrap_or_else(|| "AUDIO".to_string());
+
+    let mut track = Track {
+        id: track_id.clone(),
+        path: path.to_string(),
+        name: display.clone(),
+        title: probed.title.unwrap_or(stem),
+        artist: probed.artist.unwrap_or_else(|| "Unknown Artist".into()),
+        album: probed.album.unwrap_or_else(|| "Unknown Album".into()),
+        album_artist: probed.album_artist,
+        genre: probed.genre,
+        year: probed.year,
+        track_number: probed.track_number,
+        disc_number: None,
+        format,
+        duration_seconds: probed
+            .duration_ms
+            .filter(|&ms| ms > 0)
+            .map(|ms| ms as f64 / 1000.0),
+        sample_rate: None,
+        channels: None,
+        bit_depth: None,
+        lyrics: None,
+        lyrics_source: None,
+        cover_art_data_url: None,
+        cover_art_mime: None,
+        cover_art_source: None,
+        fingerprint_sha256: None,
+        acoustid_fingerprint: None,
+        musicbrainz_recording_id: None,
+        file_size: probed.file_size,
+        modified_at: indexed_at,
+        indexed_at,
+        is_saf_uri: true,
+    };
+
+    if let Some(cover_bytes) = probed.cover_jpeg {
+        match crate::cover_art::save_cover_art(
+            app_handle,
+            &track_id,
+            crate::cover_art::ExtractedCoverArt {
+                data: cover_bytes,
+                mime: "image/jpeg".to_string(),
+            },
+        ) {
+            Ok(data_url) => {
+                track.cover_art_data_url = Some(data_url);
+                track.cover_art_mime = Some("image/jpeg".to_string());
+                track.cover_art_source = Some("embedded".to_string());
+            }
+            Err(e) => tracing::warn!("Cover art save skipped (URI): {e}"),
+        }
+    }
+
+    if track.cover_art_data_url.is_none() {
+        enrich_cover_art_online(app_handle, &mut track);
+    }
+
     Ok(track)
 }
 
@@ -300,7 +401,16 @@ fn extract_cover_art(visuals: &[Visual]) -> Option<CoverArt> {
         .find(|visual| matches!(visual.usage, Some(StandardVisualKey::FrontCover)))
         .or_else(|| visuals.first())?;
 
-    if visual.data.is_empty() || visual.data.len() > MAX_EMBEDDED_ART_BYTES {
+    if visual.data.is_empty() {
+        return None;
+    }
+    // Cap absurdly large APIC/frames; normal album art is resized in cover_art::save_cover_art.
+    if visual.data.len() > MAX_EMBEDDED_ART_BYTES {
+        tracing::warn!(
+            "Skipping embedded cover art ({} bytes > {} limit)",
+            visual.data.len(),
+            MAX_EMBEDDED_ART_BYTES
+        );
         return None;
     }
 

@@ -34,10 +34,13 @@ import {
   BiUser,
   BiSync,
   BiMinus,
+  BiImage,
+  BiAlignLeft,
 } from "react-icons/bi";
 import {
   addTrackToPlaylistById,
   addToQueue,
+  clearAudioImports,
   clearPlaylistById,
   clearQueue,
   createPlaylist,
@@ -70,6 +73,7 @@ import {
   renamePlaylist,
   resumeTrack,
   savePlaylistDialog,
+  searchLibraryTracks,
   seekTrack,
   selectAudioFile,
   selectAudioFolder,
@@ -254,6 +258,17 @@ function App() {
 
   // Clear-playlist confirmation modal
   const [showClearConfirm, setShowClearConfirm] = useState(false);
+
+  // Android custom-playlist: add from library search
+  const [showAddFromLibrary, setShowAddFromLibrary] = useState(false);
+  const [librarySearchQuery, setLibrarySearchQuery] = useState("");
+  const [librarySearchResults, setLibrarySearchResults] = useState<Track[]>([]);
+  const [librarySearchSelected, setLibrarySearchSelected] = useState<
+    Set<string>
+  >(new Set());
+  const [librarySearchLoading, setLibrarySearchLoading] = useState(false);
+  const [librarySearchAdding, setLibrarySearchAdding] = useState(false);
+  const librarySearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Delete-playlist confirmation modal
   const [deletePlaylistConfirm, setDeletePlaylistConfirm] = useState<{
@@ -599,6 +614,9 @@ function App() {
     setFolderScanIsSync(false);
     if (failed > 0) {
       setError(`Folder sync finished with ${failed} issue(s).`);
+    } else if (isAndroidDevice && synced.length > 0) {
+      // Drop legacy materialized copies after a successful URI re-sync.
+      clearAudioImports().catch(() => {});
     }
   };
 
@@ -1078,6 +1096,115 @@ function App() {
     }
   };
 
+  const openAddFromLibrary = () => {
+    setLibrarySearchQuery("");
+    setLibrarySearchResults([]);
+    setLibrarySearchSelected(new Set());
+    setShowAddFromLibrary(true);
+  };
+
+  const closeAddFromLibrary = () => {
+    setShowAddFromLibrary(false);
+    setLibrarySearchQuery("");
+    setLibrarySearchResults([]);
+    setLibrarySearchSelected(new Set());
+    setLibrarySearchLoading(false);
+    setLibrarySearchAdding(false);
+    if (librarySearchTimer.current) {
+      clearTimeout(librarySearchTimer.current);
+      librarySearchTimer.current = null;
+    }
+  };
+
+  useEffect(() => {
+    if (!showAddFromLibrary) return;
+    if (librarySearchTimer.current) clearTimeout(librarySearchTimer.current);
+    librarySearchTimer.current = setTimeout(() => {
+      const q = librarySearchQuery;
+      setLibrarySearchLoading(true);
+      searchLibraryTracks(q, 80)
+        .then((tracks) => {
+          setLibrarySearchResults(tracks);
+          setLibrarySearchSelected((prev) => {
+            const next = new Set<string>();
+            for (const path of prev) {
+              if (tracks.some((t) => t.path === path)) next.add(path);
+            }
+            return next;
+          });
+        })
+        .catch(() => setLibrarySearchResults([]))
+        .finally(() => setLibrarySearchLoading(false));
+    }, 200);
+    return () => {
+      if (librarySearchTimer.current) {
+        clearTimeout(librarySearchTimer.current);
+        librarySearchTimer.current = null;
+      }
+    };
+  }, [showAddFromLibrary, librarySearchQuery]);
+
+  const toggleLibrarySearchSelect = (path: string) => {
+    setLibrarySearchSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const handleAddSelectedFromLibrary = async () => {
+    const playlistId = selectedPlaylistId ?? getDefaultPlaylistId(playlists);
+    if (!playlistId || librarySearchSelected.size === 0) return;
+    setLibrarySearchAdding(true);
+    setError(null);
+    let failCount = 0;
+    for (const path of librarySearchSelected) {
+      try {
+        await addTrackToPlaylistById(playlistId, path);
+      } catch (err) {
+        failCount++;
+        console.error("Failed to add library track:", path, err);
+      }
+    }
+    setLibrarySearchAdding(false);
+    if (failCount > 0) setError(`Failed to add ${failCount} track(s).`);
+    closeAddFromLibrary();
+    await loadPlaylistTracks(playlistId);
+    await loadPlaylists();
+  };
+
+  const handlePickFileFromLibraryModal = async () => {
+    try {
+      setError(null);
+      const paths = await selectAudioFile(true);
+      if (!paths?.length) return;
+      const playlistId = selectedPlaylistId ?? getDefaultPlaylistId(playlists);
+      if (!playlistId) {
+        setError("No playlist selected.");
+        return;
+      }
+      setLibrarySearchAdding(true);
+      let failCount = 0;
+      for (const path of paths) {
+        try {
+          await addTrackToPlaylistById(playlistId, path);
+        } catch (err) {
+          failCount++;
+          console.error("Failed to add picked track:", path, err);
+        }
+      }
+      setLibrarySearchAdding(false);
+      if (failCount > 0) setError(`Failed to add ${failCount} track(s).`);
+      closeAddFromLibrary();
+      await loadPlaylistTracks(playlistId);
+      await loadPlaylists();
+    } catch (err) {
+      setLibrarySearchAdding(false);
+      setError(formatInvokeError(err, "Failed to pick audio file"));
+    }
+  };
+
   const handleAddFolder = async () => {
     try {
       setError(null);
@@ -1176,6 +1303,8 @@ function App() {
         const detail =
           sampleErrors.length > 0 ? ` — ${sampleErrors.join(" | ")}` : "";
         setError(`Imported with ${failCount} error(s)${detail}`);
+      } else {
+        clearAudioImports().catch(() => {});
       }
       setActivePlaylistId(playlistId);
       await loadPlaylistTracks(playlistId);
@@ -2035,6 +2164,7 @@ function App() {
     showEqPanel,
     playlistDialog,
     showClearConfirm,
+    showAddFromLibrary,
     deletePlaylistConfirm,
     addToPlaylistTrack,
     mobileNavOpen,
@@ -2049,6 +2179,7 @@ function App() {
     showEqPanel,
     playlistDialog,
     showClearConfirm,
+    showAddFromLibrary,
     deletePlaylistConfirm,
     addToPlaylistTrack,
     mobileNavOpen,
@@ -2066,6 +2197,7 @@ function App() {
       s.showEqPanel ||
       s.playlistDialog ||
       s.showClearConfirm ||
+      s.showAddFromLibrary ||
       s.deletePlaylistConfirm ||
       s.addToPlaylistTrack ||
       s.mobileNavOpen ||
@@ -2101,6 +2233,10 @@ function App() {
     }
     if (s.showClearConfirm) {
       setShowClearConfirm(false);
+      return true;
+    }
+    if (s.showAddFromLibrary) {
+      closeAddFromLibrary();
       return true;
     }
     if (s.deletePlaylistConfirm) {
@@ -2469,15 +2605,15 @@ function App() {
                     className="btn-secondary"
                     onClick={async () => {
                       if (androidHost) {
-                        // On Android, Library playlist uses folder picker for media scanning,
-                        // other playlists use multiple file picker
+                        // Library playlist: scan media folders.
+                        // Custom playlists: searchable library picker.
                         const isLibrary = isLibraryPlaylistName(
                           selectedPlaylist?.name,
                         );
                         if (isLibrary) {
                           void handleAddFolderAndroid();
                         } else {
-                          void handleAddTrack(true);
+                          openAddFromLibrary();
                         }
                         return;
                       }
@@ -2497,7 +2633,7 @@ function App() {
                       androidHost
                         ? isLibraryPlaylistName(selectedPlaylist?.name)
                           ? "Scan media folder"
-                          : "Add audio files"
+                          : "Add from library"
                         : "Add tracks"
                     }
                   >
@@ -2551,11 +2687,14 @@ function App() {
                   selectedPlaylist?.name !== "Favorites" && (
                     <button
                       className="btn-primary"
-                      onClick={() => handleAddTrack(false)}
+                      onClick={() => {
+                        if (androidHost) openAddFromLibrary();
+                        else void handleAddTrack(false);
+                      }}
                       disabled={isAddingTracks}
                       type="button"
                     >
-                      Add your first track
+                      {androidHost ? "Add from library" : "Add your first track"}
                     </button>
                   )}
               </div>
@@ -2666,10 +2805,29 @@ function App() {
                           >
                             {track.artist}
                           </button>
-                          {track.lyrics ? " · lyrics" : ""}
-                          {track.cover_art_source === "cover-art-archive"
-                            ? " · online cover"
-                            : ""}
+                          {(track.lyrics ||
+                            track.cover_art_source === "cover-art-archive") && (
+                            <span className="track-meta-icons">
+                              {track.lyrics ? (
+                                <span
+                                  className="track-meta-icon-wrap"
+                                  title="Has lyrics"
+                                  aria-label="Has lyrics"
+                                >
+                                  <BiAlignLeft className="track-meta-icon" aria-hidden />
+                                </span>
+                              ) : null}
+                              {track.cover_art_source === "cover-art-archive" ? (
+                                <span
+                                  className="track-meta-icon-wrap"
+                                  title="Online cover"
+                                  aria-label="Online cover"
+                                >
+                                  <BiImage className="track-meta-icon" aria-hidden />
+                                </span>
+                              ) : null}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -3482,6 +3640,121 @@ function App() {
         </div>
       )}
 
+      {showAddFromLibrary && (
+        <div className="modal-backdrop" onClick={closeAddFromLibrary}>
+          <div
+            className="modal-dialog library-picker-dialog"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") closeAddFromLibrary();
+            }}
+          >
+            <div className="modal-header">
+              <h2>Add from library</h2>
+              <button
+                className="modal-close-btn"
+                onClick={closeAddFromLibrary}
+                type="button"
+                aria-label="Close"
+              >
+                <BiX />
+              </button>
+            </div>
+            <label className="modal-label" htmlFor="library-search-input">
+              Search
+            </label>
+            <input
+              id="library-search-input"
+              className="modal-input"
+              type="search"
+              autoFocus
+              placeholder="Title, artist, or album"
+              value={librarySearchQuery}
+              onChange={(event) => setLibrarySearchQuery(event.target.value)}
+              disabled={librarySearchAdding}
+            />
+            <div
+              className="library-picker-results"
+              role="listbox"
+              aria-multiselectable="true"
+            >
+              {librarySearchLoading ? (
+                <p className="library-picker-empty">Searching…</p>
+              ) : librarySearchResults.length === 0 ? (
+                <p className="library-picker-empty">
+                  {librarySearchQuery.trim()
+                    ? "No matching tracks."
+                    : "Scan a media folder into Library first, or pick a file below."}
+                </p>
+              ) : (
+                librarySearchResults.map((track) => {
+                  const selected = librarySearchSelected.has(track.path);
+                  return (
+                    <button
+                      key={track.path}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      className={`library-picker-row${selected ? " selected" : ""}`}
+                      onClick={() => toggleLibrarySearchSelect(track.path)}
+                      disabled={librarySearchAdding}
+                    >
+                      <span className="library-picker-check" aria-hidden>
+                        {selected ? "✓" : ""}
+                      </span>
+                      <span className="library-picker-meta">
+                        <span className="library-picker-title">
+                          {track.title || track.name}
+                        </span>
+                        <span className="library-picker-sub">
+                          {[track.artist, track.album].filter(Boolean).join(" · ")}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+            <div className="modal-actions library-picker-actions">
+              <button
+                className="btn-ghost"
+                type="button"
+                onClick={() => void handlePickFileFromLibraryModal()}
+                disabled={librarySearchAdding}
+              >
+                Pick a file…
+              </button>
+              <div className="library-picker-actions-end">
+                <button
+                  className="btn-ghost"
+                  type="button"
+                  onClick={closeAddFromLibrary}
+                  disabled={librarySearchAdding}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn-primary"
+                  type="button"
+                  onClick={() => void handleAddSelectedFromLibrary()}
+                  disabled={
+                    librarySearchAdding || librarySearchSelected.size === 0
+                  }
+                >
+                  {librarySearchAdding
+                    ? "Adding…"
+                    : `Add${
+                        librarySearchSelected.size > 0
+                          ? ` (${librarySearchSelected.size})`
+                          : ""
+                      }`}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {deletePlaylistConfirm && (
         <div
           className="modal-backdrop"
@@ -3903,8 +4176,8 @@ function App() {
           <div className="modal-dialog" onClick={(e) => e.stopPropagation()}>
             <h2>Welcome to Wave</h2>
             <p className="modal-desc">
-              Select a folder containing your music to get started. Wave will
-              scan it and import all supported audio files.
+              Select a folder containing your music to get started. Wave indexes
+              the files in place (no copies) and lists them in your Library.
             </p>
             <div className="modal-actions">
               <button
